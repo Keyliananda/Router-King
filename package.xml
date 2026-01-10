@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package format="1">
+  <name>RouterKing</name>
+  <version>0.1.0</version>
+  <description>FreeCAD workbench with an integrated GRBL sender and CNC/Laser workflow.</description>
+  <maintainer>Kilian Volz</maintainer>
+  <license>MIT</license>
+  <url type="homepage">https://github.com/Keyliananda/Router-King</url>
+  <content>
+    <workbench>RouterKing</workbench>
+  </content>
+  <depends>
+    <python>3</python>
+  </depends>
+</package>
