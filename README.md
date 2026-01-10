@@ -26,7 +26,13 @@ This builds a self-contained `RouterKing.app` that includes FreeCAD and the work
 ./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg --unquarantine
 ```
 
-The app will be created in `dist/RouterKing.app`.
+The app will be created in `dist/RouterKing.app` and the DMG in `dist/RouterKing.dmg`.
+
+To set a custom DMG name:
+
+```bash
+./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg --dmg-out dist/RouterKing-1.0.dmg --unquarantine
+```
 
 ## Dependencies
 - FreeCAD 0.21+ (PySide2)

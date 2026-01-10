@@ -4,10 +4,11 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  ./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg [--out dist] [--name RouterKing.app] [--unquarantine]
-  ./scripts/build_app.sh --url https://example.com/FreeCAD.dmg [--out dist] [--name RouterKing.app] [--unquarantine]
+  ./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg [--out dist] [--name RouterKing.app] [--dmg-out dist/RouterKing.dmg] [--unquarantine]
+  ./scripts/build_app.sh --url https://example.com/FreeCAD.dmg [--out dist] [--name RouterKing.app] [--dmg-out dist/RouterKing.dmg] [--unquarantine]
 
-Builds a macOS RouterKing.app by bundling FreeCAD with the RouterKing workbench.
+Builds a macOS RouterKing.app by bundling FreeCAD with the RouterKing workbench
+and produces a distributable DMG.
 USAGE
 }
 
@@ -27,6 +28,7 @@ dmg=""
 url=""
 out_dir="$repo_dir/dist"
 app_name="RouterKing.app"
+dmg_out=""
 unquarantine=0
 
 while [[ $# -gt 0 ]]; do
@@ -45,6 +47,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --name)
       app_name="$2"
+      shift 2
+      ;;
+    --dmg-out)
+      dmg_out="$2"
       shift 2
       ;;
     --unquarantine)
@@ -118,4 +124,12 @@ if [[ $unquarantine -eq 1 ]]; then
   xattr -dr com.apple.quarantine "$dest_app" || true
 fi
 
+app_base="${app_name%.app}"
+if [[ -z "$dmg_out" ]]; then
+  dmg_out="$out_dir/${app_base}.dmg"
+fi
+mkdir -p "$(dirname "$dmg_out")"
+hdiutil create -volname "$app_base" -srcfolder "$dest_app" -ov -format UDZO "$dmg_out"
+
 echo "Built: $dest_app"
+echo "DMG: $dmg_out"
