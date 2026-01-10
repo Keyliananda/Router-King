@@ -20,6 +20,7 @@ Thumbs.db
 
 # Logs
 *.log
+*.dmg
 
 # Editor
 .vscode/

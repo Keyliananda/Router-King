@@ -10,6 +10,15 @@ RouterKing is designed to stay independent from FreeCAD core. Keep FreeCAD upstr
    ```
 3. Launch FreeCAD and enable the RouterKing workbench.
 
+## Option A2: All-in-one macOS app
+Build a self-contained `RouterKing.app` that bundles FreeCAD and the workbench:
+
+```bash
+./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg --unquarantine
+```
+
+The app will be created in `dist/RouterKing.app`.
+
 ## Option B: FreeCAD from GitHub (advanced)
 1. Clone FreeCAD upstream somewhere outside this repo:
    ```bash

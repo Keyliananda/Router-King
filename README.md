@@ -19,6 +19,15 @@ Run from the repo root:
 
 Then start FreeCAD and enable the `RouterKing` workbench.
 
+## All-in-one app (macOS)
+This builds a self-contained `RouterKing.app` that includes FreeCAD and the workbench.
+
+```bash
+./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg --unquarantine
+```
+
+The app will be created in `dist/RouterKing.app`.
+
 ## Dependencies
 - FreeCAD 0.21+ (PySide2)
 - pyserial 3.5 (vendored) for GRBL communication
