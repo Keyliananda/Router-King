@@ -4,7 +4,10 @@ import os
 
 import FreeCADGui as Gui
 
-from . import commands
+try:
+    from . import commands
+except ImportError:
+    import commands
 
 
 class RouterKingWorkbench(Gui.Workbench):

@@ -20,7 +20,10 @@ class CmdShowPanel:
         }
 
     def Activated(self):
-        from .ui.main_dock import show_panel
+        try:
+            from .ui.main_dock import show_panel
+        except ImportError:
+            from ui.main_dock import show_panel
 
         show_panel()
 
