@@ -38,6 +38,9 @@ Note: The bundle is ad-hoc signed. macOS may still show a one-time
 "developer cannot be verified" prompt; allow it once in System Settings
 or by right-clicking the app and choosing Open.
 
+If macOS reports the app as "damaged", rebuild with the latest script;
+it strips an extra metadata file and re-signs the bundle.
+
 ## Dependencies
 - FreeCAD 0.21+ (PySide2)
 - pyserial 3.5 (vendored) for GRBL communication

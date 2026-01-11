@@ -28,6 +28,9 @@ To set a custom DMG name:
 If macOS warns about an unverified developer, allow it once via
 System Settings or right-click Open.
 
+If you see a "damaged app" warning, rebuild with the latest script
+which strips a problematic metadata file and re-signs the bundle.
+
 ## Option B: FreeCAD from GitHub (advanced)
 1. Clone FreeCAD upstream somewhere outside this repo:
    ```bash

@@ -120,6 +120,10 @@ cp "$repo_dir/README.md" "$mod_dir/README.md"
 cp "$repo_dir/THIRD_PARTY.md" "$mod_dir/THIRD_PARTY.md"
 cp "$repo_dir/LICENSE" "$mod_dir/LICENSE"
 
+# Remove signing artifacts and non-essential files that confuse Gatekeeper.
+rm -rf "$dest_app/Contents/_CodeSignature"
+rm -f "$dest_app/Contents/packages.txt"
+
 # Clear extended attributes that can trigger Gatekeeper warnings.
 xattr -cr "$dest_app" || true
 
