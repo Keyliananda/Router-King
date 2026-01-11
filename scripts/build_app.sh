@@ -120,6 +120,12 @@ cp "$repo_dir/README.md" "$mod_dir/README.md"
 cp "$repo_dir/THIRD_PARTY.md" "$mod_dir/THIRD_PARTY.md"
 cp "$repo_dir/LICENSE" "$mod_dir/LICENSE"
 
+# Clear extended attributes that can trigger Gatekeeper warnings.
+xattr -cr "$dest_app" || true
+
+# Ad-hoc sign to keep macOS from flagging the bundle as modified.
+codesign --force --deep --sign - "$dest_app"
+
 if [[ $unquarantine -eq 1 ]]; then
   xattr -dr com.apple.quarantine "$dest_app" || true
 fi

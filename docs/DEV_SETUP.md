@@ -25,6 +25,9 @@ To set a custom DMG name:
 ./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg --dmg-out dist/RouterKing-1.0.dmg --unquarantine
 ```
 
+If macOS warns about an unverified developer, allow it once via
+System Settings or right-click Open.
+
 ## Option B: FreeCAD from GitHub (advanced)
 1. Clone FreeCAD upstream somewhere outside this repo:
    ```bash

@@ -34,6 +34,10 @@ To set a custom DMG name:
 ./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg --dmg-out dist/RouterKing-1.0.dmg --unquarantine
 ```
 
+Note: The bundle is ad-hoc signed. macOS may still show a one-time
+"developer cannot be verified" prompt; allow it once in System Settings
+or by right-clicking the app and choosing Open.
+
 ## Dependencies
 - FreeCAD 0.21+ (PySide2)
 - pyserial 3.5 (vendored) for GRBL communication
