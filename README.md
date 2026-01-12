@@ -1,7 +1,12 @@
 # RouterKing
 
 RouterKing is a FreeCAD workbench that adds an integrated GRBL sender and a guided CNC/Laser workflow.
-The goal is to keep FreeCAD upstream (no core patches) and ship all custom UI and machine logic as an addon.
+Targets are macOS and Linux with GRBL-based machines (tested with FoxAlien Masuter Pro).
+
+Project intent:
+- One program to start (FreeCAD with the RouterKing workbench).
+- No external sender app required.
+- Keep FreeCAD upstream (no core patches); all custom UI and machine logic lives in the addon.
 
 ## Scope (MVP)
 - GRBL connect/disconnect and status polling
@@ -19,8 +24,18 @@ Run from the repo root:
 
 Then start FreeCAD and enable the `RouterKing` workbench.
 
-## All-in-one app (macOS)
-This builds a self-contained `RouterKing.app` that includes FreeCAD and the workbench.
+## Single-app macOS (recommended)
+Install the official FreeCAD 1.0.x app and link the workbench. You still run a single app: FreeCAD with RouterKing inside.
+
+1. Install `FreeCAD.app` into `/Applications` (drag it from the DMG).
+2. Link the workbench:
+   ```bash
+   ./scripts/link_addon.sh
+   ```
+3. Start FreeCAD and select the `RouterKing` workbench.
+
+## All-in-one app (macOS, experimental)
+This builds a self-contained `RouterKing.app` that includes FreeCAD and the workbench. It is not notarized.
 
 ```bash
 ./scripts/build_app.sh --dmg /path/to/FreeCAD.dmg --unquarantine
@@ -36,17 +51,15 @@ To set a custom DMG name:
 
 Note: The bundle is ad-hoc signed. macOS may still show a one-time
 "developer cannot be verified" prompt; allow it once in System Settings
-or by right-clicking the app and choosing Open.
-
-If macOS reports the app as "damaged", rebuild with the latest script;
-it strips an extra metadata file and re-signs the bundle.
+or by right-clicking the app and choosing Open. For distribution, a
+notarized Developer ID build is required.
 
 ## Dependencies
-- FreeCAD 0.21+ (PySide2)
+- FreeCAD 1.0.x (PySide2)
 - pyserial 3.5 (vendored) for GRBL communication
 
 ## Update workflow
-- FreeCAD: update your FreeCAD install or your upstream clone independently.
+- FreeCAD: treat it as an external app; upgrade only when needed.
 - RouterKing: `git pull` in this repo (no FreeCAD patches needed).
 
 ## Repo layout
