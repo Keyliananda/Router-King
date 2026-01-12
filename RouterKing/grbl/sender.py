@@ -48,7 +48,6 @@ class GrblSender:
                 self._serial.write(b"\r\n\r\n")
                 self._serial.flush()
                 time.sleep(0.1)
-                self._serial.reset_input_buffer()
             except Exception:
                 pass
             self._stop_event.clear()
