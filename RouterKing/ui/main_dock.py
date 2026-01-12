@@ -115,7 +115,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_unlocked = False
         self._explore_last_command_at = None
         self._explore_recover_attempts = 0
-        self._explore_axis_limit = None
         self._explore_dir_override = {"X": None, "Y": None, "Z": None}
         self._explore_safe_moves_done = False
 
@@ -890,7 +889,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_unlocked = False
         self._explore_last_command_at = None
         self._explore_recover_attempts = 0
-        self._explore_axis_limit = self._limits.get(self._explore_axis)
         self._explore_dir = self._axis_explore_dir(self._explore_axis)
         self._append_console(f"Exploring {self._explore_axis} axis...", force=True)
 
@@ -956,13 +954,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _handle_explore_ok(self):
         if self._explore_phase == "move":
             self._explore_distance += self._explore_step
-            if (
-                self._explore_axis == "Z"
-                and self._explore_axis_limit
-                and self._explore_distance >= self._explore_axis_limit
-            ):
-                self._finish_explore_axis_soft()
-                return
             self._explore_pending = False
             return
         if self._explore_phase == "backoff":
@@ -993,9 +984,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._update_machine_controls()
             return
         axis = self._explore_axis
-        if axis == "Z" and self._explore_axis_limit:
-            self._finish_explore_axis_soft()
-            return
         measured = max(0.0, self._explore_distance - self._explore_margin)
         self._explore_results[axis] = measured
         self._limits[axis] = measured
@@ -1010,21 +998,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_pending = False
         self._explore_next_action = time.time() + 0.5
 
-    def _finish_explore_axis_soft(self):
-        axis = self._explore_axis
-        measured = float(self._explore_axis_limit)
-        self._explore_results[axis] = measured
-        self._limits[axis] = measured
-        self._update_limit_labels()
-        self._append_console(
-            f"Explore: {axis} reached configured max without limit switch. "
-            f"Stored {measured:.3f} mm.",
-            force=True,
-        )
-        self._explore_pending = False
-        self._explore_phase = "home"
-        self._explore_next_action = time.time() + 0.5
-
     def _finish_explore(self):
         self._explore_active = False
         self._explore_phase = None
@@ -1033,6 +1006,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._append_console("Explore limits complete.", force=True)
         self._update_machine_controls()
         self._prompt_apply_limits()
+        self._send_unlock_home_after_explore()
+
+    def _send_unlock_home_after_explore(self):
+        if not self._sender.is_connected():
+            return
+        if self._sender.is_streaming():
+            return
+        self._send_command("$X")
+        self._send_command("$H")
 
     def _prompt_apply_limits(self):
         if not self._explore_results:
@@ -1197,10 +1179,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             if choice == "-":
                 return -1.0
         bit = {"X": 0, "Y": 1, "Z": 2}.get(axis, 0)
-        homing_negative = bool(self._homing_dir_mask & (1 << bit))
-        # GRBL defaults to homing in + direction; mask bit means homing in - direction.
-        # Explore should move away from the homing switch.
-        return 1.0 if homing_negative else -1.0
+        homing_positive = bool(self._homing_dir_mask & (1 << bit))
+        return -1.0 if homing_positive else 1.0
 
     def _update_preview(self):
         text = self._gcode_edit.toPlainText()
