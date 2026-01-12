@@ -94,6 +94,30 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ports_cache = []
         self._last_console_line = None
         self._last_alarm_info = None
+        self._limits = {"X": None, "Y": None, "Z": None}
+        self._limits_announced = False
+        self._homing_dir_mask = 0
+        self._explore_active = False
+        self._explore_phase = None
+        self._explore_axis_queue = []
+        self._explore_axis = None
+        self._explore_step = 5.0
+        self._explore_feed = 800.0
+        self._explore_margin = 2.0
+        self._explore_distance = 0.0
+        self._explore_pending = False
+        self._explore_next_action = 0.0
+        self._explore_results = {}
+        self._explore_dir = 1.0
+        self._explore_backoff = 5.0
+        self._explore_unlock_sent_at = None
+        self._homing_pull_off = 3.0
+        self._explore_unlocked = False
+        self._explore_last_command_at = None
+        self._explore_recover_attempts = 0
+        self._explore_axis_limit = None
+        self._explore_dir_override = {"X": None, "Y": None, "Z": None}
+        self._explore_safe_moves_done = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -207,6 +231,56 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         jog_layout.addLayout(jog_row)
         layout.addWidget(jog_group)
 
+        machine_group = QtWidgets.QGroupBox("Machine Limits / Tests")
+        machine_layout = QtWidgets.QGridLayout(machine_group)
+        machine_layout.addWidget(QtWidgets.QLabel("X max (mm)"), 0, 0)
+        self._limit_x = QtWidgets.QLabel("—")
+        machine_layout.addWidget(self._limit_x, 0, 1)
+        machine_layout.addWidget(QtWidgets.QLabel("Y max (mm)"), 0, 2)
+        self._limit_y = QtWidgets.QLabel("—")
+        machine_layout.addWidget(self._limit_y, 0, 3)
+        machine_layout.addWidget(QtWidgets.QLabel("Z max (mm)"), 0, 4)
+        self._limit_z = QtWidgets.QLabel("—")
+        machine_layout.addWidget(self._limit_z, 0, 5)
+
+        self._read_limits_btn = QtWidgets.QPushButton("Read Limits")
+        self._travel_test_btn = QtWidgets.QPushButton("XY Travel Test")
+        self._explore_limits_btn = QtWidgets.QPushButton("Explore Limits")
+        machine_layout.addWidget(self._read_limits_btn, 1, 0, 1, 2)
+        machine_layout.addWidget(self._travel_test_btn, 1, 2, 1, 2)
+        machine_layout.addWidget(self._explore_limits_btn, 1, 4, 1, 2)
+
+        machine_layout.addWidget(QtWidgets.QLabel("Margin (mm)"), 2, 0)
+        self._travel_margin = QtWidgets.QDoubleSpinBox()
+        self._travel_margin.setDecimals(2)
+        self._travel_margin.setRange(0.0, 20.0)
+        self._travel_margin.setValue(2.0)
+        machine_layout.addWidget(self._travel_margin, 2, 1)
+        machine_layout.addWidget(QtWidgets.QLabel("Test feed"), 2, 2)
+        self._travel_feed = QtWidgets.QDoubleSpinBox()
+        self._travel_feed.setDecimals(0)
+        self._travel_feed.setRange(1, 20000)
+        self._travel_feed.setValue(1200)
+        machine_layout.addWidget(self._travel_feed, 2, 3)
+        machine_layout.addWidget(QtWidgets.QLabel("Explore step (mm)"), 2, 4)
+        self._explore_step_spin = QtWidgets.QDoubleSpinBox()
+        self._explore_step_spin.setDecimals(2)
+        self._explore_step_spin.setRange(0.1, 50.0)
+        self._explore_step_spin.setValue(5.0)
+        machine_layout.addWidget(self._explore_step_spin, 2, 5)
+        machine_layout.addWidget(QtWidgets.QLabel("Z dir"), 3, 0)
+        self._explore_z_dir = QtWidgets.QComboBox()
+        self._explore_z_dir.addItems(["Auto", "+", "-"])
+        machine_layout.addWidget(self._explore_z_dir, 3, 1)
+        machine_layout.addWidget(
+            QtWidgets.QLabel("Requires homing + clear workspace. Explore hits limits."),
+            4,
+            0,
+            1,
+            6,
+        )
+        layout.addWidget(machine_group)
+
         console_group = QtWidgets.QGroupBox("Console")
         console_layout = QtWidgets.QVBoxLayout(console_group)
         self._console = QtWidgets.QPlainTextEdit()
@@ -249,6 +323,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._send_cmd_btn.clicked.connect(self._on_send_command)
         self._command_line.returnPressed.connect(self._on_send_command)
         self._clear_console_btn.clicked.connect(self._console.clear)
+        self._read_limits_btn.clicked.connect(self._read_limits)
+        self._travel_test_btn.clicked.connect(self._on_travel_test)
+        self._explore_limits_btn.clicked.connect(self._on_explore_limits)
 
     def _build_gcode_tab(self, parent):
         layout = QtWidgets.QVBoxLayout(parent)
@@ -297,6 +374,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._stop_btn.clicked.connect(self._on_stop_job)
 
         self._update_job_controls()
+        self._update_machine_controls()
 
     def _on_connect(self):
         if self._sender.is_connected():
@@ -306,6 +384,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._machine_status.setText("Machine: n/a")
             self._alarm_status.setText("Alarm: none")
             self._last_alarm_info = None
+            self._limits = {"X": None, "Y": None, "Z": None}
+            self._limits_announced = False
+            self._update_limit_labels()
             self._connect_btn.setText("Connect")
             self._port.setEnabled(True)
             self._refresh_ports()
@@ -346,6 +427,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._update_alarm_status(state)
 
         self._update_job_controls()
+        self._update_machine_controls()
+        self._explore_tick()
 
     def _append_console(self, text, force=False):
         if not force and self._console_verbose is not None and not self._console_verbose.isChecked():
@@ -355,17 +438,43 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._last_console_line = text
 
     def _handle_console_line(self, line):
-        if self._is_status_line(line):
+        if self._parse_setting_line(line):
             if self._console_verbose.isChecked():
                 self._append_console(line)
             return
         lower = line.strip().lower()
+        if self._explore_active:
+            if lower.startswith("grbl"):
+                self._append_console("Controller reset detected.", force=True)
+                self._explore_unlocked = False
+                self._explore_pending = False
+                self._explore_phase = "unlock"
+                self._explore_next_action = time.time() + 0.5
+                return
+            if "to unlock" in lower or "check limits" in lower:
+                self._explore_unlocked = False
+                self._explore_pending = False
+                self._explore_phase = "unlock"
+                self._explore_next_action = time.time() + 0.2
+        if self._is_status_line(line):
+            if self._console_verbose.isChecked():
+                self._append_console(line)
+            return
+        if lower == "ok" and self._explore_active and self._explore_pending:
+            self._handle_explore_ok()
+            if not self._console_verbose.isChecked():
+                return
         if lower.startswith("alarm:"):
             message, label = self._format_alarm(line)
             self._last_alarm_info = label
             self._alarm_status.setText(f"Alarm: {label}")
             self._append_console(message, force=True)
+            if self._explore_active:
+                self._handle_explore_alarm(label)
             return
+        if self._explore_active and "unlocked" in lower:
+            self._explore_unlocked = True
+            self._explore_pending = False
         if lower.startswith("error:"):
             self._append_console(line, force=True)
             return
@@ -373,13 +482,59 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         self._append_console(line)
 
+    def _parse_setting_line(self, line):
+        cleaned = re.sub(r"[\x00-\x1f]", "", line).strip()
+        match = re.search(r"\$(13[0-2])=([-+]?[0-9]*[.,]?[0-9]+)", cleaned)
+        if not match:
+            other = re.search(r"\$(\d+)=([-+]?[0-9]*[.,]?[0-9]+)", cleaned)
+            if not other:
+                return False
+            code = int(other.group(1))
+            value_text = other.group(2).replace(",", ".")
+            try:
+                value = float(value_text)
+            except ValueError:
+                return False
+            if code == 27:
+                self._homing_pull_off = value
+            elif code == 23:
+                self._homing_dir_mask = int(value)
+            return False
+        code = int(match.group(1))
+        value_text = match.group(2).replace(",", ".")
+        try:
+            value = float(value_text)
+        except ValueError:
+            return False
+        if code == 130:
+            self._limits["X"] = value
+        elif code == 131:
+            self._limits["Y"] = value
+        elif code == 132:
+            self._limits["Z"] = value
+        self._update_limit_labels()
+        if (
+            not self._limits_announced
+            and self._limits["X"] is not None
+            and self._limits["Y"] is not None
+            and self._limits["Z"] is not None
+        ):
+            self._limits_announced = True
+            self._append_console(
+                f"Limits read: X={self._limits['X']:.3f} "
+                f"Y={self._limits['Y']:.3f} "
+                f"Z={self._limits['Z']:.3f}",
+                force=True,
+            )
+        return True
+
     @staticmethod
     def _is_status_line(line):
         line = line.strip()
         return line.startswith("<") and line.endswith(">")
 
     def _format_alarm(self, line):
-        match = re.match(r"ALARM:(\\d+)", line.strip(), flags=re.IGNORECASE)
+        match = re.match(r"ALARM:(\d+)", line.strip(), flags=re.IGNORECASE)
         if not match:
             return line, line
         code = int(match.group(1))
@@ -400,6 +555,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._alarm_status.setText("Alarm: none")
         self._last_alarm_info = None
 
+    def _update_limit_labels(self):
+        def format_value(value):
+            return f"{value:.3f}" if value is not None else "—"
+
+        self._limit_x.setText(format_value(self._limits["X"]))
+        self._limit_y.setText(format_value(self._limits["Y"]))
+        self._limit_z.setText(format_value(self._limits["Z"]))
+        self._update_machine_controls()
+
     def _connect_to_port(self, port):
         try:
             self._sender.connect(port)
@@ -411,6 +575,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._connection_status.setText(f"Connection: connected ({port})")
         self._alarm_status.setText("Alarm: none")
         self._last_alarm_info = None
+        self._limits_announced = False
         self._connect_btn.setText("Disconnect")
         self._port.setEnabled(False)
         self._append_console("Connected.")
@@ -570,10 +735,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return True
         return False
 
-    def _send_command(self, command):
+    def _send_command(self, command, log=True):
         try:
             self._sender.send_line(command)
-            self._append_console(f"> {command}")
+            if log:
+                self._append_console(f"> {command}")
         except Exception as exc:
             self._append_console(f"Send failed: {exc}")
             _status_message(f"RouterKing: send failed ({exc})\n", error=True)
@@ -597,6 +763,319 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._sender.request_status()
         except Exception:
             pass
+
+    def _read_limits(self):
+        if not self._sender.is_connected():
+            self._append_console("Read limits failed: not connected.")
+            return
+        self._append_console("Reading limits ($130/$131/$132)...")
+        self._send_command("$$")
+
+    def _on_travel_test(self):
+        if not self._sender.is_connected():
+            self._append_console("Travel test failed: not connected.")
+            return
+        if self._sender.is_streaming():
+            self._append_console("Travel test failed: sender busy.")
+            return
+        status = self._sender.get_status()
+        if status and str(status.get("state", "")).lower() == "alarm":
+            self._append_console("Travel test blocked: alarm active. Unlock and home first.")
+            return
+        max_x = self._limits.get("X")
+        max_y = self._limits.get("Y")
+        if max_x is None or max_y is None:
+            self._append_console("Travel test failed: read limits first.")
+            return
+        margin = self._travel_margin.value()
+        target_x = max_x - margin
+        target_y = max_y - margin
+        if target_x <= 0 or target_y <= 0:
+            self._append_console("Travel test failed: margin too large for limits.")
+            return
+        feed = self._travel_feed.value()
+        if not self._confirm_travel_test(max_x, max_y, target_x, target_y, margin, feed):
+            return
+        lines = [
+            "G90",
+            "G21",
+            f"G53 G1 X0 Y0 F{feed:.0f}",
+            f"G53 G1 X{target_x:.3f} F{feed:.0f}",
+            "G53 G1 X0",
+            f"G53 G1 Y{target_y:.3f} F{feed:.0f}",
+            "G53 G1 Y0",
+        ]
+        self._sender.start_stream(lines)
+        self._append_console("Travel test started.")
+
+    def _on_explore_limits(self):
+        if self._explore_active:
+            self._explore_active = False
+            self._explore_phase = None
+            self._explore_axis_queue = []
+            self._explore_pending = False
+            self._append_console("Explore limits stopped.")
+            self._update_machine_controls()
+            return
+        if not self._sender.is_connected():
+            self._append_console("Explore limits failed: not connected.")
+            return
+        if self._sender.is_streaming():
+            self._append_console("Explore limits failed: sender busy.")
+            return
+        status = self._sender.get_status()
+        if status and str(status.get("state", "")).lower() == "alarm":
+            self._append_console("Explore limits blocked: alarm active. Unlock and home first.")
+            return
+        self._explore_step = self._explore_step_spin.value()
+        self._explore_feed = self._travel_feed.value()
+        self._explore_margin = self._travel_margin.value()
+        self._explore_backoff = max(
+            self._homing_pull_off + 5.0,
+            self._explore_margin + 5.0,
+            self._explore_step * 2.0,
+        )
+        self._explore_recover_attempts = 0
+        if self._explore_step <= 0:
+            self._append_console("Explore limits failed: step must be > 0.")
+            return
+        if not self._confirm_explore_limits(self._explore_step, self._explore_feed, self._explore_margin):
+            return
+        self._start_explore()
+
+    def _confirm_explore_limits(self, step, feed, margin):
+        message = (
+            "This mode intentionally runs each axis into its limit switch to\n"
+            "discover maximum travel. This can trigger hard limit alarms and\n"
+            "controller resets.\n\n"
+            f"Step: {step:.2f} mm\n"
+            f"Feed: {feed:.0f} mm/min\n"
+            f"Margin: {margin:.2f} mm\n\n"
+            "Make sure the machine is homed, spindle/laser is off, and the\n"
+            "workspace is clear. Continue?"
+        )
+        result = QtWidgets.QMessageBox.warning(
+            self,
+            "Explore Limits?",
+            message,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        return result == QtWidgets.QMessageBox.Yes
+
+    def _start_explore(self):
+        self._explore_active = True
+        self._explore_phase = "move"
+        self._explore_axis_queue = ["X", "Y", "Z"]
+        self._explore_axis = None
+        self._explore_distance = 0.0
+        self._explore_pending = False
+        self._explore_next_action = time.time()
+        self._explore_results = {}
+        self._explore_unlock_sent_at = None
+        self._explore_unlocked = False
+        self._explore_last_command_at = None
+        self._explore_recover_attempts = 0
+        self._append_console("Explore limits started.", force=True)
+        self._update_machine_controls()
+        self._start_next_explore_axis()
+
+    def _start_next_explore_axis(self):
+        if not self._explore_axis_queue:
+            self._finish_explore()
+            return
+        self._explore_axis = self._explore_axis_queue.pop(0)
+        self._explore_distance = 0.0
+        self._explore_phase = "move"
+        self._explore_pending = False
+        self._explore_unlocked = False
+        self._explore_last_command_at = None
+        self._explore_recover_attempts = 0
+        self._explore_axis_limit = self._limits.get(self._explore_axis)
+        self._explore_dir = self._axis_explore_dir(self._explore_axis)
+        self._append_console(f"Exploring {self._explore_axis} axis...", force=True)
+
+    def _explore_tick(self):
+        if not self._explore_active:
+            return
+        if time.time() < self._explore_next_action:
+            return
+        status = self._sender.get_status() or {}
+        state = str(status.get("state", "")).lower()
+        if self._explore_phase == "wait_idle":
+            if state == "idle":
+                self._explore_next_action = time.time() + 0.2
+                self._start_next_explore_axis()
+            return
+        if self._explore_phase == "unlock":
+            if self._explore_unlocked:
+                self._explore_phase = "backoff"
+                self._explore_pending = False
+                return
+            if (
+                not self._explore_pending
+                or not self._explore_last_command_at
+                or time.time() - self._explore_last_command_at > 1.0
+            ):
+                self._explore_pending = True
+                self._explore_unlock_sent_at = time.time()
+                self._explore_last_command_at = time.time()
+                self._send_command("$X", log=False)
+            return
+        if self._explore_phase == "backoff":
+            if self._explore_pending:
+                return
+            axis = self._explore_axis
+            direction = -self._explore_dir
+            distance = self._explore_backoff
+            self._explore_pending = True
+            self._explore_last_command_at = time.time()
+            self._send_command(f"G91 G21 G0 {axis}{direction * distance:.3f}", log=False)
+            return
+        if self._explore_phase == "home":
+            if not self._explore_pending:
+                self._explore_pending = True
+                self._explore_last_command_at = time.time()
+                self._send_command("$H", log=False)
+                self._explore_phase = "wait_idle"
+            return
+        if self._explore_phase == "move":
+            if self._explore_pending:
+                return
+            if state == "alarm":
+                return
+            self._send_explore_step()
+
+    def _send_explore_step(self):
+        axis = self._explore_axis
+        step = self._explore_step
+        feed = self._explore_feed
+        self._explore_pending = True
+        self._explore_last_command_at = time.time()
+        self._send_command(f"G91 G21 G1 {axis}{self._explore_dir * step:.3f} F{feed:.0f}", log=False)
+
+    def _handle_explore_ok(self):
+        if self._explore_phase == "move":
+            self._explore_distance += self._explore_step
+            if (
+                self._explore_axis == "Z"
+                and self._explore_axis_limit
+                and self._explore_distance >= self._explore_axis_limit
+            ):
+                self._finish_explore_axis_soft()
+                return
+            self._explore_pending = False
+            return
+        if self._explore_phase == "backoff":
+            self._explore_pending = False
+            self._explore_phase = "home"
+            return
+
+    def _handle_explore_alarm(self, label):
+        if self._explore_phase not in ("move", "backoff", "home", "unlock"):
+            return
+        if self._explore_phase != "move":
+            if "homing fail" in label.lower():
+                self._explore_recover_attempts += 1
+                if self._explore_recover_attempts <= 3:
+                    self._explore_backoff *= 1.5
+                    self._explore_unlocked = False
+                    self._explore_pending = False
+                    self._explore_phase = "unlock"
+                    self._explore_next_action = time.time() + 0.5
+                    self._append_console(
+                        "Homing failed. Increasing backoff and retrying unlock/home.",
+                        force=True,
+                    )
+                    return
+            self._append_console("Explore halted due to alarm during recovery.", force=True)
+            self._explore_active = False
+            self._explore_phase = None
+            self._update_machine_controls()
+            return
+        axis = self._explore_axis
+        if axis == "Z" and self._explore_axis_limit:
+            self._finish_explore_axis_soft()
+            return
+        measured = max(0.0, self._explore_distance - self._explore_margin)
+        self._explore_results[axis] = measured
+        self._limits[axis] = measured
+        self._update_limit_labels()
+        self._append_console(
+            f"Explore: {axis} limit hit. Stored {measured:.3f} mm "
+            f"(margin {self._explore_margin:.2f}).",
+            force=True,
+        )
+        self._explore_phase = "unlock"
+        self._explore_unlocked = False
+        self._explore_pending = False
+        self._explore_next_action = time.time() + 0.5
+
+    def _finish_explore_axis_soft(self):
+        axis = self._explore_axis
+        measured = float(self._explore_axis_limit)
+        self._explore_results[axis] = measured
+        self._limits[axis] = measured
+        self._update_limit_labels()
+        self._append_console(
+            f"Explore: {axis} reached configured max without limit switch. "
+            f"Stored {measured:.3f} mm.",
+            force=True,
+        )
+        self._explore_pending = False
+        self._explore_phase = "home"
+        self._explore_next_action = time.time() + 0.5
+
+    def _finish_explore(self):
+        self._explore_active = False
+        self._explore_phase = None
+        self._explore_axis = None
+        self._explore_pending = False
+        self._append_console("Explore limits complete.", force=True)
+        self._update_machine_controls()
+        self._prompt_apply_limits()
+
+    def _prompt_apply_limits(self):
+        if not self._explore_results:
+            return
+        x = self._limits.get("X")
+        y = self._limits.get("Y")
+        z = self._limits.get("Z")
+        if x is None or y is None or z is None:
+            return
+        message = (
+            "Apply measured limits to the controller?\n\n"
+            f"$130 (X max): {x:.3f}\n"
+            f"$131 (Y max): {y:.3f}\n"
+            f"$132 (Z max): {z:.3f}\n"
+        )
+        result = QtWidgets.QMessageBox.question(
+            self,
+            "Write Limits?",
+            message,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        if result == QtWidgets.QMessageBox.Yes:
+            self._send_command(f"$130={x:.3f}")
+            self._send_command(f"$131={y:.3f}")
+            self._send_command(f"$132={z:.3f}")
+            self._append_console("Limits written to controller.", force=True)
+    def _confirm_travel_test(self, max_x, max_y, target_x, target_y, margin, feed):
+        message = (
+            "This will move X/Y to machine limits using G53.\n\n"
+            f"X max: {max_x:.3f} mm (target: {target_x:.3f} mm)\n"
+            f"Y max: {max_y:.3f} mm (target: {target_y:.3f} mm)\n"
+            f"Margin: {margin:.2f} mm\n"
+            f"Feed: {feed:.0f} mm/min\n\n"
+            "Make sure the machine is homed, spindle/laser is off, and the\n"
+            "workspace is clear. Continue?"
+        )
+        result = QtWidgets.QMessageBox.warning(
+            self,
+            "Run XY Travel Test?",
+            message,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        return result == QtWidgets.QMessageBox.Yes
 
     def _jog(self, axis, direction):
         step = self._jog_step.value()
@@ -690,6 +1169,38 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._pause_btn.setEnabled(streaming)
         self._stop_btn.setEnabled(streaming)
         self._pause_btn.setText("Resume" if paused else "Pause")
+
+    def _update_machine_controls(self):
+        connected = self._sender.is_connected()
+        streaming = self._sender.is_streaming()
+        status = self._sender.get_status() or {}
+        alarm_active = str(status.get("state", "")).lower() == "alarm"
+        has_limits = self._limits.get("X") is not None and self._limits.get("Y") is not None
+        self._read_limits_btn.setEnabled(connected and not streaming)
+        self._travel_test_btn.setEnabled(connected and not streaming and has_limits and not alarm_active)
+        self._explore_limits_btn.setEnabled(connected and not streaming)
+        if self._explore_active:
+            self._explore_limits_btn.setText("Stop Explore")
+            self._read_limits_btn.setEnabled(False)
+            self._travel_test_btn.setEnabled(False)
+        else:
+            self._explore_limits_btn.setText("Explore Limits")
+
+    def _axis_explore_dir(self, axis):
+        override = self._explore_dir_override.get(axis)
+        if override is not None:
+            return override
+        if axis == "Z":
+            choice = self._explore_z_dir.currentText()
+            if choice == "+":
+                return 1.0
+            if choice == "-":
+                return -1.0
+        bit = {"X": 0, "Y": 1, "Z": 2}.get(axis, 0)
+        homing_negative = bool(self._homing_dir_mask & (1 << bit))
+        # GRBL defaults to homing in + direction; mask bit means homing in - direction.
+        # Explore should move away from the homing switch.
+        return 1.0 if homing_negative else -1.0
 
     def _update_preview(self):
         text = self._gcode_edit.toPlainText()
