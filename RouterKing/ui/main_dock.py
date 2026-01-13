@@ -121,6 +121,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_retry_axis = None
         self._explore_known_limits = {}
         self._explore_retry_measurements = {}
+        self._z_speed_test_active = False
+        self._z_speed_test_pending = 0
+        self._z_speed_test_mode = None
+        self._z_speed_ramp_current_feed = 0.0
+        self._z_speed_ramp_increment = 0.0
+        self._z_speed_ramp_max_feed = 0.0
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -258,7 +264,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         action_layout.addWidget(self._explore_z_btn)
         action_layout.addWidget(self._z_speed_test_btn)
         action_layout.addStretch(1)
-        machine_layout.addLayout(action_layout, 4, 0, 1, 6)
+        machine_layout.addLayout(action_layout, 5, 0, 1, 6)
 
         machine_layout.addWidget(QtWidgets.QLabel("Margin (mm)"), 2, 0)
         self._travel_margin = QtWidgets.QDoubleSpinBox()
@@ -278,14 +284,27 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_step_spin.setRange(0.1, 50.0)
         self._explore_step_spin.setValue(5.0)
         machine_layout.addWidget(self._explore_step_spin, 2, 5)
-        machine_layout.addWidget(QtWidgets.QLabel("Z dir"), 3, 0)
+        machine_layout.addWidget(QtWidgets.QLabel("Z ramp step (mm/min)"), 3, 0)
+        self._z_speed_increment_spin = QtWidgets.QDoubleSpinBox()
+        self._z_speed_increment_spin.setDecimals(0)
+        self._z_speed_increment_spin.setRange(1, 5000)
+        self._z_speed_increment_spin.setValue(100)
+        self._z_speed_increment_spin.setSingleStep(25)
+        machine_layout.addWidget(self._z_speed_increment_spin, 3, 1)
+        machine_layout.addWidget(QtWidgets.QLabel("Z max feed"), 3, 2)
+        self._z_speed_max_feed_spin = QtWidgets.QDoubleSpinBox()
+        self._z_speed_max_feed_spin.setDecimals(0)
+        self._z_speed_max_feed_spin.setRange(1, 20000)
+        self._z_speed_max_feed_spin.setValue(2000)
+        machine_layout.addWidget(self._z_speed_max_feed_spin, 3, 3)
+        machine_layout.addWidget(QtWidgets.QLabel("Z dir"), 4, 0)
         self._explore_z_dir = QtWidgets.QComboBox()
         self._explore_z_dir.addItems(["Auto", "+", "-"])
         self._explore_z_dir.setCurrentText("-")
-        machine_layout.addWidget(self._explore_z_dir, 3, 1)
+        machine_layout.addWidget(self._explore_z_dir, 4, 1)
         machine_layout.addWidget(
             QtWidgets.QLabel("Requires homing + clear workspace. Explore hits limits."),
-            5,
+            6,
             0,
             1,
             6,
@@ -456,6 +475,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 self._append_console(line)
             return
         lower = line.strip().lower()
+        if lower.startswith("grbl") and not self._explore_active:
+            self._abort_z_speed_test("controller reset")
         if self._explore_active:
             if lower.startswith("grbl"):
                 self._append_console("Controller reset detected.", force=True)
@@ -463,6 +484,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 self._explore_pending = False
                 self._explore_phase = "unlock"
                 self._explore_next_action = time.time() + 0.5
+                self._abort_z_speed_test("controller reset")
                 return
             if "to unlock" in lower or "check limits" in lower:
                 self._explore_unlocked = False
@@ -482,6 +504,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._last_alarm_info = label
             self._alarm_status.setText(f"Alarm: {label}")
             self._append_console(message, force=True)
+            self._abort_z_speed_test("alarm")
             if self._explore_active:
                 self._handle_explore_alarm(label)
             return
@@ -490,7 +513,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._explore_pending = False
         if lower.startswith("error:"):
             self._append_console(line, force=True)
+            self._abort_z_speed_test("controller error")
             return
+        if lower == "ok" and self._z_speed_test_active:
+            self._z_speed_test_pending -= 1
+            if self._z_speed_test_pending <= 0:
+                self._on_z_speed_test_iteration_complete()
+            if not self._console_verbose.isChecked():
+                return
         if lower == "ok" and not self._console_verbose.isChecked():
             return
         self._append_console(line)
@@ -576,6 +606,48 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._limit_y.setText(format_value(self._limits["Y"]))
         self._limit_z.setText(format_value(self._limits["Z"]))
         self._update_machine_controls()
+
+    def _on_z_speed_test_done(self):
+        if not self._z_speed_test_active:
+            return
+        self._z_speed_test_active = False
+        self._z_speed_test_pending = 0
+        self._append_console("Z speed test complete.", force=True)
+        self._z_speed_test_mode = None
+        self._send_unlock_home_after_z_speed_test()
+
+    def _abort_z_speed_test(self, reason):
+        if not self._z_speed_test_active:
+            return
+        self._z_speed_test_active = False
+        self._z_speed_test_pending = 0
+        feed = self._z_speed_ramp_current_feed or self._travel_feed.value()
+        self._z_speed_test_mode = None
+        self._append_console(
+            f"Z speed test aborted at {feed:.0f} mm/min: {reason}.", force=True
+        )
+        self._send_unlock_home_after_z_speed_test()
+
+    def _on_z_speed_test_iteration_complete(self):
+        if self._z_speed_test_mode == "ramp":
+            next_feed = self._z_speed_ramp_current_feed + self._z_speed_ramp_increment
+            if next_feed <= self._z_speed_ramp_max_feed:
+                self._z_speed_ramp_current_feed = next_feed
+                self._send_z_speed_iteration()
+                return
+            self._append_console(
+                f"Z speed ramp reached max feed ({self._z_speed_ramp_max_feed:.0f} mm/min) without trigger.",
+                force=True,
+            )
+        self._on_z_speed_test_done()
+
+    def _send_unlock_home_after_z_speed_test(self):
+        if not self._sender.is_connected():
+            return
+        if self._sender.is_streaming():
+            return
+        self._send_command("$X")
+        self._send_command("$H")
 
     def _connect_to_port(self, port):
         try:
@@ -883,23 +955,48 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._start_explore(["Z"])
 
     def _on_z_speed_test(self):
+        if self._z_speed_test_active:
+            self._append_console("Z speed test already running.")
+            return
         if not self._sender.is_connected():
             self._append_console("Z speed test failed: not connected.")
             return
         if self._sender.is_streaming() or self._explore_active:
             self._append_console("Z speed test failed: sender busy.")
             return
-        step = self._explore_step_spin.value()
-        if step <= 0:
-            self._append_console("Z speed test failed: step must be > 0.")
+        if not self._prepare_explore_parameters():
             return
-        feed = self._travel_feed.value()
+        start_feed = self._travel_feed.value()
+        increment = self._z_speed_increment_spin.value()
+        max_feed = self._z_speed_max_feed_spin.value()
+        if increment <= 0:
+            self._append_console("Z speed ramp failed: increment must be > 0.")
+            return
+        if max_feed < start_feed:
+            self._append_console("Z speed ramp failed: max feed must be >= start feed.")
+            return
+        self._z_speed_ramp_current_feed = start_feed
+        self._z_speed_ramp_increment = increment
+        self._z_speed_ramp_max_feed = max_feed
+        self._z_speed_test_mode = "ramp"
+        self._z_speed_test_active = True
+        self._append_console(
+            f"Z speed ramp: starting at {start_feed:.0f} mm/min, step {increment:.0f} mm/min."
+        )
+        self._send_z_speed_iteration()
+
+    def _send_z_speed_iteration(self):
+        if not self._z_speed_test_active:
+            return
+        step = self._explore_step
+        feed = self._z_speed_ramp_current_feed
         direction = self._axis_explore_dir("Z")
         distance = direction * step
         self._append_console(
-            f"Z speed test: moving {step:.3f} mm at {feed:.0f} mm/min "
-            f"(direction {'+' if direction > 0 else '-'})"
+            f"Z speed ramp: testing {feed:.0f} mm/min ({step:.3f} mm step, "
+            f"direction {'+' if direction > 0 else '-'})."
         )
+        self._z_speed_test_pending = 4
         self._send_command("G91 G21")
         self._send_command(f"G1 Z{distance:.3f} F{feed:.0f}")
         self._send_command(f"G0 Z{-distance:.3f}")
