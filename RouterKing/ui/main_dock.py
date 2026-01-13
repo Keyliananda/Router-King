@@ -249,9 +249,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._read_limits_btn = QtWidgets.QPushButton("Read Limits")
         self._travel_test_btn = QtWidgets.QPushButton("XY Travel Test")
         self._explore_limits_btn = QtWidgets.QPushButton("Explore Limits")
+        self._explore_z_btn = QtWidgets.QPushButton("Explore Z axis")
+        self._z_speed_test_btn = QtWidgets.QPushButton("Test Z speed")
         machine_layout.addWidget(self._read_limits_btn, 1, 0, 1, 2)
         machine_layout.addWidget(self._travel_test_btn, 1, 2, 1, 2)
         machine_layout.addWidget(self._explore_limits_btn, 1, 4, 1, 2)
+        action_layout = QtWidgets.QHBoxLayout()
+        action_layout.addWidget(self._explore_z_btn)
+        action_layout.addWidget(self._z_speed_test_btn)
+        action_layout.addStretch(1)
+        machine_layout.addLayout(action_layout, 4, 0, 1, 6)
 
         machine_layout.addWidget(QtWidgets.QLabel("Margin (mm)"), 2, 0)
         self._travel_margin = QtWidgets.QDoubleSpinBox()
@@ -274,10 +281,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         machine_layout.addWidget(QtWidgets.QLabel("Z dir"), 3, 0)
         self._explore_z_dir = QtWidgets.QComboBox()
         self._explore_z_dir.addItems(["Auto", "+", "-"])
+        self._explore_z_dir.setCurrentText("-")
         machine_layout.addWidget(self._explore_z_dir, 3, 1)
         machine_layout.addWidget(
             QtWidgets.QLabel("Requires homing + clear workspace. Explore hits limits."),
-            4,
+            5,
             0,
             1,
             6,
@@ -329,6 +337,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._read_limits_btn.clicked.connect(self._read_limits)
         self._travel_test_btn.clicked.connect(self._on_travel_test)
         self._explore_limits_btn.clicked.connect(self._on_explore_limits)
+        self._explore_z_btn.clicked.connect(self._on_explore_z_axis)
+        self._z_speed_test_btn.clicked.connect(self._on_z_speed_test)
 
     def _build_gcode_tab(self, parent):
         layout = QtWidgets.QVBoxLayout(parent)
@@ -830,6 +840,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if status and str(status.get("state", "")).lower() == "alarm":
             self._append_console("Explore limits blocked: alarm active. Unlock and home first.")
             return
+        if not self._prepare_explore_parameters():
+            return
+        if not self._confirm_explore_limits(self._explore_step, self._explore_feed, self._explore_margin):
+            return
+        self._start_explore(["X", "Y", "Z"])
+
+    def _prepare_explore_parameters(self):
         self._explore_step = self._explore_step_spin.value()
         self._explore_feed = self._travel_feed.value()
         self._explore_margin = self._travel_margin.value()
@@ -841,10 +858,52 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_recover_attempts = 0
         if self._explore_step <= 0:
             self._append_console("Explore limits failed: step must be > 0.")
+            return False
+        return True
+
+    def _on_explore_z_axis(self):
+        if self._explore_active:
+            self._append_console("Explore limits already running.")
+            self._update_machine_controls()
+            return
+        if not self._sender.is_connected():
+            self._append_console("Explore limits failed: not connected.")
+            return
+        if self._sender.is_streaming():
+            self._append_console("Explore limits failed: sender busy.")
+            return
+        status = self._sender.get_status()
+        if status and str(status.get("state", "")).lower() == "alarm":
+            self._append_console("Explore limits blocked: alarm active. Unlock and home first.")
+            return
+        if not self._prepare_explore_parameters():
             return
         if not self._confirm_explore_limits(self._explore_step, self._explore_feed, self._explore_margin):
             return
-        self._start_explore()
+        self._start_explore(["Z"])
+
+    def _on_z_speed_test(self):
+        if not self._sender.is_connected():
+            self._append_console("Z speed test failed: not connected.")
+            return
+        if self._sender.is_streaming() or self._explore_active:
+            self._append_console("Z speed test failed: sender busy.")
+            return
+        step = self._explore_step_spin.value()
+        if step <= 0:
+            self._append_console("Z speed test failed: step must be > 0.")
+            return
+        feed = self._travel_feed.value()
+        direction = self._axis_explore_dir("Z")
+        distance = direction * step
+        self._append_console(
+            f"Z speed test: moving {step:.3f} mm at {feed:.0f} mm/min "
+            f"(direction {'+' if direction > 0 else '-'})"
+        )
+        self._send_command("G91 G21")
+        self._send_command(f"G1 Z{distance:.3f} F{feed:.0f}")
+        self._send_command(f"G0 Z{-distance:.3f}")
+        self._send_command("G90")
 
     def _confirm_explore_limits(self, step, feed, margin):
         message = (
@@ -865,10 +924,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         return result == QtWidgets.QMessageBox.Yes
 
-    def _start_explore(self):
+    def _start_explore(self, axes=None):
         self._explore_active = True
         self._explore_phase = "move"
-        self._explore_axis_queue = ["X", "Y", "Z"]
+        axes_to_run = list(axes) if axes else ["X", "Y", "Z"]
+        if not axes_to_run:
+            self._append_console("Explore limits failed: no axes selected.")
+            self._explore_active = False
+            return
+        self._explore_axis_queue = axes_to_run
         self._explore_axis = None
         self._explore_distance = 0.0
         self._explore_pending = False
@@ -934,21 +998,27 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 self._send_command("$X", log=False)
             return
         if self._explore_phase == "backoff":
-            if self._explore_pending:
-                return
             axis = self._explore_axis
-            direction = -self._explore_dir
-            distance = self._explore_backoff
-            self._explore_pending = True
-            self._explore_last_command_at = time.time()
-            self._send_command(f"G91 G21 G0 {axis}{direction * distance:.3f}", log=False)
-            return
-        if self._explore_phase == "home":
             if not self._explore_pending:
+                direction = -self._explore_dir
+                distance = self._explore_backoff
                 self._explore_pending = True
                 self._explore_last_command_at = time.time()
-                self._send_command("$H", log=False)
-                self._explore_phase = "wait_idle"
+                self._send_command(f"G91 G21 G0 {axis}{direction * distance:.3f}", log=False)
+                return
+            if state == "idle":
+                self._explore_pending = False
+                self._explore_phase = "home"
+            return
+        if self._explore_phase == "home":
+            if self._explore_pending:
+                return
+            if state != "idle":
+                return
+            self._explore_pending = True
+            self._explore_last_command_at = time.time()
+            self._send_command("$H", log=False)
+            self._explore_phase = "wait_idle"
             return
         if self._explore_phase == "move":
             if self._explore_pending:
@@ -969,10 +1039,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if self._explore_phase == "move":
             self._explore_distance += self._explore_step
             self._explore_pending = False
-            return
-        if self._explore_phase == "backoff":
-            self._explore_pending = False
-            self._explore_phase = "home"
             return
 
     def _handle_explore_alarm(self, label):
@@ -1192,6 +1258,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._read_limits_btn.setEnabled(connected and not streaming)
         self._travel_test_btn.setEnabled(connected and not streaming and has_limits and not alarm_active)
         self._explore_limits_btn.setEnabled(connected and not streaming)
+        explore_action_enabled = connected and not streaming and not self._explore_active
+        self._explore_z_btn.setEnabled(explore_action_enabled)
+        self._z_speed_test_btn.setEnabled(explore_action_enabled)
         if self._explore_active:
             self._explore_limits_btn.setText("Stop Explore")
             self._read_limits_btn.setEnabled(False)
