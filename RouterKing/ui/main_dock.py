@@ -117,6 +117,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_recover_attempts = 0
         self._explore_dir_override = {"X": None, "Y": None, "Z": None}
         self._explore_safe_moves_done = False
+        self._explore_retry_axes = set()
+        self._explore_retry_axis = None
+        self._explore_known_limits = {}
+        self._explore_retry_measurements = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -874,15 +878,24 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_unlocked = False
         self._explore_last_command_at = None
         self._explore_recover_attempts = 0
+        self._explore_known_limits = dict(self._limits)
+        self._explore_retry_axes.clear()
+        self._explore_retry_axis = None
+        self._explore_retry_measurements = {}
+        self._explore_dir_override = {"X": None, "Y": None, "Z": None}
         self._append_console("Explore limits started.", force=True)
         self._update_machine_controls()
         self._start_next_explore_axis()
 
     def _start_next_explore_axis(self):
-        if not self._explore_axis_queue:
-            self._finish_explore()
-            return
-        self._explore_axis = self._explore_axis_queue.pop(0)
+        if self._explore_retry_axis is not None:
+            self._explore_axis = self._explore_retry_axis
+            self._explore_retry_axis = None
+        else:
+            if not self._explore_axis_queue:
+                self._finish_explore()
+                return
+            self._explore_axis = self._explore_axis_queue.pop(0)
         self._explore_distance = 0.0
         self._explore_phase = "move"
         self._explore_pending = False
@@ -890,6 +903,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_last_command_at = None
         self._explore_recover_attempts = 0
         self._explore_dir = self._axis_explore_dir(self._explore_axis)
+        self._explore_dir_override[self._explore_axis] = None
         self._append_console(f"Exploring {self._explore_axis} axis...", force=True)
 
     def _explore_tick(self):
@@ -985,6 +999,23 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         axis = self._explore_axis
         measured = max(0.0, self._explore_distance - self._explore_margin)
+        if axis in self._explore_retry_measurements:
+            previous = self._explore_retry_measurements.pop(axis)
+            measured = max(previous, measured)
+        elif self._should_retry_explore_axis(axis, measured):
+            self._explore_retry_axes.add(axis)
+            self._explore_retry_measurements[axis] = measured
+            self._explore_retry_axis = axis
+            self._explore_dir_override[axis] = -self._explore_dir
+            self._append_console(
+                f"Explore: {axis} alarm too early; retrying opposite direction.",
+                force=True,
+            )
+            self._explore_phase = "unlock"
+            self._explore_unlocked = False
+            self._explore_pending = False
+            self._explore_next_action = time.time() + 0.5
+            return
         self._explore_results[axis] = measured
         self._limits[axis] = measured
         self._update_limit_labels()
@@ -1181,6 +1212,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         bit = {"X": 0, "Y": 1, "Z": 2}.get(axis, 0)
         homing_positive = bool(self._homing_dir_mask & (1 << bit))
         return -1.0 if homing_positive else 1.0
+
+    def _expected_explore_limit(self, axis):
+        if not self._explore_known_limits:
+            return None
+        value = self._explore_known_limits.get(axis)
+        if value is None:
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _should_retry_explore_axis(self, axis, measured):
+        if axis in self._explore_retry_axes:
+            return False
+        expected = self._expected_explore_limit(axis)
+        if expected is not None:
+            return measured < expected * 0.8
+        return measured < self._explore_step * 2.0
 
     def _update_preview(self):
         text = self._gcode_edit.toPlainText()
