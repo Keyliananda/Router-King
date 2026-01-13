@@ -97,7 +97,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._limits = {"X": None, "Y": None, "Z": None}
         self._limits_announced = False
         self._homing_dir_mask = 0
-        self._axis_invert_mask = 0
         self._axis_max_feed = {"X": None, "Y": None, "Z": None}
         self._explore_active = False
         self._explore_phase = None
@@ -123,22 +122,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_retry_axis = None
         self._explore_known_limits = {}
         self._explore_retry_measurements = {}
-        self._explore_retry_modes = {}
-        self._z_speed_test_active = False
-        self._z_speed_test_pending = 0
-        self._z_speed_test_mode = None
-        self._z_speed_ramp_current_feed = 0.0
-        self._z_speed_ramp_increment = 0.0
-        self._z_speed_ramp_max_feed = 0.0
         self._explore_ramp_remaining = 0.0
         self._explore_ramp_feed = 0.0
-        self._explore_ramp_increment = 0.0
         self._explore_ramp_increment_current = 0.0
-        self._explore_ramp_max_feed = 0.0
         self._explore_ramp_max_feed_axis = 0.0
         self._explore_ramp_last_step = 0.0
-        self._explore_preflight = False
-        self._explore_preflight_sent = False
         self._explore_prehome_pull_off = 0.0
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -277,7 +265,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         action_layout.addWidget(self._explore_z_btn)
         action_layout.addWidget(self._z_speed_test_btn)
         action_layout.addStretch(1)
-        machine_layout.addLayout(action_layout, 5, 0, 1, 6)
+        machine_layout.addLayout(action_layout, 4, 0, 1, 6)
 
         machine_layout.addWidget(QtWidgets.QLabel("Margin (mm)"), 2, 0)
         self._travel_margin = QtWidgets.QDoubleSpinBox()
@@ -297,28 +285,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_step_spin.setRange(0.1, 50.0)
         self._explore_step_spin.setValue(5.0)
         machine_layout.addWidget(self._explore_step_spin, 2, 5)
-        machine_layout.addWidget(QtWidgets.QLabel("Ramp step (mm/min)"), 3, 0)
-        self._z_speed_increment_spin = QtWidgets.QDoubleSpinBox()
-        self._z_speed_increment_spin.setDecimals(0)
-        self._z_speed_increment_spin.setRange(1, 5000)
-        self._z_speed_increment_spin.setValue(100)
-        self._z_speed_increment_spin.setSingleStep(25)
-        machine_layout.addWidget(self._z_speed_increment_spin, 3, 1)
-        machine_layout.addWidget(QtWidgets.QLabel("Ramp max feed"), 3, 2)
-        self._z_speed_max_feed_spin = QtWidgets.QDoubleSpinBox()
-        self._z_speed_max_feed_spin.setDecimals(0)
-        self._z_speed_max_feed_spin.setRange(1, 20000)
-        self._z_speed_max_feed_spin.setValue(2000)
-        machine_layout.addWidget(self._z_speed_max_feed_spin, 3, 3)
-        machine_layout.addWidget(QtWidgets.QLabel("Z dir (fixed -)"), 4, 0)
+        machine_layout.addWidget(QtWidgets.QLabel("Z dir"), 3, 0)
         self._explore_z_dir = QtWidgets.QComboBox()
         self._explore_z_dir.addItems(["Auto", "+", "-"])
         self._explore_z_dir.setCurrentText("-")
-        self._explore_z_dir.setEnabled(False)
-        machine_layout.addWidget(self._explore_z_dir, 4, 1)
+        machine_layout.addWidget(self._explore_z_dir, 3, 1)
         machine_layout.addWidget(
             QtWidgets.QLabel("Requires homing + clear workspace. Explore hits limits."),
-            6,
+            5,
             0,
             1,
             6,
@@ -489,8 +463,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 self._append_console(line)
             return
         lower = line.strip().lower()
-        if lower.startswith("grbl") and not self._explore_active:
-            self._abort_z_speed_test("controller reset")
         if self._explore_active:
             if lower.startswith("grbl"):
                 self._append_console("Controller reset detected.", force=True)
@@ -498,7 +470,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 self._explore_pending = False
                 self._explore_phase = "unlock"
                 self._explore_next_action = time.time() + 0.5
-                self._abort_z_speed_test("controller reset")
                 return
             if "to unlock" in lower or "check limits" in lower:
                 self._explore_unlocked = False
@@ -518,7 +489,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._last_alarm_info = label
             self._alarm_status.setText(f"Alarm: {label}")
             self._append_console(message, force=True)
-            self._abort_z_speed_test("alarm")
             if self._explore_active:
                 self._handle_explore_alarm(label)
             return
@@ -527,14 +497,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._explore_pending = False
         if lower.startswith("error:"):
             self._append_console(line, force=True)
-            self._abort_z_speed_test("controller error")
             return
-        if lower == "ok" and self._z_speed_test_active:
-            self._z_speed_test_pending -= 1
-            if self._z_speed_test_pending <= 0:
-                self._on_z_speed_test_iteration_complete()
-            if not self._console_verbose.isChecked():
-                return
         if lower == "ok" and not self._console_verbose.isChecked():
             return
         self._append_console(line)
@@ -554,8 +517,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 return False
             if code == 27:
                 self._homing_pull_off = value
-            elif code == 3:
-                self._axis_invert_mask = int(value)
             elif code == 23:
                 self._homing_dir_mask = int(value)
             elif code == 110:
@@ -628,48 +589,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._limit_y.setText(format_value(self._limits["Y"]))
         self._limit_z.setText(format_value(self._limits["Z"]))
         self._update_machine_controls()
-
-    def _on_z_speed_test_done(self):
-        if not self._z_speed_test_active:
-            return
-        self._z_speed_test_active = False
-        self._z_speed_test_pending = 0
-        self._append_console("Z speed test complete.", force=True)
-        self._z_speed_test_mode = None
-        self._send_unlock_home_after_z_speed_test()
-
-    def _abort_z_speed_test(self, reason):
-        if not self._z_speed_test_active:
-            return
-        self._z_speed_test_active = False
-        self._z_speed_test_pending = 0
-        feed = self._z_speed_ramp_current_feed or self._travel_feed.value()
-        self._z_speed_test_mode = None
-        self._append_console(
-            f"Z speed test aborted at {feed:.0f} mm/min: {reason}.", force=True
-        )
-        self._send_unlock_home_after_z_speed_test()
-
-    def _on_z_speed_test_iteration_complete(self):
-        if self._z_speed_test_mode == "ramp":
-            next_feed = self._z_speed_ramp_current_feed + self._z_speed_ramp_increment
-            if next_feed <= self._z_speed_ramp_max_feed:
-                self._z_speed_ramp_current_feed = next_feed
-                self._send_z_speed_iteration()
-                return
-            self._append_console(
-                f"Z speed ramp reached max feed ({self._z_speed_ramp_max_feed:.0f} mm/min) without trigger.",
-                force=True,
-            )
-        self._on_z_speed_test_done()
-
-    def _send_unlock_home_after_z_speed_test(self):
-        if not self._sender.is_connected():
-            return
-        if self._sender.is_streaming():
-            return
-        self._send_command("$X")
-        self._send_command("$H")
 
     def _connect_to_port(self, port):
         try:
@@ -938,7 +857,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         if not self._confirm_explore_limits(self._explore_step, self._explore_feed, self._explore_margin):
             return
-        self._start_explore(["X", "Y", "Z"], preflight=True)
+        self._start_explore(["X", "Y", "Z"])
 
     def _prepare_explore_parameters(self):
         self._explore_step = self._explore_step_spin.value()
@@ -953,17 +872,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._homing_pull_off + 2.0,
             self._explore_margin + 2.0,
         )
-        self._explore_ramp_increment = self._z_speed_increment_spin.value()
-        self._explore_ramp_max_feed = self._z_speed_max_feed_spin.value()
         self._explore_recover_attempts = 0
         if self._explore_step <= 0:
             self._append_console("Explore limits failed: step must be > 0.")
-            return False
-        if self._explore_ramp_increment <= 0:
-            self._append_console("Explore limits failed: ramp step must be > 0.")
-            return False
-        if self._explore_ramp_max_feed < self._explore_feed:
-            self._append_console("Explore limits failed: ramp max feed must be >= test feed.")
             return False
         return True
 
@@ -986,51 +897,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         if not self._confirm_explore_limits(self._explore_step, self._explore_feed, self._explore_margin):
             return
-        self._start_explore(["Z"], preflight=True)
+        self._start_explore(["Z"])
 
     def _on_z_speed_test(self):
-        if self._z_speed_test_active:
-            self._append_console("Z speed test already running.")
-            return
         if not self._sender.is_connected():
             self._append_console("Z speed test failed: not connected.")
             return
         if self._sender.is_streaming() or self._explore_active:
             self._append_console("Z speed test failed: sender busy.")
             return
-        if not self._prepare_explore_parameters():
+        step = self._explore_step_spin.value()
+        if step <= 0:
+            self._append_console("Z speed test failed: step must be > 0.")
             return
-        start_feed = self._travel_feed.value()
-        increment = self._z_speed_increment_spin.value()
-        max_feed = self._z_speed_max_feed_spin.value()
-        if increment <= 0:
-            self._append_console("Z speed ramp failed: increment must be > 0.")
-            return
-        if max_feed < start_feed:
-            self._append_console("Z speed ramp failed: max feed must be >= start feed.")
-            return
-        self._z_speed_ramp_current_feed = start_feed
-        self._z_speed_ramp_increment = increment
-        self._z_speed_ramp_max_feed = max_feed
-        self._z_speed_test_mode = "ramp"
-        self._z_speed_test_active = True
-        self._append_console(
-            f"Z speed ramp: starting at {start_feed:.0f} mm/min, step {increment:.0f} mm/min."
-        )
-        self._send_z_speed_iteration()
-
-    def _send_z_speed_iteration(self):
-        if not self._z_speed_test_active:
-            return
-        step = self._explore_step
-        feed = self._z_speed_ramp_current_feed
+        feed = self._travel_feed.value()
         direction = self._axis_explore_dir("Z")
         distance = direction * step
         self._append_console(
-            f"Z speed ramp: testing {feed:.0f} mm/min ({step:.3f} mm step, "
-            f"direction {'+' if direction > 0 else '-'})."
+            f"Z speed test: moving {step:.3f} mm at {feed:.0f} mm/min "
+            f"(direction {'+' if direction > 0 else '-'})"
         )
-        self._z_speed_test_pending = 4
         self._send_command("G91 G21")
         self._send_command(f"G1 Z{distance:.3f} F{feed:.0f}")
         self._send_command(f"G0 Z{-distance:.3f}")
@@ -1055,9 +941,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         return result == QtWidgets.QMessageBox.Yes
 
-    def _start_explore(self, axes=None, preflight=False):
+    def _start_explore(self, axes=None):
         self._explore_active = True
-        self._explore_phase = "preflight" if preflight else "move"
+        self._explore_phase = "move"
         axes_to_run = list(axes) if axes else ["X", "Y", "Z"]
         if not axes_to_run:
             self._append_console("Explore limits failed: no axes selected.")
@@ -1077,14 +963,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_retry_axes.clear()
         self._explore_retry_axis = None
         self._explore_retry_measurements = {}
-        self._explore_retry_modes = {}
         self._explore_dir_override = {"X": None, "Y": None, "Z": None}
-        self._explore_preflight = bool(preflight)
-        self._explore_preflight_sent = False
         self._append_console("Explore limits started.", force=True)
         self._update_machine_controls()
-        if not preflight:
-            self._start_next_explore_axis()
+        self._start_next_explore_axis()
 
     def _start_next_explore_axis(self):
         if self._explore_retry_axis is not None:
@@ -1104,13 +986,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_dir = self._axis_explore_dir(self._explore_axis)
         self._explore_dir_override[self._explore_axis] = None
         self._explore_ramp_remaining = 0.0
-        axis_max_feed = self._axis_max_feed.get(self._explore_axis)
-        if axis_max_feed is not None:
-            self._explore_ramp_max_feed_axis = min(self._explore_ramp_max_feed, axis_max_feed)
-        else:
-            self._explore_ramp_max_feed_axis = self._explore_ramp_max_feed
-        self._explore_ramp_feed = min(self._explore_feed, self._explore_ramp_max_feed_axis)
-        self._explore_ramp_increment_current = self._explore_ramp_increment
+        self._explore_ramp_feed = 0.0
+        self._explore_ramp_increment_current = 0.0
+        self._explore_ramp_max_feed_axis = 0.0
         self._explore_ramp_last_step = 0.0
         self._append_console(f"Exploring {self._explore_axis} axis...", force=True)
 
@@ -1121,20 +999,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         status = self._sender.get_status() or {}
         state = str(status.get("state", "")).lower()
-        if self._explore_phase == "preflight":
-            if not self._explore_preflight_sent:
-                self._explore_preflight_sent = True
-                self._append_console("Explore preflight: $X $H $$", force=True)
-                self._send_command("$X", log=False)
-                self._send_command("$H", log=False)
-                self._send_command("$$", log=False)
-                self._explore_next_action = time.time() + 0.5
-                return
-            if state == "idle":
-                self._explore_phase = "move"
-                self._explore_next_action = time.time() + 0.2
-                self._start_next_explore_axis()
-            return
         if self._explore_phase == "wait_idle":
             if state == "idle":
                 self._explore_next_action = time.time() + 0.2
@@ -1271,17 +1135,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                         force=True,
                     )
                     return
-            self._explore_recover_attempts += 1
-            if self._explore_recover_attempts <= 3:
-                self._explore_unlocked = False
-                self._explore_pending = False
-                self._explore_phase = "unlock"
-                self._explore_next_action = time.time() + 0.5
-                self._append_console(
-                    "Alarm during recovery. Retrying unlock/home.",
-                    force=True,
-                )
-                return
             self._append_console("Explore halted due to alarm during recovery.", force=True)
             self._explore_active = False
             self._explore_phase = None
@@ -1289,25 +1142,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         axis = self._explore_axis
         measured = max(0.0, self._explore_distance - self._explore_margin)
-        retry_mode = None
         if axis in self._explore_retry_measurements:
             previous = self._explore_retry_measurements.pop(axis)
-            mode = self._explore_retry_modes.pop(axis, "max")
-            if mode == "min":
-                measured = min(previous, measured)
-            else:
-                measured = max(previous, measured)
-        else:
-            retry_mode = self._retry_mode_for_explore_axis(axis, measured)
-        if retry_mode:
+            measured = max(previous, measured)
+        elif self._should_retry_explore_axis(axis, measured):
             self._explore_retry_axes.add(axis)
             self._explore_retry_measurements[axis] = measured
-            self._explore_retry_modes[axis] = retry_mode
             self._explore_retry_axis = axis
             self._explore_dir_override[axis] = -self._explore_dir
-            reason = "too early" if retry_mode == "max" else "too large"
             self._append_console(
-                f"Explore: {axis} alarm {reason}; retrying opposite direction.",
+                f"Explore: {axis} alarm too early; retrying opposite direction.",
                 force=True,
             )
             self._explore_phase = "unlock"
@@ -1318,26 +1162,31 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_results[axis] = measured
         self._limits[axis] = measured
         self._update_limit_labels()
+        axis_max_feed = self._axis_max_feed.get(axis)
+        if axis_max_feed is None or axis_max_feed <= 0:
+            axis_max_feed = self._explore_feed
+            self._append_console(
+                "Explore ramp: max feed unknown; using test feed.",
+                force=True,
+            )
+        if self._explore_feed > axis_max_feed:
+            self._append_console(
+                f"Explore ramp: test feed capped to {axis_max_feed:.0f} mm/min.",
+                force=True,
+            )
+        self._explore_ramp_max_feed_axis = axis_max_feed
+        self._explore_ramp_feed = min(self._explore_feed, axis_max_feed)
+        self._explore_ramp_last_step = 0.0
         self._explore_ramp_remaining = max(
             0.0,
             measured - self._explore_backoff - self._explore_prehome_pull_off,
         )
-        self._explore_ramp_feed = min(self._explore_feed, self._explore_ramp_max_feed_axis)
-        self._explore_ramp_last_step = 0.0
         if self._explore_ramp_remaining > 0.0 and self._explore_step > 0:
             steps_available = max(1, int(self._explore_ramp_remaining / self._explore_step))
-            needed_increment = (
-                self._explore_ramp_max_feed_axis - self._explore_ramp_feed
-            ) / steps_available
-            self._explore_ramp_increment_current = self._explore_ramp_increment
-            if needed_increment > self._explore_ramp_increment_current:
-                self._explore_ramp_increment_current = needed_increment
-                self._append_console(
-                    f"Explore ramp: adjusting increment to {needed_increment:.0f} mm/min.",
-                    force=True,
-                )
+            ramp_delta = self._explore_ramp_max_feed_axis - self._explore_ramp_feed
+            self._explore_ramp_increment_current = max(0.0, ramp_delta / steps_available)
         else:
-            self._explore_ramp_increment_current = self._explore_ramp_increment
+            self._explore_ramp_increment_current = 0.0
         self._append_console(
             f"Explore: {axis} limit hit. Stored {measured:.3f} mm "
             f"(margin {self._explore_margin:.2f}).",
@@ -1526,13 +1375,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if override is not None:
             return override
         if axis == "Z":
-            return -1.0
+            choice = self._explore_z_dir.currentText()
+            if choice == "+":
+                return 1.0
+            if choice == "-":
+                return -1.0
         bit = {"X": 0, "Y": 1, "Z": 2}.get(axis, 0)
         homing_positive = bool(self._homing_dir_mask & (1 << bit))
-        direction = -1.0 if homing_positive else 1.0
-        if self._axis_invert_mask & (1 << bit):
-            direction *= -1.0
-        return direction
+        return -1.0 if homing_positive else 1.0
 
     def _expected_explore_limit(self, axis):
         if not self._explore_known_limits:
@@ -1546,19 +1396,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return None
         return value if value > 0 else None
 
-    def _retry_mode_for_explore_axis(self, axis, measured):
+    def _should_retry_explore_axis(self, axis, measured):
         if axis in self._explore_retry_axes:
-            return None
+            return False
         expected = self._expected_explore_limit(axis)
         if expected is not None:
-            if measured < expected * 0.8:
-                return "max"
-            if measured > expected * 1.2:
-                return "min"
-            return None
-        if measured < self._explore_step * 2.0:
-            return "max"
-        return None
+            return measured < expected * 0.8
+        return measured < self._explore_step * 2.0
 
     def _update_preview(self):
         text = self._gcode_edit.toPlainText()
