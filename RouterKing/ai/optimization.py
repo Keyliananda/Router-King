@@ -16,12 +16,12 @@ try:
     from .config import load_config
     from .context import get_selection_context
     from .logging import get_logger
-    from .results import AnalysisIssue, OptimizationResult
+    from .results import AnalysisIssue, OptimizationResult, OptimizationTarget
 except ImportError:  # pragma: no cover - fallback for FreeCAD import path
     from ai.config import load_config
     from ai.context import get_selection_context
     from ai.logging import get_logger
-    from ai.results import AnalysisIssue, OptimizationResult
+    from ai.results import AnalysisIssue, OptimizationResult, OptimizationTarget
 
 
 _LOG = get_logger("routerking.ai.optimization")
@@ -130,23 +130,32 @@ def optimize_selection(context=None, create_preview=True):
                     )
                 )
 
-            if object_changes and create_preview and doc is not None:
+            if object_changes:
                 preview_shape = _shape_from_edges(new_edges)
                 if preview_shape is None:
                     result.issues.append(
                         AnalysisIssue(
                             severity="warning",
-                            message=f"{item.label}: Failed to build preview shape.",
+                            message=f"{item.label}: Failed to build optimized shape.",
                             suggestion="Try a simpler selection.",
                             object_label=item.label,
                         )
                     )
                     continue
 
-                preview_obj = _create_preview_object(doc, item.label, preview_shape)
-                if preview_obj is not None:
-                    result.preview_objects.append(preview_obj)
-                    optimized_objects += 1
+                result.optimized_targets.append(
+                    OptimizationTarget(
+                        obj=item.obj,
+                        label=item.label,
+                        shape=preview_shape,
+                        optimized_edges=object_changes,
+                    )
+                )
+
+                if create_preview and doc is not None:
+                    preview_obj = _create_preview_object(doc, item.label, preview_shape)
+                    if preview_obj is not None:
+                        result.preview_objects.append(preview_obj)
 
         success = True
     finally:
@@ -171,6 +180,7 @@ def optimize_selection(context=None, create_preview=True):
         "preview_objects": len(result.preview_objects),
     }
 
+    optimized_objects = len(result.optimized_targets)
     if optimized_edges:
         result.summary = (
             f"Optimized {optimized_edges} spline edge(s) across {optimized_objects} object(s)."
@@ -290,6 +300,25 @@ def _create_preview_object(doc, label, shape):
         _LOG.warning("Failed to create preview object: %s", exc)
         return None
     return preview_obj
+
+
+def create_optimized_object(doc, label, shape):
+    if doc is None:
+        return None
+    base = _safe_object_name(f"{label}_optimized")
+    name = _unique_object_name(doc, base)
+    try:
+        optimized_obj = doc.addObject("Part::Feature", name)
+        optimized_obj.Label = f"{label} (Spline Optimized)"
+        optimized_obj.Shape = shape
+        view = getattr(optimized_obj, "ViewObject", None)
+        if view is not None:
+            view.LineColor = (0.1, 0.4, 0.9)
+            view.LineWidth = 2.0
+    except Exception as exc:
+        _LOG.warning("Failed to create optimized object: %s", exc)
+        return None
+    return optimized_obj
 
 
 def _safe_object_name(label):

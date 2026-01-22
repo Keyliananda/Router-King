@@ -183,6 +183,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ai_worker_thread = None
         self._ai_chat_busy = False
         self._ai_preview_objects = []
+        self._ai_last_optimization = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -531,8 +532,23 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         action_row.addStretch(1)
         layout.addLayout(action_row)
 
+        apply_row = QtWidgets.QHBoxLayout()
+        self._ai_apply_btn = QtWidgets.QPushButton("Apply Preview")
+        self._ai_discard_btn = QtWidgets.QPushButton("Discard Preview")
+        self._ai_apply_btn.setEnabled(False)
+        self._ai_discard_btn.setEnabled(False)
+        apply_row.addWidget(self._ai_apply_btn)
+        apply_row.addWidget(self._ai_discard_btn)
+        apply_row.addStretch(1)
+        layout.addLayout(apply_row)
+
         self._ai_status = QtWidgets.QLabel("Select geometry and click Analyze.")
         layout.addWidget(self._ai_status)
+
+        self._ai_progress = QtWidgets.QProgressBar()
+        self._ai_progress.setVisible(False)
+        self._ai_progress.setRange(0, 0)
+        layout.addWidget(self._ai_progress)
 
         self._ai_results = QtWidgets.QTreeWidget()
         self._ai_results.setHeaderLabels(["Severity", "Issue", "Suggestion"])
@@ -540,21 +556,43 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ai_results.setAlternatingRowColors(True)
         layout.addWidget(self._ai_results, 1)
 
+        report_group = QtWidgets.QGroupBox("AI Report")
+        report_layout = QtWidgets.QVBoxLayout(report_group)
+        self._ai_report_log = QtWidgets.QPlainTextEdit()
+        self._ai_report_log.setReadOnly(True)
+        self._ai_report_log.setPlaceholderText("Audit log will appear here.")
+        report_layout.addWidget(self._ai_report_log, 1)
+        report_btn_row = QtWidgets.QHBoxLayout()
+        self._ai_report_refresh = QtWidgets.QPushButton("Refresh Report")
+        self._ai_report_clear = QtWidgets.QPushButton("Clear Report")
+        report_btn_row.addWidget(self._ai_report_refresh)
+        report_btn_row.addWidget(self._ai_report_clear)
+        report_btn_row.addStretch(1)
+        report_layout.addLayout(report_btn_row)
+        layout.addWidget(report_group, 1)
+
         self._ai_analyze_btn.clicked.connect(self._on_ai_analyze)
         self._ai_optimize_btn.clicked.connect(self._on_ai_optimize_preview)
         self._ai_clear_btn.clicked.connect(self._on_ai_clear)
+        self._ai_apply_btn.clicked.connect(self._on_ai_apply_optimization)
+        self._ai_discard_btn.clicked.connect(self._on_ai_discard_preview)
         self._ai_save_btn.clicked.connect(self._on_ai_settings_save)
         self._ai_api_key_show.toggled.connect(self._on_ai_toggle_key_visibility)
         self._ai_chat_send.clicked.connect(self._on_ai_send)
         self._ai_chat_clear.clicked.connect(self._on_ai_clear_chat)
         self._ai_chat_input.returnPressed.connect(self._on_ai_send)
+        self._ai_report_refresh.clicked.connect(self._on_ai_report_refresh)
+        self._ai_report_clear.clicked.connect(self._on_ai_report_clear)
 
         self._load_ai_settings()
+        self._load_ai_report()
 
     def _on_ai_clear(self):
         self._clear_ai_preview()
         self._ai_results.clear()
         self._ai_status.setText("Select geometry and click Analyze.")
+        self._ai_last_optimization = None
+        self._update_ai_action_state()
 
     def _on_ai_analyze(self):
         try:
@@ -562,14 +600,18 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         except ImportError:
             from ai.analysis import analyze_selection
 
+        self._set_ai_busy(True, "Analyzing selection...")
         try:
             result = analyze_selection()
         except Exception as exc:
             self._ai_status.setText("Analysis failed.")
             _status_message(f"RouterKing AI analysis failed: {exc}\n", error=True)
+            self._set_ai_busy(False)
             return
 
         self._render_ai_results(result)
+        self._record_ai_report("Analyze Selection", result)
+        self._set_ai_busy(False)
 
     def _on_ai_optimize_preview(self):
         try:
@@ -578,15 +620,84 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             from ai.optimization import optimize_selection
 
         self._clear_ai_preview()
+        self._set_ai_busy(True, "Optimizing splines (preview)...")
         try:
             result = optimize_selection(create_preview=True)
         except Exception as exc:
             self._ai_status.setText("Optimization failed.")
             _status_message(f"RouterKing AI optimization failed: {exc}\n", error=True)
+            self._set_ai_busy(False)
             return
 
         self._ai_preview_objects = result.preview_objects
+        self._ai_last_optimization = result
         self._render_ai_results(result)
+        self._record_ai_report("Preview Spline Optimization", result)
+        self._set_ai_busy(False)
+        self._update_ai_action_state()
+
+    def _on_ai_apply_optimization(self):
+        try:
+            from ..ai.optimization import create_optimized_object
+        except ImportError:
+            from ai.optimization import create_optimized_object
+
+        result = self._ai_last_optimization
+        if result is None or not result.optimized_targets:
+            self._ai_status.setText("No optimization preview to apply.")
+            return
+
+        doc = App.ActiveDocument
+        if doc is None:
+            self._ai_status.setText("No active document.")
+            return
+
+        self._set_ai_busy(True, "Applying optimization...")
+        applied = 0
+        transaction_open = False
+        try:
+            doc.openTransaction("RouterKing Apply Spline Optimization")
+            transaction_open = True
+        except Exception:
+            transaction_open = False
+
+        try:
+            for target in result.optimized_targets:
+                optimized_obj = create_optimized_object(doc, target.label, target.shape)
+                if optimized_obj is not None:
+                    applied += 1
+        except Exception as exc:
+            self._ai_status.setText("Apply failed.")
+            _status_message(f"RouterKing AI apply failed: {exc}\n", error=True)
+            if transaction_open:
+                try:
+                    doc.abortTransaction()
+                except Exception:
+                    pass
+            self._set_ai_busy(False)
+            return
+
+        if transaction_open:
+            try:
+                doc.commitTransaction()
+            except Exception:
+                pass
+        try:
+            doc.recompute()
+        except Exception:
+            pass
+
+        self._ai_status.setText(f"Applied optimization to {applied} object(s).")
+        self._record_ai_report("Apply Spline Optimization", result, details=f"applied={applied}")
+        self._clear_ai_preview()
+        self._set_ai_busy(False)
+        self._update_ai_action_state()
+
+    def _on_ai_discard_preview(self):
+        self._clear_ai_preview()
+        self._ai_last_optimization = None
+        self._ai_status.setText("Preview discarded.")
+        self._update_ai_action_state()
 
     def _clear_ai_preview(self):
         if not self._ai_preview_objects:
@@ -612,6 +723,60 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 doc.recompute()
             except Exception:
                 pass
+
+    def _update_ai_action_state(self):
+        has_preview = bool(self._ai_preview_objects)
+        self._ai_apply_btn.setEnabled(has_preview and not self._ai_progress.isVisible())
+        self._ai_discard_btn.setEnabled(has_preview and not self._ai_progress.isVisible())
+
+    def _set_ai_busy(self, busy, message=None):
+        self._ai_progress.setVisible(busy)
+        if message:
+            self._ai_status.setText(message)
+        self._ai_analyze_btn.setEnabled(not busy)
+        self._ai_optimize_btn.setEnabled(not busy)
+        self._ai_clear_btn.setEnabled(not busy)
+        self._update_ai_action_state()
+        QtWidgets.QApplication.processEvents()
+
+    def _record_ai_report(self, action, result, details=None):
+        try:
+            from ..ai.reporting import append_report, format_report_entry, load_report
+        except ImportError:
+            from ai.reporting import append_report, format_report_entry, load_report
+
+        try:
+            entry = format_report_entry(action, result, details=details)
+            append_report(entry)
+            self._ai_report_log.setPlainText(load_report())
+        except Exception as exc:
+            _status_message(f"RouterKing AI report failed: {exc}\n", error=True)
+
+    def _load_ai_report(self):
+        try:
+            from ..ai.reporting import load_report
+        except ImportError:
+            from ai.reporting import load_report
+
+        try:
+            self._ai_report_log.setPlainText(load_report())
+        except Exception:
+            pass
+
+    def _on_ai_report_refresh(self):
+        self._load_ai_report()
+
+    def _on_ai_report_clear(self):
+        try:
+            from ..ai.reporting import clear_report
+        except ImportError:
+            from ai.reporting import clear_report
+
+        try:
+            clear_report()
+            self._ai_report_log.clear()
+        except Exception as exc:
+            _status_message(f"RouterKing AI report clear failed: {exc}\n", error=True)
 
     def _render_ai_results(self, result):
         self._ai_results.clear()

@@ -171,17 +171,17 @@ Erster echter Nutzen.
    - Neu-Approximation als Option
    - Parameter mit sinnvollen Defaults
 
-6. [ ] Preview + Undo integrieren
+6. [x] Preview + Undo integrieren
    - Vorher/Nachher-Vorschau
    - Transaktionen fuer Undo/Redo
    - Nicht-destruktive Vorschau-Objekte
 
-7. [ ] UI-Workflow fuer KI-Aktionen
+7. [x] UI-Workflow fuer KI-Aktionen
    - Ergebnisliste + kurze Erklaerungen
    - "Anwenden" vs. "Verwerfen"
    - Status/Progress-Anzeige
 
-8. [ ] Reporting/Logging ergaenzen
+8. [x] Reporting/Logging ergaenzen
    - Report-Panel fuer Geometrie-Qualitaet
    - Audit-Trail der KI-Eingriffe
 

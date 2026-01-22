@@ -19,8 +19,17 @@ class AnalysisResult:
 
 
 @dataclass
+class OptimizationTarget:
+    obj: object
+    label: str
+    shape: object
+    optimized_edges: int
+
+
+@dataclass
 class OptimizationResult:
     issues: list = field(default_factory=list)
     summary: str = ""
     stats: dict = field(default_factory=dict)
     preview_objects: list = field(default_factory=list)
+    optimized_targets: list = field(default_factory=list)
