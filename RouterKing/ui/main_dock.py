@@ -5,6 +5,7 @@ try:
 except ImportError:  # pragma: no cover - fallback for older FreeCAD builds
     from PySide import QtCore, QtWidgets, QtGui
 
+import math
 import re
 import time
 
@@ -126,8 +127,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_ramp_feed = 0.0
         self._explore_ramp_increment_current = 0.0
         self._explore_ramp_max_feed_axis = 0.0
+        self._explore_ramp_target_feed = 0.0
+        self._explore_ramp_accel_remaining = 0.0
         self._explore_ramp_last_step = 0.0
         self._explore_prehome_pull_off = 0.0
+        self._explore_preflight_sent = False
+        self._explore_preflight_started_at = 0.0
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -943,7 +948,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _start_explore(self, axes=None):
         self._explore_active = True
-        self._explore_phase = "move"
+        self._explore_phase = "preflight"
         axes_to_run = list(axes) if axes else ["X", "Y", "Z"]
         if not axes_to_run:
             self._append_console("Explore limits failed: no axes selected.")
@@ -964,9 +969,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_retry_axis = None
         self._explore_retry_measurements = {}
         self._explore_dir_override = {"X": None, "Y": None, "Z": None}
+        self._explore_preflight_sent = False
+        self._explore_preflight_started_at = 0.0
         self._append_console("Explore limits started.", force=True)
         self._update_machine_controls()
-        self._start_next_explore_axis()
 
     def _start_next_explore_axis(self):
         if self._explore_retry_axis is not None:
@@ -999,6 +1005,30 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         status = self._sender.get_status() or {}
         state = str(status.get("state", "")).lower()
+        if self._explore_phase == "preflight":
+            if not self._explore_preflight_sent:
+                self._explore_preflight_sent = True
+                self._explore_preflight_started_at = time.time()
+                self._limits_announced = False
+                self._append_console("Explore preflight: reading limits...", force=True)
+                self._send_command("$$", log=False)
+                self._explore_next_action = time.time() + 0.2
+                return
+            if self._limits_announced:
+                self._explore_phase = "move"
+                self._explore_next_action = time.time() + 0.2
+                self._start_next_explore_axis()
+                return
+            if time.time() - self._explore_preflight_started_at > 2.0:
+                self._append_console(
+                    "Explore preflight: limits not confirmed, continuing.",
+                    force=True,
+                )
+                self._explore_phase = "move"
+                self._explore_next_action = time.time() + 0.2
+                self._start_next_explore_axis()
+                return
+            return
         if self._explore_phase == "wait_idle":
             if state == "idle":
                 self._explore_next_action = time.time() + 0.2
