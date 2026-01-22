@@ -10,6 +10,7 @@ so the user still runs a single program (FreeCAD with RouterKing inside).
 - `RouterKing/routerking_wb.py` Workbench registration and menu/toolbar.
 - `RouterKing/commands.py` Command registration (toolbar/menu entries).
 - `RouterKing/ui/` Dock widgets and UI views.
+- `RouterKing/ai/` Local-first AI analysis helpers (selection/context + baseline rules).
 - `RouterKing/grbl/` GRBL transport, queue, and protocol helpers.
 - `RouterKing/vendor/` Vendored deps and import helpers (pyserial fallback).
 - `RouterKing/Resources/` Icons and FreeCAD resources.
@@ -28,6 +29,7 @@ so the user still runs a single program (FreeCAD with RouterKing inside).
   - Port input and Connect button
   - Jog button row (X/Y/Z +/-)
   - Console output panel
+- Tabs now include an `AI Tools` view for local geometry analysis.
 - Connect is currently stubbed and writes to the console/FreeCAD status bar.
 
 ## GRBL sender (current)

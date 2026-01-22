@@ -176,11 +176,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         self._control_tab = QtWidgets.QWidget()
         self._gcode_tab = QtWidgets.QWidget()
+        self._ai_tab = QtWidgets.QWidget()
         self._tabs.addTab(self._control_tab, "Control")
         self._tabs.addTab(self._gcode_tab, "G-Code")
+        self._tabs.addTab(self._ai_tab, "AI Tools")
 
         self._build_control_tab(self._control_tab)
         self._build_gcode_tab(self._gcode_tab)
+        self._build_ai_tab(self._ai_tab)
 
         self._poll_timer = QtCore.QTimer(self)
         self._poll_timer.setInterval(100)
@@ -400,6 +403,128 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         self._update_job_controls()
         self._update_machine_controls()
+
+    def _build_ai_tab(self, parent):
+        layout = QtWidgets.QVBoxLayout(parent)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        header = QtWidgets.QLabel("AI Tools (Local Analysis)")
+        layout.addWidget(header)
+
+        settings_group = QtWidgets.QGroupBox("Provider Settings")
+        settings_layout = QtWidgets.QGridLayout(settings_group)
+        settings_layout.addWidget(QtWidgets.QLabel("Provider"), 0, 0)
+        self._ai_provider = QtWidgets.QComboBox()
+        self._ai_provider.addItems(["openai"])
+        settings_layout.addWidget(self._ai_provider, 0, 1)
+
+        settings_layout.addWidget(QtWidgets.QLabel("API key"), 1, 0)
+        key_row = QtWidgets.QHBoxLayout()
+        self._ai_api_key = QtWidgets.QLineEdit()
+        self._ai_api_key.setEchoMode(QtWidgets.QLineEdit.Password)
+        self._ai_api_key.setPlaceholderText("sk-...")
+        self._ai_api_key_show = QtWidgets.QCheckBox("Show")
+        key_row.addWidget(self._ai_api_key, 1)
+        key_row.addWidget(self._ai_api_key_show)
+        settings_layout.addLayout(key_row, 1, 1)
+
+        settings_layout.addWidget(QtWidgets.QLabel("Base URL"), 2, 0)
+        self._ai_base_url = QtWidgets.QLineEdit()
+        self._ai_base_url.setPlaceholderText("https://api.openai.com/v1")
+        settings_layout.addWidget(self._ai_base_url, 2, 1)
+
+        self._ai_save_btn = QtWidgets.QPushButton("Save Settings")
+        self._ai_settings_status = QtWidgets.QLabel(
+            "Stored in FreeCAD preferences (plain text). ENV overrides saved values."
+        )
+        settings_layout.addWidget(self._ai_save_btn, 3, 1)
+        settings_layout.addWidget(self._ai_settings_status, 4, 0, 1, 2)
+        layout.addWidget(settings_group)
+
+        action_row = QtWidgets.QHBoxLayout()
+        self._ai_analyze_btn = QtWidgets.QPushButton("Analyze Selection")
+        self._ai_clear_btn = QtWidgets.QPushButton("Clear")
+        action_row.addWidget(self._ai_analyze_btn)
+        action_row.addWidget(self._ai_clear_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        self._ai_status = QtWidgets.QLabel("Select geometry and click Analyze.")
+        layout.addWidget(self._ai_status)
+
+        self._ai_results = QtWidgets.QTreeWidget()
+        self._ai_results.setHeaderLabels(["Severity", "Issue", "Suggestion"])
+        self._ai_results.setRootIsDecorated(False)
+        self._ai_results.setAlternatingRowColors(True)
+        layout.addWidget(self._ai_results, 1)
+
+        self._ai_analyze_btn.clicked.connect(self._on_ai_analyze)
+        self._ai_clear_btn.clicked.connect(self._on_ai_clear)
+        self._ai_save_btn.clicked.connect(self._on_ai_settings_save)
+        self._ai_api_key_show.toggled.connect(self._on_ai_toggle_key_visibility)
+
+        self._load_ai_settings()
+
+    def _on_ai_clear(self):
+        self._ai_results.clear()
+        self._ai_status.setText("Select geometry and click Analyze.")
+
+    def _on_ai_analyze(self):
+        try:
+            from ..ai.analysis import analyze_selection
+        except ImportError:
+            from ai.analysis import analyze_selection
+
+        try:
+            result = analyze_selection()
+        except Exception as exc:
+            self._ai_status.setText("Analysis failed.")
+            _status_message(f"RouterKing AI analysis failed: {exc}\n", error=True)
+            return
+
+        self._render_ai_results(result)
+
+    def _render_ai_results(self, result):
+        self._ai_results.clear()
+        for issue in result.issues:
+            item = QtWidgets.QTreeWidgetItem([issue.severity, issue.message, issue.suggestion])
+            self._ai_results.addTopLevelItem(item)
+        if result.summary:
+            self._ai_status.setText(result.summary)
+        elif result.issues:
+            self._ai_status.setText(f"Found {len(result.issues)} issue(s).")
+        else:
+            self._ai_status.setText("No issues detected.")
+
+    def _on_ai_toggle_key_visibility(self, checked):
+        if checked:
+            self._ai_api_key.setEchoMode(QtWidgets.QLineEdit.Normal)
+        else:
+            self._ai_api_key.setEchoMode(QtWidgets.QLineEdit.Password)
+
+    def _load_ai_settings(self):
+        try:
+            from ..ai.config import load_config
+        except ImportError:
+            from ai.config import load_config
+
+        config = load_config()
+        provider = config.get("provider", {})
+        name = provider.get("name", "openai")
+        index = self._ai_provider.findText(name)
+        if index != -1:
+            self._ai_provider.setCurrentIndex(index)
+        self._ai_api_key.setText(provider.get("openai_api_key", ""))
+        self._ai_base_url.setText(provider.get("openai_base_url", ""))
+
+    def _on_ai_settings_save(self):
+        params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/AI")
+        params.SetString("provider", self._ai_provider.currentText())
+        params.SetString("openai_api_key", self._ai_api_key.text().strip())
+        params.SetString("openai_base_url", self._ai_base_url.text().strip())
+        self._ai_settings_status.setText("Saved to FreeCAD preferences.")
+        _status_message("RouterKing AI settings saved.\n")
 
     def _on_connect(self):
         if self._sender.is_connected():
