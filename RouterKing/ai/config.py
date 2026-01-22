@@ -14,10 +14,23 @@ DEFAULT_CONFIG = {
         "corner_angle_warn_deg": 30.0,
         "min_radius_warn": 0.5,
     },
+    "optimization": {
+        "target_poles": 12,
+        "sample_points": 60,
+        "max_degree": 3,
+        "tolerance": 0.05,
+    },
     "provider": {
         "name": "openai",
         "openai_api_key": "",
         "openai_base_url": "https://api.openai.com/v1",
+        "openai_model": "gpt-4o-mini",
+        "openai_reasoning_effort": "off",
+    },
+    "chat": {
+        "system_prompt": "You are RouterKing AI, a helpful assistant for FreeCAD CNC workflows.",
+        "temperature": 0.2,
+        "max_output_tokens": 512,
     },
     "logging": {
         "level": "INFO",
@@ -42,12 +55,39 @@ def load_config():
     config["analysis"]["min_radius_warn"] = params.GetFloat(
         "min_radius_warn", config["analysis"]["min_radius_warn"]
     )
+    config["optimization"]["target_poles"] = params.GetInt(
+        "opt_target_poles", config["optimization"]["target_poles"]
+    )
+    config["optimization"]["sample_points"] = params.GetInt(
+        "opt_sample_points", config["optimization"]["sample_points"]
+    )
+    config["optimization"]["max_degree"] = params.GetInt(
+        "opt_max_degree", config["optimization"]["max_degree"]
+    )
+    config["optimization"]["tolerance"] = params.GetFloat(
+        "opt_tolerance", config["optimization"]["tolerance"]
+    )
     config["provider"]["name"] = params.GetString("provider", config["provider"]["name"])
     config["provider"]["openai_api_key"] = params.GetString(
         "openai_api_key", config["provider"]["openai_api_key"]
     )
     config["provider"]["openai_base_url"] = params.GetString(
         "openai_base_url", config["provider"]["openai_base_url"]
+    )
+    config["provider"]["openai_model"] = params.GetString(
+        "openai_model", config["provider"]["openai_model"]
+    )
+    config["provider"]["openai_reasoning_effort"] = params.GetString(
+        "openai_reasoning_effort", config["provider"]["openai_reasoning_effort"]
+    )
+    config["chat"]["system_prompt"] = params.GetString(
+        "system_prompt", config["chat"]["system_prompt"]
+    )
+    config["chat"]["temperature"] = params.GetFloat(
+        "temperature", config["chat"]["temperature"]
+    )
+    config["chat"]["max_output_tokens"] = params.GetInt(
+        "max_output_tokens", config["chat"]["max_output_tokens"]
     )
     config["logging"]["level"] = params.GetString("log_level", config["logging"]["level"])
     _apply_env_overrides(config)
@@ -62,3 +102,11 @@ def _apply_env_overrides(config):
     base_url = os.environ.get("ROUTERKING_OPENAI_BASE_URL")
     if base_url:
         config["provider"]["openai_base_url"] = base_url
+
+    model = os.environ.get("ROUTERKING_OPENAI_MODEL")
+    if model:
+        config["provider"]["openai_model"] = model
+
+    effort = os.environ.get("ROUTERKING_OPENAI_REASONING_EFFORT")
+    if effort:
+        config["provider"]["openai_reasoning_effort"] = effort

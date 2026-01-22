@@ -16,3 +16,11 @@ class AnalysisResult:
     issues: list = field(default_factory=list)
     summary: str = ""
     stats: dict = field(default_factory=dict)
+
+
+@dataclass
+class OptimizationResult:
+    issues: list = field(default_factory=list)
+    summary: str = ""
+    stats: dict = field(default_factory=dict)
+    preview_objects: list = field(default_factory=list)

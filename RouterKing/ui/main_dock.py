@@ -60,6 +60,51 @@ _ALARM_CODES = {
 }
 
 
+class _AiChatWorker(QtCore.QObject):
+    finished = QtCore.Signal(str, object)
+
+    def __init__(
+        self,
+        api_key,
+        base_url,
+        model,
+        messages,
+        reasoning_effort,
+        temperature,
+        max_output_tokens,
+    ):
+        super().__init__()
+        self._api_key = api_key
+        self._base_url = base_url
+        self._model = model
+        self._messages = messages
+        self._reasoning_effort = reasoning_effort
+        self._temperature = temperature
+        self._max_output_tokens = max_output_tokens
+
+    def run(self):
+        try:
+            from ..ai.client import send_chat_request
+        except ImportError:
+            from ai.client import send_chat_request
+
+        try:
+            response = send_chat_request(
+                self._api_key,
+                self._base_url,
+                self._model,
+                self._messages,
+                reasoning_effort=self._reasoning_effort,
+                temperature=self._temperature,
+                max_output_tokens=self._max_output_tokens,
+            )
+        except Exception as exc:
+            self.finished.emit("", exc)
+            return
+
+        self.finished.emit(response, None)
+
+
 def _find_main_window():
     for widget in QtWidgets.QApplication.topLevelWidgets():
         if widget.metaObject().className() == "Gui::MainWindow":
@@ -133,6 +178,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_prehome_pull_off = 0.0
         self._explore_preflight_sent = False
         self._explore_preflight_started_at = 0.0
+        self._ai_messages = []
+        self._ai_worker = None
+        self._ai_worker_thread = None
+        self._ai_chat_busy = False
+        self._ai_preview_objects = []
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -409,7 +459,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        header = QtWidgets.QLabel("AI Tools (Local Analysis)")
+        header = QtWidgets.QLabel("AI Tools")
         layout.addWidget(header)
 
         settings_group = QtWidgets.QGroupBox("Provider Settings")
@@ -434,18 +484,49 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ai_base_url.setPlaceholderText("https://api.openai.com/v1")
         settings_layout.addWidget(self._ai_base_url, 2, 1)
 
+        settings_layout.addWidget(QtWidgets.QLabel("Model"), 3, 0)
+        self._ai_model = QtWidgets.QComboBox()
+        self._ai_model.setEditable(True)
+        self._ai_model.addItems(["gpt-4o", "gpt-4o-mini", "o1-mini", "o1"])
+        settings_layout.addWidget(self._ai_model, 3, 1)
+
+        settings_layout.addWidget(QtWidgets.QLabel("Reasoning effort"), 4, 0)
+        self._ai_reasoning = QtWidgets.QComboBox()
+        self._ai_reasoning.addItems(["off", "low", "medium", "high"])
+        settings_layout.addWidget(self._ai_reasoning, 4, 1)
+
         self._ai_save_btn = QtWidgets.QPushButton("Save Settings")
         self._ai_settings_status = QtWidgets.QLabel(
             "Stored in FreeCAD preferences (plain text). ENV overrides saved values."
         )
-        settings_layout.addWidget(self._ai_save_btn, 3, 1)
-        settings_layout.addWidget(self._ai_settings_status, 4, 0, 1, 2)
+        settings_layout.addWidget(self._ai_save_btn, 5, 1)
+        settings_layout.addWidget(self._ai_settings_status, 6, 0, 1, 2)
         layout.addWidget(settings_group)
+
+        chat_group = QtWidgets.QGroupBox("AI Chat")
+        chat_layout = QtWidgets.QVBoxLayout(chat_group)
+        self._ai_chat_log = QtWidgets.QPlainTextEdit()
+        self._ai_chat_log.setReadOnly(True)
+        self._ai_chat_log.setPlaceholderText("Chat history will appear here.")
+        chat_layout.addWidget(self._ai_chat_log, 1)
+
+        chat_input_row = QtWidgets.QHBoxLayout()
+        self._ai_chat_input = QtWidgets.QLineEdit()
+        self._ai_chat_input.setPlaceholderText("Ask the RouterKing AI assistant...")
+        self._ai_chat_send = QtWidgets.QPushButton("Send")
+        self._ai_chat_clear = QtWidgets.QPushButton("Clear Chat")
+        chat_input_row.addWidget(self._ai_chat_input, 1)
+        chat_input_row.addWidget(self._ai_chat_send)
+        chat_input_row.addWidget(self._ai_chat_clear)
+        chat_layout.addLayout(chat_input_row)
+        layout.addWidget(chat_group, 1)
 
         action_row = QtWidgets.QHBoxLayout()
         self._ai_analyze_btn = QtWidgets.QPushButton("Analyze Selection")
+        self._ai_optimize_btn = QtWidgets.QPushButton("Preview Spline Optimization")
         self._ai_clear_btn = QtWidgets.QPushButton("Clear")
         action_row.addWidget(self._ai_analyze_btn)
+        action_row.addWidget(self._ai_optimize_btn)
         action_row.addWidget(self._ai_clear_btn)
         action_row.addStretch(1)
         layout.addLayout(action_row)
@@ -460,13 +541,18 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         layout.addWidget(self._ai_results, 1)
 
         self._ai_analyze_btn.clicked.connect(self._on_ai_analyze)
+        self._ai_optimize_btn.clicked.connect(self._on_ai_optimize_preview)
         self._ai_clear_btn.clicked.connect(self._on_ai_clear)
         self._ai_save_btn.clicked.connect(self._on_ai_settings_save)
         self._ai_api_key_show.toggled.connect(self._on_ai_toggle_key_visibility)
+        self._ai_chat_send.clicked.connect(self._on_ai_send)
+        self._ai_chat_clear.clicked.connect(self._on_ai_clear_chat)
+        self._ai_chat_input.returnPressed.connect(self._on_ai_send)
 
         self._load_ai_settings()
 
     def _on_ai_clear(self):
+        self._clear_ai_preview()
         self._ai_results.clear()
         self._ai_status.setText("Select geometry and click Analyze.")
 
@@ -484,6 +570,48 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
 
         self._render_ai_results(result)
+
+    def _on_ai_optimize_preview(self):
+        try:
+            from ..ai.optimization import optimize_selection
+        except ImportError:
+            from ai.optimization import optimize_selection
+
+        self._clear_ai_preview()
+        try:
+            result = optimize_selection(create_preview=True)
+        except Exception as exc:
+            self._ai_status.setText("Optimization failed.")
+            _status_message(f"RouterKing AI optimization failed: {exc}\n", error=True)
+            return
+
+        self._ai_preview_objects = result.preview_objects
+        self._render_ai_results(result)
+
+    def _clear_ai_preview(self):
+        if not self._ai_preview_objects:
+            return
+        try:
+            doc = App.ActiveDocument
+        except Exception:
+            doc = None
+
+        for obj in list(self._ai_preview_objects):
+            obj_name = getattr(obj, "Name", None)
+            if doc is None or not obj_name:
+                continue
+            try:
+                if doc.getObject(obj_name) is not None:
+                    doc.removeObject(obj_name)
+            except Exception:
+                pass
+
+        self._ai_preview_objects = []
+        if doc is not None:
+            try:
+                doc.recompute()
+            except Exception:
+                pass
 
     def _render_ai_results(self, result):
         self._ai_results.clear()
@@ -511,20 +639,105 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         config = load_config()
         provider = config.get("provider", {})
+        chat = config.get("chat", {})
         name = provider.get("name", "openai")
         index = self._ai_provider.findText(name)
         if index != -1:
             self._ai_provider.setCurrentIndex(index)
         self._ai_api_key.setText(provider.get("openai_api_key", ""))
         self._ai_base_url.setText(provider.get("openai_base_url", ""))
+        model = provider.get("openai_model", "gpt-4o-mini")
+        model_index = self._ai_model.findText(model)
+        if model_index != -1:
+            self._ai_model.setCurrentIndex(model_index)
+        else:
+            self._ai_model.setEditText(model)
+        reasoning = provider.get("openai_reasoning_effort", "off")
+        reasoning_index = self._ai_reasoning.findText(reasoning)
+        if reasoning_index != -1:
+            self._ai_reasoning.setCurrentIndex(reasoning_index)
+        self._ai_system_prompt = chat.get(
+            "system_prompt",
+            "You are RouterKing AI, a helpful assistant for FreeCAD CNC workflows.",
+        )
+        self._ai_temperature = float(chat.get("temperature", 0.2))
+        self._ai_max_output_tokens = int(chat.get("max_output_tokens", 512))
 
     def _on_ai_settings_save(self):
         params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/AI")
         params.SetString("provider", self._ai_provider.currentText())
         params.SetString("openai_api_key", self._ai_api_key.text().strip())
         params.SetString("openai_base_url", self._ai_base_url.text().strip())
+        params.SetString("openai_model", self._ai_model.currentText().strip())
+        params.SetString("openai_reasoning_effort", self._ai_reasoning.currentText().strip())
         self._ai_settings_status.setText("Saved to FreeCAD preferences.")
         _status_message("RouterKing AI settings saved.\n")
+
+    def _on_ai_clear_chat(self):
+        self._ai_chat_log.clear()
+        self._ai_messages = []
+        self._ai_chat_busy = False
+        self._ai_chat_send.setEnabled(True)
+        self._ai_chat_input.setEnabled(True)
+
+    def _on_ai_send(self):
+        if self._ai_chat_busy:
+            return
+
+        text = self._ai_chat_input.text().strip()
+        if not text:
+            return
+
+        if not self._ai_messages:
+            self._ai_messages.append({"role": "system", "content": self._ai_system_prompt})
+
+        self._ai_messages.append({"role": "user", "content": text})
+        self._append_chat("You", text)
+        self._ai_chat_input.clear()
+        self._ai_start_chat_request()
+
+    def _append_chat(self, speaker, message):
+        self._ai_chat_log.appendPlainText(f"{speaker}: {message}\n")
+
+    def _ai_start_chat_request(self):
+        api_key = self._ai_api_key.text().strip()
+        base_url = self._ai_base_url.text().strip() or "https://api.openai.com/v1"
+        model = self._ai_model.currentText().strip()
+        reasoning = self._ai_reasoning.currentText().strip()
+
+        self._ai_chat_busy = True
+        self._ai_chat_send.setEnabled(False)
+        self._ai_chat_input.setEnabled(False)
+        self._append_chat("System", "Sending request...")
+
+        self._ai_worker_thread = QtCore.QThread(self)
+        self._ai_worker = _AiChatWorker(
+            api_key,
+            base_url,
+            model,
+            list(self._ai_messages),
+            reasoning,
+            self._ai_temperature,
+            self._ai_max_output_tokens,
+        )
+        self._ai_worker.moveToThread(self._ai_worker_thread)
+        self._ai_worker_thread.started.connect(self._ai_worker.run)
+        self._ai_worker.finished.connect(self._on_ai_chat_finished)
+        self._ai_worker.finished.connect(self._ai_worker_thread.quit)
+        self._ai_worker_thread.finished.connect(self._ai_worker.deleteLater)
+        self._ai_worker_thread.finished.connect(self._ai_worker_thread.deleteLater)
+        self._ai_worker_thread.start()
+
+    def _on_ai_chat_finished(self, response, error):
+        if error:
+            self._append_chat("Error", str(error))
+        else:
+            self._ai_messages.append({"role": "assistant", "content": response})
+            self._append_chat("AI", response)
+
+        self._ai_chat_busy = False
+        self._ai_chat_send.setEnabled(True)
+        self._ai_chat_input.setEnabled(True)
 
     def _on_connect(self):
         if self._sender.is_connected():

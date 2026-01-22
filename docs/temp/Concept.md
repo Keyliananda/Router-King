@@ -166,7 +166,7 @@ Erster echter Nutzen.
    - Ein einheitliches Analyse-Result-Format
    - Baseline-Regelpruefungen (Spline-Kontinuitaet, Knicke)
 
-5. [ ] Spline-Optimierung (MVP) implementieren
+5. [x] Spline-Optimierung (MVP) implementieren
    - Glaettung und Reduktion der Kontrollpunkte
    - Neu-Approximation als Option
    - Parameter mit sinnvollen Defaults
@@ -198,9 +198,24 @@ Erster echter Nutzen.
    - Toolpath-Parsing
    - Risiko-Checks (Radien, Ueberfraesung)
 
-12) Tests und Qualitaet
+12. [ ] Tests und Qualitaet
    - Unit-Tests fuer Analyse/Optimierung
    - kleine Beispielmodelle als Fixture
+
+13. [ ] Hardware-Agent (optional) planen
+   - Read-only Monitoring (Status, Sensor-Daten)
+   - Sicherheitsregeln + Alarm-Klassen
+   - Simulationsmodus fuer Tests
+
+14. [ ] Release-/Addon-Paket vorbereiten
+   - Addon-Manager Metadaten + Versionsschema
+   - Changelog + Migrationshinweise
+   - Minimaler Setup-Guide
+
+15. [ ] Dokumentation & Feedback-Loop
+   - Quickstart + Beispielmodelle
+   - Troubleshooting/FAQ
+   - Feedback sammeln und Roadmap iterieren
 
 ## Philosophie
 - Assistenz statt Autonomie
