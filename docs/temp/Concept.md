@@ -157,12 +157,12 @@ Erster echter Nutzen.
    - Commands/Actions als Platzhalter
    - Minimaler Panel-Container
 
-3. [ ] Auswahl- und Kontextzugriff implementieren
+3. [x] Auswahl- und Kontextzugriff implementieren
    - Aktuelle Selektion lesen
    - Typen/Geometrie sicher extrahieren
    - Fehlertoleranz fuer ungueltige Objekte
 
-4. [ ] Analyse-Pipeline definieren
+4. [x] Analyse-Pipeline definieren
    - Ein einheitliches Analyse-Result-Format
    - Baseline-Regelpruefungen (Spline-Kontinuitaet, Knicke)
 
