@@ -9,10 +9,19 @@ class AnalysisIssue:
     message: str
     suggestion: str = ""
     object_label: str = ""
+    feedback_key: str = ""
+    weight: float = 1.0
 
 
 @dataclass
 class AnalysisResult:
+    issues: list = field(default_factory=list)
+    summary: str = ""
+    stats: dict = field(default_factory=dict)
+
+
+@dataclass
+class CamAnalysisResult:
     issues: list = field(default_factory=list)
     summary: str = ""
     stats: dict = field(default_factory=dict)

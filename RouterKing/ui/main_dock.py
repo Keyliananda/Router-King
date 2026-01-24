@@ -72,6 +72,8 @@ class _AiChatWorker(QtCore.QObject):
         reasoning_effort,
         temperature,
         max_output_tokens,
+        context_payload=None,
+        context_summary="",
     ):
         super().__init__()
         self._api_key = api_key
@@ -81,28 +83,33 @@ class _AiChatWorker(QtCore.QObject):
         self._reasoning_effort = reasoning_effort
         self._temperature = temperature
         self._max_output_tokens = max_output_tokens
+        self._context_payload = context_payload
+        self._context_summary = context_summary
 
     def run(self):
         try:
-            from ..ai.client import send_chat_request
+            from ..ai.assistant import ask_assistant
         except ImportError:
-            from ai.client import send_chat_request
+            from ai.assistant import ask_assistant
 
         try:
-            response = send_chat_request(
-                self._api_key,
-                self._base_url,
-                self._model,
+            response = ask_assistant(
                 self._messages,
+                api_key=self._api_key,
+                base_url=self._base_url,
+                model=self._model,
                 reasoning_effort=self._reasoning_effort,
                 temperature=self._temperature,
                 max_output_tokens=self._max_output_tokens,
+                context=self._context_payload,
+                context_summary=self._context_summary,
+                allow_llm=True,
             )
         except Exception as exc:
             self.finished.emit("", exc)
             return
 
-        self.finished.emit(response, None)
+        self.finished.emit(response.text, None)
 
 
 def _find_main_window():
@@ -184,6 +191,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ai_chat_busy = False
         self._ai_preview_objects = []
         self._ai_last_optimization = None
+        self._cam_status = None
+        self._cam_check_btn = None
+        self._cam_activate_btn = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -431,6 +441,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         job_row.addStretch(1)
         layout.addLayout(job_row)
 
+        cam_row = QtWidgets.QHBoxLayout()
+        self._cam_status = QtWidgets.QLabel("CAM Workbench: unknown")
+        self._cam_check_btn = QtWidgets.QPushButton("Check CAM")
+        self._cam_activate_btn = QtWidgets.QPushButton("Activate CAM")
+        self._cam_activate_btn.setEnabled(False)
+        cam_row.addWidget(self._cam_status, 1)
+        cam_row.addWidget(self._cam_check_btn)
+        cam_row.addWidget(self._cam_activate_btn)
+        cam_row.addStretch(1)
+        layout.addLayout(cam_row)
+
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self._gcode_edit = QtWidgets.QPlainTextEdit()
         self._gcode_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
@@ -451,9 +472,54 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._start_btn.clicked.connect(self._on_start_job)
         self._pause_btn.clicked.connect(self._on_pause_resume_job)
         self._stop_btn.clicked.connect(self._on_stop_job)
+        self._cam_check_btn.clicked.connect(self._on_cam_check)
+        self._cam_activate_btn.clicked.connect(self._on_cam_activate)
 
         self._update_job_controls()
         self._update_machine_controls()
+        self._refresh_cam_status()
+
+    def _refresh_cam_status(self):
+        try:
+            from ..cam.workbench import get_cam_workbench_status
+        except ImportError:
+            from cam.workbench import get_cam_workbench_status
+
+        status = get_cam_workbench_status()
+        self._apply_cam_status(status)
+
+    def _apply_cam_status(self, status):
+        if self._cam_status is None:
+            return
+
+        if status.available:
+            label = "CAM Workbench: available"
+            if status.module_name:
+                label += f" ({status.module_name})"
+        else:
+            label = "CAM Workbench: unavailable"
+
+        if status.reason:
+            label += f" - {status.reason}"
+        self._cam_status.setText(label)
+
+        if self._cam_activate_btn is not None:
+            self._cam_activate_btn.setEnabled(bool(status.available and status.workbench_name))
+
+    def _on_cam_check(self):
+        self._refresh_cam_status()
+
+    def _on_cam_activate(self):
+        try:
+            from ..cam.workbench import activate_cam_workbench, get_cam_workbench_status
+        except ImportError:
+            from cam.workbench import activate_cam_workbench, get_cam_workbench_status
+
+        status = get_cam_workbench_status()
+        ok, message = activate_cam_workbench(status)
+        if message:
+            _status_message(f"{message}\n", error=not ok)
+        self._refresh_cam_status()
 
     def _build_ai_tab(self, parent):
         layout = QtWidgets.QVBoxLayout(parent)
@@ -525,9 +591,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         action_row = QtWidgets.QHBoxLayout()
         self._ai_analyze_btn = QtWidgets.QPushButton("Analyze Selection")
         self._ai_optimize_btn = QtWidgets.QPushButton("Preview Spline Optimization")
+        self._ai_cam_btn = QtWidgets.QPushButton("Analyze G-Code")
         self._ai_clear_btn = QtWidgets.QPushButton("Clear")
         action_row.addWidget(self._ai_analyze_btn)
         action_row.addWidget(self._ai_optimize_btn)
+        action_row.addWidget(self._ai_cam_btn)
         action_row.addWidget(self._ai_clear_btn)
         action_row.addStretch(1)
         layout.addLayout(action_row)
@@ -573,6 +641,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         self._ai_analyze_btn.clicked.connect(self._on_ai_analyze)
         self._ai_optimize_btn.clicked.connect(self._on_ai_optimize_preview)
+        self._ai_cam_btn.clicked.connect(self._on_ai_cam_analysis)
         self._ai_clear_btn.clicked.connect(self._on_ai_clear)
         self._ai_apply_btn.clicked.connect(self._on_ai_apply_optimization)
         self._ai_discard_btn.clicked.connect(self._on_ai_discard_preview)
@@ -636,6 +705,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._set_ai_busy(False)
         self._update_ai_action_state()
 
+    def _on_ai_cam_analysis(self):
+        try:
+            from ..ai.cam_analysis import analyze_gcode
+        except ImportError:
+            from ai.cam_analysis import analyze_gcode
+
+        gcode_text = self._gcode_edit.toPlainText() if self._gcode_edit is not None else ""
+        self._set_ai_busy(True, "Analyzing G-code...")
+        try:
+            result = analyze_gcode(gcode_text)
+        except Exception as exc:
+            self._ai_status.setText("CAM analysis failed.")
+            _status_message(f"RouterKing CAM analysis failed: {exc}\n", error=True)
+            self._set_ai_busy(False)
+            return
+
+        self._render_ai_results(result)
+        self._record_ai_report("CAM Risk Check", result)
+        self._set_ai_busy(False)
+
     def _on_ai_apply_optimization(self):
         try:
             from ..ai.optimization import create_optimized_object
@@ -689,11 +778,32 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         self._ai_status.setText(f"Applied optimization to {applied} object(s).")
         self._record_ai_report("Apply Spline Optimization", result, details=f"applied={applied}")
+        try:
+            from ..ai.learning import record_feedback
+        except ImportError:
+            from ai.learning import record_feedback
+        try:
+            record_feedback("optimization.spline_preview", True, meta={"applied": applied})
+        except Exception:
+            pass
         self._clear_ai_preview()
         self._set_ai_busy(False)
         self._update_ai_action_state()
 
     def _on_ai_discard_preview(self):
+        if self._ai_preview_objects:
+            try:
+                from ..ai.learning import record_feedback
+            except ImportError:
+                from ai.learning import record_feedback
+            try:
+                record_feedback(
+                    "optimization.spline_preview",
+                    False,
+                    meta={"discarded": len(self._ai_preview_objects)},
+                )
+            except Exception:
+                pass
         self._clear_ai_preview()
         self._ai_last_optimization = None
         self._ai_status.setText("Preview discarded.")
@@ -735,6 +845,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._ai_status.setText(message)
         self._ai_analyze_btn.setEnabled(not busy)
         self._ai_optimize_btn.setEnabled(not busy)
+        self._ai_cam_btn.setEnabled(not busy)
         self._ai_clear_btn.setEnabled(not busy)
         self._update_ai_action_state()
         QtWidgets.QApplication.processEvents()
@@ -780,7 +891,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _render_ai_results(self, result):
         self._ai_results.clear()
-        for issue in result.issues:
+        issues = list(getattr(result, "issues", []) or [])
+        try:
+            from ..ai.learning import apply_issue_weights
+        except ImportError:
+            from ai.learning import apply_issue_weights
+        try:
+            issues = apply_issue_weights(issues)
+        except Exception:
+            pass
+        for issue in issues:
             item = QtWidgets.QTreeWidgetItem([issue.severity, issue.message, issue.suggestion])
             self._ai_results.addTopLevelItem(item)
         if result.summary:
@@ -869,6 +989,18 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         base_url = self._ai_base_url.text().strip() or "https://api.openai.com/v1"
         model = self._ai_model.currentText().strip()
         reasoning = self._ai_reasoning.currentText().strip()
+        context_payload = None
+        context_summary = ""
+        try:
+            from ..ai.assistant import collect_assistant_context, summarize_context
+        except ImportError:
+            from ai.assistant import collect_assistant_context, summarize_context
+        try:
+            context_payload = collect_assistant_context()
+            context_summary = summarize_context(context_payload)
+        except Exception:
+            context_payload = None
+            context_summary = ""
 
         self._ai_chat_busy = True
         self._ai_chat_send.setEnabled(False)
@@ -884,6 +1016,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             reasoning,
             self._ai_temperature,
             self._ai_max_output_tokens,
+            context_payload=context_payload,
+            context_summary=context_summary,
         )
         self._ai_worker.moveToThread(self._ai_worker_thread)
         self._ai_worker_thread.started.connect(self._ai_worker.run)

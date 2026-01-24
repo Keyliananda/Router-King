@@ -58,6 +58,13 @@ notarized Developer ID build is required.
 - FreeCAD 1.0.x (PySide2)
 - pyserial 3.5 (vendored) for GRBL communication
 
+## Tests
+Run the test suite from the repo root:
+
+```bash
+./scripts/test.sh
+```
+
 ## Update workflow
 - FreeCAD: treat it as an external app; upgrade only when needed.
 - RouterKing: `git pull` in this repo (no FreeCAD patches needed).

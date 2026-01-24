@@ -18,3 +18,6 @@
 - Limits and homing
 - Spindle/laser power and feed defaults
 - Target controller: GRBL (FoxAlien Masuter Pro)
+
+## CAM/Path workbench
+If CAM/Path is missing or disabled, see `docs/CAM_WORKBENCH.md`.

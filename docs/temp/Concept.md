@@ -70,6 +70,22 @@ Erstes echtes KI-Value-Feature.
   - Toolpaths
   - kritischen Radien
   - Ueberfraesungen
+- DXF -> G-Code Workflow:
+  - DXF Import (FreeCAD Import oder ezdxf)
+  - CAM Job + Operationen (Profile, Pocket, Drilling)
+  - GRBL Post Processor
+- Hybrid-Ansatz:
+  - CAM/Path API nutzen, wenn verfuegbar
+  - Simple 2D-Engine als Fallback
+- MVP-Entscheidung:
+  - Hybrid direkt (CAM + Fallback)
+- Simple Engine (MVP):
+  - Kontur-Extraktion, Lead-In/Out
+  - Multi-Pass + Ramping
+  - Laser Power (M3/M4)
+- UI-Integration:
+  - "Import DXF" Dialog im G-Code Tab
+  - Tool/Material Presets + Preview
 - Vorbereitung fuer:
   - Fraesen-Ueberwachung
   - Sensor-Daten (optional)
@@ -95,6 +111,12 @@ FreeCAD (Python)
   - Sketcher
   - Part
   - Path (CAM)
+
+CAM-Layer
+- CAM/Path Workbench API (Job, Operationen, Post)
+- DXF Import (Import API oder ezdxf)
+- Simple CAM Engine (Konturen -> Toolpath -> G-Code)
+- Hybrid Dispatcher (CAM wenn verfuegbar, sonst Simple)
 
 KI-Layer
 - Regelbasierte Analyse (Baseline)
@@ -138,8 +160,11 @@ Erster echter Nutzen.
 - personalisierte Vorschlaege
 
 ### Phase 4 – CAM-Integration
-- Toolpath-Analyse
-- Fraes-Risiko-Checks
+- CAM Workbench Status-Check (CAM vs Path)
+- DXF -> G-Code Workflow (Import, Job, Post)
+- Hybrid-Ansatz (direkt): CAM API + Simple Engine
+- UI: Import DXF Dialog + Tool/Material Presets
+- Toolpath-Analyse + Fraes-Risiko-Checks
 - Vorbereitung Hardware-Hooks
 
 ### Phase 5 – Hardware-Agent (optional)
@@ -185,35 +210,56 @@ Erster echter Nutzen.
    - Report-Panel fuer Geometrie-Qualitaet
    - Audit-Trail der KI-Eingriffe
 
-9. [ ] KI-Assistent vorbereiten (Phase 2)
+9. [x] KI-Assistent vorbereiten (Phase 2)
    - Kontextsammler (Sketch, Body, Fehler)
    - Textantworten aus Regelwissen
    - Schnittstelle fuer optionale LLM-Anbindung
 
-10. [ ] Lernsystem-Stub (Phase 3)
+10. [x] Lernsystem-Stub (Phase 3)
    - Feedback-Speicherung lokal
    - einfache Gewichtung der Vorschlaege
 
-11. [ ] CAM-Analyse vorbereiten (Phase 4)
+11. [x] CAM-Analyse vorbereiten (Phase 4)
    - Toolpath-Parsing
    - Risiko-Checks (Radien, Ueberfraesung)
 
-12. [ ] Tests und Qualitaet
+12. [x] CAM Workbench Status-Check + Aktivierung
+   - CAM/Path Verfuegbarkeit pruefen
+   - Workarounds dokumentieren (Preferences/Addon/Python Console)
+
+13. [ ] Hybrid-Integration (CAM + Fallback)
+   - CAM Job + Operationen (Profile/Pocket/Drilling)
+   - GRBL Post Processor
+   - Fallback auf Simple Engine aktiv, wenn CAM fehlt
+
+14. [ ] DXF -> G-Code (Simple Engine Fallback)
+   - DXF Import (Import API oder ezdxf)
+   - Kontur-Extraktion + Lead-In/Out
+   - Multi-Pass + Ramping + Laser Power
+
+15. [ ] UI-Workflow fuer DXF-Import
+   - "Import DXF" Dialog im G-Code Tab
+   - Tool/Material Presets + Preview
+   - G-Code in Editor laden
+
+16. [ ] Tests und Qualitaet
    - Unit-Tests fuer Analyse/Optimierung
    - kleine Beispielmodelle als Fixture
+   - CAM/DXF Test-Workflow
 
-13. [ ] Hardware-Agent (optional) planen
+17. [ ] Hardware-Agent (optional) planen
    - Read-only Monitoring (Status, Sensor-Daten)
    - Sicherheitsregeln + Alarm-Klassen
    - Simulationsmodus fuer Tests
 
-14. [ ] Release-/Addon-Paket vorbereiten
+18. [ ] Release-/Addon-Paket vorbereiten
    - Addon-Manager Metadaten + Versionsschema
    - Changelog + Migrationshinweise
    - Minimaler Setup-Guide
 
-15. [ ] Dokumentation & Feedback-Loop
+19. [ ] Dokumentation & Feedback-Loop
    - Quickstart + Beispielmodelle
+   - Path/CAM Workflow Guide
    - Troubleshooting/FAQ
    - Feedback sammeln und Roadmap iterieren
 

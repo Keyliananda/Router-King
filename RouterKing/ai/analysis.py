@@ -33,7 +33,12 @@ def analyze_selection(context=None):
     if context.warnings:
         for warning in context.warnings:
             result.issues.append(
-                AnalysisIssue(severity="info", message=warning, suggestion="Select geometry and retry.")
+                AnalysisIssue(
+                    severity="info",
+                    message=warning,
+                    suggestion="Select geometry and retry.",
+                    feedback_key="analysis.no_selection",
+                )
             )
         result.summary = "No selection."
         return result
@@ -50,6 +55,7 @@ def analyze_selection(context=None):
                     message=f"{item.label}: No shape data available.",
                     suggestion="Select a Part/Sketch with geometry.",
                     object_label=item.label,
+                    feedback_key="analysis.no_shape",
                 )
             )
             continue
@@ -69,7 +75,12 @@ def analyze_selection(context=None):
     result.summary = f"Analyzed {len(context.items)} object(s)."
     if not result.issues:
         result.issues.append(
-            AnalysisIssue(severity="info", message="No issues detected.", suggestion="Geometry looks clean.")
+            AnalysisIssue(
+                severity="info",
+                message="No issues detected.",
+                suggestion="Geometry looks clean.",
+                feedback_key="analysis.no_issues",
+            )
         )
     return result
 
@@ -100,6 +111,7 @@ def _check_spline_poles(edges, max_poles, label, result):
                     message=f"{label}: Spline has {len(poles)} control points.",
                     suggestion="Consider reducing control points or re-approximating the curve.",
                     object_label=label,
+                    feedback_key="analysis.spline_poles",
                 )
             )
 
@@ -137,6 +149,7 @@ def _check_corner_kinks(edges, angle_threshold, label, result):
                             message=f"{label}: Sharp corner detected ({angle:.1f} deg).",
                             suggestion="Consider adding a fillet or smoothing the spline.",
                             object_label=label,
+                            feedback_key="analysis.corner_kink",
                         )
                     )
                     return
@@ -158,6 +171,7 @@ def _check_min_radius(edges, min_radius, label, result):
                     message=f"{label}: Small radius detected ({radius:.3f}).",
                     suggestion="Increase radius to reduce toolpath stress.",
                     object_label=label,
+                    feedback_key="analysis.min_radius",
                 )
             )
 

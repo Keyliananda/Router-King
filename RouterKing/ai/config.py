@@ -32,6 +32,12 @@ DEFAULT_CONFIG = {
         "temperature": 0.2,
         "max_output_tokens": 512,
     },
+    "cam": {
+        "safe_z_height": 3.0,
+        "min_arc_radius": 0.5,
+        "tool_radius": 1.0,
+        "max_plunge_step": 2.0,
+    },
     "logging": {
         "level": "INFO",
     },

@@ -38,7 +38,12 @@ def optimize_selection(context=None, create_preview=True):
     if context.warnings:
         for warning in context.warnings:
             result.issues.append(
-                AnalysisIssue(severity="info", message=warning, suggestion="Select geometry and retry.")
+                AnalysisIssue(
+                    severity="info",
+                    message=warning,
+                    suggestion="Select geometry and retry.",
+                    feedback_key="optimization.no_selection",
+                )
             )
         result.summary = "No selection."
         return result
@@ -49,6 +54,7 @@ def optimize_selection(context=None, create_preview=True):
                 severity="warning",
                 message="FreeCAD Part module not available.",
                 suggestion="Run spline optimization inside FreeCAD.",
+                feedback_key="optimization.unavailable",
             )
         )
         result.summary = "Optimization unavailable."
@@ -61,6 +67,7 @@ def optimize_selection(context=None, create_preview=True):
                 severity="warning",
                 message="No active document.",
                 suggestion="Open a document and retry.",
+                feedback_key="optimization.no_document",
             )
         )
         create_preview = False
@@ -89,6 +96,7 @@ def optimize_selection(context=None, create_preview=True):
                         message=f"{item.label}: No shape data available.",
                         suggestion="Select a Part/Sketch with geometry.",
                         object_label=item.label,
+                        feedback_key="optimization.no_shape",
                     )
                 )
                 continue
@@ -101,6 +109,7 @@ def optimize_selection(context=None, create_preview=True):
                             message=f"{item.label}: Faces are not preserved in preview.",
                             suggestion="Run optimization on sketch or wire geometry.",
                             object_label=item.label,
+                            feedback_key="optimization.faces_not_preserved",
                         )
                     )
 
@@ -127,6 +136,7 @@ def optimize_selection(context=None, create_preview=True):
                         message=f"{item.label}: Spline reduced from {before} to {after} control points.",
                         suggestion="Preview created.",
                         object_label=item.label,
+                        feedback_key="optimization.spline_reduction",
                     )
                 )
 
@@ -134,13 +144,14 @@ def optimize_selection(context=None, create_preview=True):
                 preview_shape = _shape_from_edges(new_edges)
                 if preview_shape is None:
                     result.issues.append(
-                        AnalysisIssue(
-                            severity="warning",
-                            message=f"{item.label}: Failed to build optimized shape.",
-                            suggestion="Try a simpler selection.",
-                            object_label=item.label,
-                        )
+                    AnalysisIssue(
+                        severity="warning",
+                        message=f"{item.label}: Failed to build optimized shape.",
+                        suggestion="Try a simpler selection.",
+                        object_label=item.label,
+                        feedback_key="optimization.build_failed",
                     )
+                )
                     continue
 
                 result.optimized_targets.append(
@@ -193,6 +204,7 @@ def optimize_selection(context=None, create_preview=True):
                     severity="info",
                     message="No spline edges met the reduction criteria.",
                     suggestion="Select splines with many control points.",
+                    feedback_key="optimization.no_eligible",
                 )
             )
     return result
