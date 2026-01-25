@@ -7,6 +7,7 @@ except ImportError:  # pragma: no cover - fallback for older FreeCAD builds
 
 import json
 import math
+import os
 import re
 import time
 
@@ -239,6 +240,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         self._sender = GrblSender()
         self._last_gcode_path = None
+        self._last_dxf_path = None
         self._status_tick = 0
         self._fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
         self._ports_cache = []
@@ -292,10 +294,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._cam_check_btn = None
         self._cam_activate_btn = None
         self._cam_generate_btn = None
+        self._import_dxf_btn = None
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
+        self._dxf_import_defaults = {}
 
         self._load_cam_generate_defaults()
+        self._load_dxf_import_defaults()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -526,10 +531,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         file_row = QtWidgets.QHBoxLayout()
         self._load_btn = QtWidgets.QPushButton("Load")
         self._save_btn = QtWidgets.QPushButton("Save")
+        self._import_dxf_btn = QtWidgets.QPushButton("Import DXF")
         self._preview_btn = QtWidgets.QPushButton("Preview")
         self._cam_generate_btn = QtWidgets.QPushButton("Generate CAM")
         file_row.addWidget(self._load_btn)
         file_row.addWidget(self._save_btn)
+        file_row.addWidget(self._import_dxf_btn)
         file_row.addWidget(self._preview_btn)
         file_row.addWidget(self._cam_generate_btn)
         file_row.addStretch(1)
@@ -572,6 +579,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         self._load_btn.clicked.connect(self._on_load_gcode)
         self._save_btn.clicked.connect(self._on_save_gcode)
+        self._import_dxf_btn.clicked.connect(self._on_import_dxf)
         self._preview_btn.clicked.connect(self._update_preview)
         self._cam_generate_btn.clicked.connect(self._on_cam_generate)
         self._start_btn.clicked.connect(self._on_start_job)
@@ -683,6 +691,40 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._append_console(f"Generated G-code via {result.engine} engine.", force=True)
         _status_message(f"G-code generated via {result.engine} engine.\n")
 
+    def _on_import_dxf(self):
+        filters = "DXF (*.dxf);;All Files (*)"
+        start_dir = self._last_dxf_path or ""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import DXF", start_dir, filters)
+        if not path:
+            return
+
+        settings = self._show_dxf_import_dialog(path)
+        if settings is None:
+            return
+
+        dxf_path, gcode_settings, import_settings = settings
+        if not dxf_path:
+            return
+
+        try:
+            from ..cam.dxf_import import generate_gcode_from_dxf
+        except ImportError:
+            from cam.dxf_import import generate_gcode_from_dxf
+
+        self._append_console(f"Generating G-code from DXF: {dxf_path}", force=True)
+        try:
+            gcode = generate_gcode_from_dxf(dxf_path, gcode_settings, import_settings)
+        except Exception as exc:
+            self._append_console(f"DXF import failed: {exc}", force=True)
+            _status_message(f"DXF import failed: {exc}\n", error=True)
+            return
+
+        self._gcode_edit.setPlainText(gcode or "")
+        self._last_dxf_path = dxf_path
+        self._update_preview()
+        self._append_console(f"Generated G-code from DXF: {dxf_path}", force=True)
+        _status_message("G-code generated from DXF.\n")
+
     def _load_cam_generate_defaults(self):
         if App is None:
             return
@@ -738,6 +780,57 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         params.SetInt("spindle_speed", int(defaults.get("spindle_speed", 0)))
         params.SetInt("laser_power", int(defaults.get("laser_power", 0)))
         params.SetBool("start_spindle", bool(defaults.get("start_spindle", True)))
+
+    def _load_dxf_import_defaults(self):
+        if App is None:
+            return
+        params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/DXF")
+        self._dxf_import_defaults = {
+            "preset_name": params.GetString("preset_name", "Custom"),
+            "units": params.GetString("units", "mm"),
+            "feed_rate": params.GetFloat("feed_rate", 800.0),
+            "plunge_rate": params.GetFloat("plunge_rate", 300.0),
+            "safe_z": params.GetFloat("safe_z", 5.0),
+            "start_z": params.GetFloat("start_z", 0.0),
+            "cut_z": params.GetFloat("cut_z", -1.0),
+            "pass_depth": params.GetFloat("pass_depth", 0.0),
+            "ramp_length": params.GetFloat("ramp_length", 0.0),
+            "lead_in": params.GetFloat("lead_in", 0.0),
+            "lead_out": params.GetFloat("lead_out", 0.0),
+            "spindle_speed": params.GetInt("spindle_speed", 0),
+            "laser_power": params.GetInt("laser_power", 0),
+            "start_spindle": params.GetBool("start_spindle", True),
+            "deflection": params.GetFloat("deflection", 0.1),
+            "arc_segment_angle": params.GetFloat("arc_segment_angle", 10.0),
+            "merge_tolerance": params.GetFloat("merge_tolerance", 1e-6),
+            "prefer_ezdxf": params.GetBool("prefer_ezdxf", True),
+            "use_freecad": params.GetBool("use_freecad", True),
+        }
+
+    def _save_dxf_import_defaults(self):
+        if App is None:
+            return
+        params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/DXF")
+        defaults = self._dxf_import_defaults or {}
+        params.SetString("preset_name", str(defaults.get("preset_name", "Custom")))
+        params.SetString("units", str(defaults.get("units", "mm")))
+        params.SetFloat("feed_rate", float(defaults.get("feed_rate", 800.0)))
+        params.SetFloat("plunge_rate", float(defaults.get("plunge_rate", 300.0)))
+        params.SetFloat("safe_z", float(defaults.get("safe_z", 5.0)))
+        params.SetFloat("start_z", float(defaults.get("start_z", 0.0)))
+        params.SetFloat("cut_z", float(defaults.get("cut_z", -1.0)))
+        params.SetFloat("pass_depth", float(defaults.get("pass_depth", 0.0)))
+        params.SetFloat("ramp_length", float(defaults.get("ramp_length", 0.0)))
+        params.SetFloat("lead_in", float(defaults.get("lead_in", 0.0)))
+        params.SetFloat("lead_out", float(defaults.get("lead_out", 0.0)))
+        params.SetInt("spindle_speed", int(defaults.get("spindle_speed", 0)))
+        params.SetInt("laser_power", int(defaults.get("laser_power", 0)))
+        params.SetBool("start_spindle", bool(defaults.get("start_spindle", True)))
+        params.SetFloat("deflection", float(defaults.get("deflection", 0.1)))
+        params.SetFloat("arc_segment_angle", float(defaults.get("arc_segment_angle", 10.0)))
+        params.SetFloat("merge_tolerance", float(defaults.get("merge_tolerance", 1e-6)))
+        params.SetBool("prefer_ezdxf", bool(defaults.get("prefer_ezdxf", True)))
+        params.SetBool("use_freecad", bool(defaults.get("use_freecad", True)))
 
     def _load_cam_user_presets(self, params=None):
         if App is None:
@@ -1178,6 +1271,405 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._save_cam_generate_defaults()
 
         return cam_settings, simple_settings, prefer_cam.isChecked()
+
+    def _show_dxf_import_dialog(self, path):
+        try:
+            from ..cam.dxf_import import DxfImportSettings
+        except ImportError:
+            from cam.dxf_import import DxfImportSettings
+        try:
+            from ..cam.simple_engine import SimpleJobSettings
+        except ImportError:
+            from cam.simple_engine import SimpleJobSettings
+
+        defaults = dict(self._dxf_import_defaults or {})
+        simple_defaults = SimpleJobSettings()
+        import_defaults = DxfImportSettings()
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Import DXF")
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        file_group = QtWidgets.QGroupBox("DXF file")
+        file_layout = QtWidgets.QHBoxLayout(file_group)
+        file_path = QtWidgets.QLineEdit(path)
+        file_path.setReadOnly(True)
+        browse_btn = QtWidgets.QPushButton("Browse")
+        file_layout.addWidget(file_path, 1)
+        file_layout.addWidget(browse_btn)
+        layout.addWidget(file_group)
+
+        def browse_path():
+            start_dir = os.path.dirname(file_path.text()) or (self._last_dxf_path or "")
+            new_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                dialog,
+                "Select DXF",
+                start_dir,
+                "DXF (*.dxf);;All Files (*)",
+            )
+            if new_path:
+                file_path.setText(new_path)
+
+        browse_btn.clicked.connect(browse_path)
+
+        preset_group = QtWidgets.QGroupBox("Preset")
+        preset_layout = QtWidgets.QFormLayout(preset_group)
+        preset_combo = QtWidgets.QComboBox()
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.addWidget(preset_combo, 1)
+        preset_apply_btn = QtWidgets.QPushButton("Apply Preset")
+        preset_save_btn = QtWidgets.QPushButton("Save Preset")
+        preset_delete_btn = QtWidgets.QPushButton("Delete Preset")
+        preset_row.addWidget(preset_apply_btn)
+        preset_row.addWidget(preset_save_btn)
+        preset_row.addWidget(preset_delete_btn)
+        preset_layout.addRow("Preset", preset_row)
+        layout.addWidget(preset_group)
+
+        settings_group = QtWidgets.QGroupBox("Toolpath")
+        settings_layout = QtWidgets.QFormLayout(settings_group)
+
+        units = QtWidgets.QComboBox()
+        units.addItems(["mm", "inch"])
+        units.setCurrentText(defaults.get("units", simple_defaults.units))
+        settings_layout.addRow("Units", units)
+
+        feed_rate = QtWidgets.QDoubleSpinBox()
+        feed_rate.setDecimals(1)
+        feed_rate.setRange(0, 50000)
+        feed_rate.setValue(defaults.get("feed_rate", simple_defaults.feed_rate))
+        settings_layout.addRow("Feed rate (mm/min)", feed_rate)
+
+        plunge_rate = QtWidgets.QDoubleSpinBox()
+        plunge_rate.setDecimals(1)
+        plunge_rate.setRange(0, 50000)
+        plunge_rate.setValue(defaults.get("plunge_rate", simple_defaults.plunge_rate))
+        settings_layout.addRow("Plunge rate (mm/min)", plunge_rate)
+
+        safe_z = QtWidgets.QDoubleSpinBox()
+        safe_z.setDecimals(3)
+        safe_z.setRange(-1000, 1000)
+        safe_z.setValue(defaults.get("safe_z", simple_defaults.safe_z))
+        settings_layout.addRow("Safe Z", safe_z)
+
+        start_z = QtWidgets.QDoubleSpinBox()
+        start_z.setDecimals(3)
+        start_z.setRange(-1000, 1000)
+        start_z.setValue(defaults.get("start_z", simple_defaults.start_z))
+        settings_layout.addRow("Start Z", start_z)
+
+        cut_z = QtWidgets.QDoubleSpinBox()
+        cut_z.setDecimals(3)
+        cut_z.setRange(-1000, 1000)
+        cut_z.setValue(defaults.get("cut_z", simple_defaults.cut_z))
+        settings_layout.addRow("Cut Z", cut_z)
+
+        pass_depth = QtWidgets.QDoubleSpinBox()
+        pass_depth.setDecimals(3)
+        pass_depth.setRange(0, 1000)
+        pass_depth.setValue(defaults.get("pass_depth", simple_defaults.pass_depth))
+        settings_layout.addRow("Pass depth", pass_depth)
+
+        ramp_length = QtWidgets.QDoubleSpinBox()
+        ramp_length.setDecimals(3)
+        ramp_length.setRange(0, 10000)
+        ramp_length.setValue(defaults.get("ramp_length", simple_defaults.ramp_length))
+        settings_layout.addRow("Ramp length", ramp_length)
+
+        lead_in = QtWidgets.QDoubleSpinBox()
+        lead_in.setDecimals(3)
+        lead_in.setRange(0, 10000)
+        lead_in.setValue(defaults.get("lead_in", simple_defaults.lead_in))
+        settings_layout.addRow("Lead-in", lead_in)
+
+        lead_out = QtWidgets.QDoubleSpinBox()
+        lead_out.setDecimals(3)
+        lead_out.setRange(0, 10000)
+        lead_out.setValue(defaults.get("lead_out", simple_defaults.lead_out))
+        settings_layout.addRow("Lead-out", lead_out)
+
+        spindle_speed = QtWidgets.QSpinBox()
+        spindle_speed.setRange(0, 60000)
+        spindle_speed.setValue(defaults.get("spindle_speed", simple_defaults.spindle_speed))
+        settings_layout.addRow("Spindle speed (M3 S)", spindle_speed)
+
+        laser_power = QtWidgets.QSpinBox()
+        laser_power.setRange(0, 10000)
+        laser_power.setValue(defaults.get("laser_power", simple_defaults.laser_power))
+        settings_layout.addRow("Laser power (M3 S)", laser_power)
+
+        start_spindle = QtWidgets.QCheckBox("Start spindle/laser (M3)")
+        start_spindle.setChecked(defaults.get("start_spindle", simple_defaults.start_spindle))
+        settings_layout.addRow(start_spindle)
+        layout.addWidget(settings_group)
+
+        import_group = QtWidgets.QGroupBox("DXF import")
+        import_layout = QtWidgets.QFormLayout(import_group)
+
+        deflection = QtWidgets.QDoubleSpinBox()
+        deflection.setDecimals(4)
+        deflection.setRange(0, 10.0)
+        deflection.setValue(defaults.get("deflection", import_defaults.deflection))
+        import_layout.addRow("Deflection", deflection)
+
+        arc_segment_angle = QtWidgets.QDoubleSpinBox()
+        arc_segment_angle.setDecimals(1)
+        arc_segment_angle.setRange(1.0, 90.0)
+        arc_segment_angle.setValue(
+            defaults.get("arc_segment_angle", import_defaults.arc_segment_angle)
+        )
+        import_layout.addRow("Arc segment angle", arc_segment_angle)
+
+        merge_tolerance = QtWidgets.QDoubleSpinBox()
+        merge_tolerance.setDecimals(6)
+        merge_tolerance.setRange(0.0, 1.0)
+        merge_tolerance.setValue(defaults.get("merge_tolerance", import_defaults.merge_tolerance))
+        import_layout.addRow("Merge tolerance", merge_tolerance)
+
+        use_freecad = QtWidgets.QCheckBox("Use FreeCAD import when available")
+        use_freecad.setChecked(defaults.get("use_freecad", import_defaults.use_freecad))
+        import_layout.addRow(use_freecad)
+
+        prefer_ezdxf = QtWidgets.QCheckBox("Prefer ezdxf")
+        prefer_ezdxf.setChecked(defaults.get("prefer_ezdxf", import_defaults.prefer_ezdxf))
+        import_layout.addRow(prefer_ezdxf)
+        layout.addWidget(import_group)
+
+        preset_map = {}
+
+        def refresh_preset_combo(selected=None):
+            entries = list(_CAM_PRESETS) + list(self._cam_user_presets)
+            names = [name for name, _preset in entries]
+            preset_combo.blockSignals(True)
+            preset_combo.clear()
+            preset_combo.addItems(names)
+            if selected in names:
+                preset_combo.setCurrentText(selected)
+            else:
+                preset_combo.setCurrentText("Custom")
+            preset_combo.blockSignals(False)
+            preset_map.clear()
+            preset_map.update({name: preset for name, preset in entries})
+
+        builtin_names = {preset_name for preset_name, _preset in _CAM_PRESETS}
+
+        def apply_preset(name):
+            if name == "Custom":
+                return
+            preset = preset_map.get(name, {})
+            if not preset:
+                return
+            if "units" in preset:
+                units.setCurrentText(preset["units"])
+            if "feed_rate" in preset:
+                feed_rate.setValue(preset["feed_rate"])
+            if "plunge_rate" in preset:
+                plunge_rate.setValue(preset["plunge_rate"])
+            if "safe_z" in preset:
+                safe_z.setValue(preset["safe_z"])
+            if "start_z" in preset:
+                start_z.setValue(preset["start_z"])
+            if "cut_z" in preset:
+                cut_z.setValue(preset["cut_z"])
+            if "pass_depth" in preset:
+                pass_depth.setValue(preset["pass_depth"])
+            if "ramp_length" in preset:
+                ramp_length.setValue(preset["ramp_length"])
+            if "lead_in" in preset:
+                lead_in.setValue(preset["lead_in"])
+            if "lead_out" in preset:
+                lead_out.setValue(preset["lead_out"])
+            if "spindle_speed" in preset:
+                spindle_speed.setValue(preset["spindle_speed"])
+            if "laser_power" in preset:
+                laser_power.setValue(preset["laser_power"])
+            if "start_spindle" in preset:
+                start_spindle.setChecked(bool(preset["start_spindle"]))
+
+        preset_combo.currentTextChanged.connect(apply_preset)
+        preset_apply_btn.clicked.connect(lambda: apply_preset(preset_combo.currentText()))
+        refresh_preset_combo(defaults.get("preset_name", "Custom"))
+
+        def collect_preset_values():
+            return {
+                "units": units.currentText(),
+                "feed_rate": feed_rate.value(),
+                "plunge_rate": plunge_rate.value(),
+                "safe_z": safe_z.value(),
+                "start_z": start_z.value(),
+                "cut_z": cut_z.value(),
+                "pass_depth": pass_depth.value(),
+                "ramp_length": ramp_length.value(),
+                "lead_in": lead_in.value(),
+                "lead_out": lead_out.value(),
+                "spindle_speed": spindle_speed.value(),
+                "laser_power": laser_power.value(),
+                "start_spindle": start_spindle.isChecked(),
+            }
+
+        def save_preset():
+            name, ok = QtWidgets.QInputDialog.getText(
+                dialog,
+                "Save Preset",
+                "Preset name:",
+                text=preset_combo.currentText(),
+            )
+            if not ok:
+                return
+            name = name.strip()
+            if not name:
+                QtWidgets.QMessageBox.warning(dialog, "Save Preset", "Preset name cannot be empty.")
+                return
+            if name == "Custom":
+                QtWidgets.QMessageBox.warning(dialog, "Save Preset", "'Custom' is reserved.")
+                return
+            if name in builtin_names:
+                QtWidgets.QMessageBox.warning(
+                    dialog,
+                    "Save Preset",
+                    "Preset name matches a built-in preset. Choose another name.",
+                )
+                return
+
+            existing_index = None
+            for idx, (existing_name, _preset) in enumerate(self._cam_user_presets):
+                if existing_name == name:
+                    existing_index = idx
+                    break
+            if existing_index is not None:
+                result = QtWidgets.QMessageBox.question(
+                    dialog,
+                    "Overwrite Preset?",
+                    f"Preset '{name}' already exists. Overwrite it?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                )
+                if result != QtWidgets.QMessageBox.Yes:
+                    return
+                self._cam_user_presets[existing_index] = (name, collect_preset_values())
+            else:
+                self._cam_user_presets.append((name, collect_preset_values()))
+
+            self._save_cam_user_presets()
+            self._dxf_import_defaults["preset_name"] = name
+            self._save_dxf_import_defaults()
+            refresh_preset_combo(name)
+            _status_message(f"Saved preset: {name}\n")
+
+        preset_save_btn.clicked.connect(save_preset)
+
+        def delete_preset():
+            name = preset_combo.currentText()
+            if not name or name == "Custom":
+                QtWidgets.QMessageBox.information(
+                    dialog,
+                    "Delete Preset",
+                    "Select a user preset to delete.",
+                )
+                return
+            if name in builtin_names:
+                QtWidgets.QMessageBox.information(
+                    dialog,
+                    "Delete Preset",
+                    "Built-in presets cannot be deleted.",
+                )
+                return
+
+            match_index = None
+            for idx, (existing_name, _preset) in enumerate(self._cam_user_presets):
+                if existing_name == name:
+                    match_index = idx
+                    break
+            if match_index is None:
+                QtWidgets.QMessageBox.information(
+                    dialog,
+                    "Delete Preset",
+                    "Preset not found.",
+                )
+                return
+
+            result = QtWidgets.QMessageBox.question(
+                dialog,
+                "Delete Preset?",
+                f"Delete preset '{name}'?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            if result != QtWidgets.QMessageBox.Yes:
+                return
+
+            self._cam_user_presets.pop(match_index)
+            self._save_cam_user_presets()
+            self._dxf_import_defaults["preset_name"] = "Custom"
+            self._save_dxf_import_defaults()
+            refresh_preset_combo("Custom")
+            _status_message(f"Deleted preset: {name}\n")
+
+        preset_delete_btn.clicked.connect(delete_preset)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        ok_btn = QtWidgets.QPushButton("Generate")
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        button_row.addWidget(ok_btn)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        dxf_path = file_path.text().strip()
+        if not dxf_path:
+            return None
+
+        simple_settings = SimpleJobSettings(
+            safe_z=safe_z.value(),
+            cut_z=cut_z.value(),
+            start_z=start_z.value(),
+            pass_depth=pass_depth.value(),
+            ramp_length=ramp_length.value(),
+            lead_in=lead_in.value(),
+            lead_out=lead_out.value(),
+            feed_rate=feed_rate.value(),
+            plunge_rate=plunge_rate.value(),
+            units=units.currentText(),
+            spindle_speed=spindle_speed.value(),
+            laser_power=laser_power.value(),
+            start_spindle=start_spindle.isChecked(),
+        )
+        import_settings = DxfImportSettings(
+            deflection=deflection.value(),
+            arc_segment_angle=arc_segment_angle.value(),
+            merge_tolerance=merge_tolerance.value(),
+            prefer_ezdxf=prefer_ezdxf.isChecked(),
+            use_freecad=use_freecad.isChecked(),
+        )
+
+        self._dxf_import_defaults = {
+            "preset_name": preset_combo.currentText(),
+            "units": units.currentText(),
+            "feed_rate": feed_rate.value(),
+            "plunge_rate": plunge_rate.value(),
+            "safe_z": safe_z.value(),
+            "start_z": start_z.value(),
+            "cut_z": cut_z.value(),
+            "pass_depth": pass_depth.value(),
+            "ramp_length": ramp_length.value(),
+            "lead_in": lead_in.value(),
+            "lead_out": lead_out.value(),
+            "spindle_speed": spindle_speed.value(),
+            "laser_power": laser_power.value(),
+            "start_spindle": start_spindle.isChecked(),
+            "deflection": deflection.value(),
+            "arc_segment_angle": arc_segment_angle.value(),
+            "merge_tolerance": merge_tolerance.value(),
+            "prefer_ezdxf": prefer_ezdxf.isChecked(),
+            "use_freecad": use_freecad.isChecked(),
+        }
+        self._save_dxf_import_defaults()
+
+        return dxf_path, simple_settings, import_settings
 
     def _build_ai_tab(self, parent):
         layout = QtWidgets.QVBoxLayout(parent)

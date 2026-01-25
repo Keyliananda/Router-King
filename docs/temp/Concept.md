@@ -232,12 +232,12 @@ Erster echter Nutzen.
    - GRBL Post Processor
    - Fallback auf Simple Engine aktiv, wenn CAM fehlt
 
-14. [ ] DXF -> G-Code (Simple Engine Fallback)
+14. [x] DXF -> G-Code (Simple Engine Fallback)
    - DXF Import (Import API oder ezdxf)
    - Kontur-Extraktion + Lead-In/Out
    - Multi-Pass + Ramping + Laser Power
 
-15. [ ] UI-Workflow fuer DXF-Import
+15. [x] UI-Workflow fuer DXF-Import
    - "Import DXF" Dialog im G-Code Tab
    - Tool/Material Presets + Preview
    - G-Code in Editor laden
