@@ -227,7 +227,7 @@ Erster echter Nutzen.
    - CAM/Path Verfuegbarkeit pruefen
    - Workarounds dokumentieren (Preferences/Addon/Python Console)
 
-13. [ ] Hybrid-Integration (CAM + Fallback)
+13. [x] Hybrid-Integration (CAM + Fallback)
    - CAM Job + Operationen (Profile/Pocket/Drilling)
    - GRBL Post Processor
    - Fallback auf Simple Engine aktiv, wenn CAM fehlt

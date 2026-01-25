@@ -5,6 +5,7 @@ try:
 except ImportError:  # pragma: no cover - fallback for older FreeCAD builds
     from PySide import QtCore, QtWidgets, QtGui
 
+import json
 import math
 import re
 import time
@@ -58,6 +59,102 @@ _ALARM_CODES = {
     8: "Homing fail. Pull-off failed.",
     9: "Homing fail. Could not find switch.",
 }
+
+_CAM_PRESETS = [
+    ("Custom", {}),
+    (
+        "CNC Plywood 10mm (6mm endmill)",
+        {
+            "prefer_cam": True,
+            "units": "mm",
+            "feed_rate": 1000.0,
+            "plunge_rate": 300.0,
+            "spindle_speed": 18000,
+            "safe_z": 5.0,
+            "start_z": 0.0,
+            "cut_z": -3.0,
+            "pass_depth": 2.0,
+            "ramp_length": 4.0,
+            "lead_in": 1.0,
+            "lead_out": 1.0,
+            "start_depth": 0.0,
+            "final_depth": -10.0,
+            "step_down": 2.0,
+            "profile_side": "Outside",
+            "profile_direction": "CCW",
+            "start_spindle": True,
+        },
+    ),
+    (
+        "CNC Aluminum 3mm (3mm endmill)",
+        {
+            "prefer_cam": True,
+            "units": "mm",
+            "feed_rate": 400.0,
+            "plunge_rate": 150.0,
+            "spindle_speed": 12000,
+            "safe_z": 5.0,
+            "start_z": 0.0,
+            "cut_z": -1.0,
+            "pass_depth": 0.5,
+            "ramp_length": 2.0,
+            "lead_in": 0.5,
+            "lead_out": 0.5,
+            "start_depth": 0.0,
+            "final_depth": -3.0,
+            "step_down": 0.5,
+            "profile_side": "Outside",
+            "profile_direction": "CCW",
+            "start_spindle": True,
+        },
+    ),
+    (
+        "Laser Plywood 3mm",
+        {
+            "prefer_cam": False,
+            "units": "mm",
+            "feed_rate": 1200.0,
+            "plunge_rate": 0.0,
+            "laser_power": 1000,
+            "safe_z": 5.0,
+            "start_z": 0.0,
+            "cut_z": 0.0,
+            "pass_depth": 0.0,
+            "ramp_length": 0.0,
+            "lead_in": 0.0,
+            "lead_out": 0.0,
+            "start_depth": 0.0,
+            "final_depth": 0.0,
+            "step_down": 0.1,
+            "profile_side": "On",
+            "profile_direction": "CCW",
+            "start_spindle": True,
+        },
+    ),
+    (
+        "Laser Acrylic 3mm",
+        {
+            "prefer_cam": False,
+            "units": "mm",
+            "feed_rate": 800.0,
+            "plunge_rate": 0.0,
+            "laser_power": 900,
+            "safe_z": 5.0,
+            "start_z": 0.0,
+            "cut_z": 0.0,
+            "pass_depth": 0.0,
+            "ramp_length": 0.0,
+            "lead_in": 0.0,
+            "lead_out": 0.0,
+            "start_depth": 0.0,
+            "final_depth": 0.0,
+            "step_down": 0.1,
+            "profile_side": "On",
+            "profile_direction": "CCW",
+            "start_spindle": True,
+        },
+    ),
+]
 
 
 class _AiChatWorker(QtCore.QObject):
@@ -194,6 +291,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._cam_status = None
         self._cam_check_btn = None
         self._cam_activate_btn = None
+        self._cam_generate_btn = None
+        self._cam_generate_defaults = {}
+        self._cam_user_presets = []
+
+        self._load_cam_generate_defaults()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -425,9 +527,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._load_btn = QtWidgets.QPushButton("Load")
         self._save_btn = QtWidgets.QPushButton("Save")
         self._preview_btn = QtWidgets.QPushButton("Preview")
+        self._cam_generate_btn = QtWidgets.QPushButton("Generate CAM")
         file_row.addWidget(self._load_btn)
         file_row.addWidget(self._save_btn)
         file_row.addWidget(self._preview_btn)
+        file_row.addWidget(self._cam_generate_btn)
         file_row.addStretch(1)
         layout.addLayout(file_row)
 
@@ -469,6 +573,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._load_btn.clicked.connect(self._on_load_gcode)
         self._save_btn.clicked.connect(self._on_save_gcode)
         self._preview_btn.clicked.connect(self._update_preview)
+        self._cam_generate_btn.clicked.connect(self._on_cam_generate)
         self._start_btn.clicked.connect(self._on_start_job)
         self._pause_btn.clicked.connect(self._on_pause_resume_job)
         self._stop_btn.clicked.connect(self._on_stop_job)
@@ -520,6 +625,559 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if message:
             _status_message(f"{message}\n", error=not ok)
         self._refresh_cam_status()
+
+    def _on_cam_generate(self):
+        try:
+            from ..ai.context import get_selection_context
+        except ImportError:
+            from ai.context import get_selection_context
+
+        try:
+            from ..cam.hybrid import CamJobSettings, SimpleJobSettings, generate_hybrid_gcode
+        except ImportError:
+            from cam.hybrid import CamJobSettings, SimpleJobSettings, generate_hybrid_gcode
+
+        settings = self._show_cam_settings_dialog()
+        if settings is None:
+            return
+        cam_settings, simple_settings, prefer_cam = settings
+
+        context = get_selection_context()
+        target = None
+        label = ""
+        if context.items:
+            item = context.items[0]
+            target = item.obj
+            label = item.label
+        else:
+            doc = getattr(App, "ActiveDocument", None)
+            active = getattr(doc, "ActiveObject", None) if doc else None
+            if active is not None:
+                target = active
+                label = getattr(active, "Label", None) or getattr(active, "Name", "<active>")
+
+        if target is None:
+            message = "; ".join(context.warnings or ["No selection or active object."])
+            self._append_console(f"CAM generate failed: {message}", force=True)
+            _status_message(f"CAM generate failed: {message}\n", error=True)
+            return
+
+        self._append_console(f"Generating CAM for {label}...", force=True)
+        try:
+            result = generate_hybrid_gcode(
+                target,
+                cam_settings=cam_settings,
+                simple_settings=simple_settings,
+                prefer_cam=prefer_cam,
+            )
+        except Exception as exc:
+            self._append_console(f"CAM generate failed: {exc}", force=True)
+            _status_message(f"CAM generate failed: {exc}\n", error=True)
+            return
+
+        for warning in result.warnings:
+            self._append_console(warning, force=True)
+
+        self._gcode_edit.setPlainText(result.gcode or "")
+        self._update_preview()
+        self._append_console(f"Generated G-code via {result.engine} engine.", force=True)
+        _status_message(f"G-code generated via {result.engine} engine.\n")
+
+    def _load_cam_generate_defaults(self):
+        if App is None:
+            return
+        params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/CAM")
+        self._cam_generate_defaults = {
+            "prefer_cam": params.GetBool("prefer_cam", True),
+            "preset_name": params.GetString("preset_name", "Custom"),
+            "units": params.GetString("units", "mm"),
+            "feed_rate": params.GetFloat("feed_rate", 800.0),
+            "plunge_rate": params.GetFloat("plunge_rate", 300.0),
+            "post_processor": params.GetString("post_processor", "grbl_post"),
+            "start_depth": params.GetFloat("start_depth", 0.0),
+            "final_depth": params.GetFloat("final_depth", -1.0),
+            "step_down": params.GetFloat("step_down", 1.0),
+            "profile_side": params.GetString("profile_side", "Outside"),
+            "profile_direction": params.GetString("profile_direction", "CCW"),
+            "safe_z": params.GetFloat("safe_z", 5.0),
+            "start_z": params.GetFloat("start_z", 0.0),
+            "cut_z": params.GetFloat("cut_z", -1.0),
+            "pass_depth": params.GetFloat("pass_depth", 0.0),
+            "ramp_length": params.GetFloat("ramp_length", 0.0),
+            "lead_in": params.GetFloat("lead_in", 0.0),
+            "lead_out": params.GetFloat("lead_out", 0.0),
+            "spindle_speed": params.GetInt("spindle_speed", 0),
+            "laser_power": params.GetInt("laser_power", 0),
+            "start_spindle": params.GetBool("start_spindle", True),
+        }
+        self._cam_user_presets = self._load_cam_user_presets(params)
+
+    def _save_cam_generate_defaults(self):
+        if App is None:
+            return
+        params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/CAM")
+        defaults = self._cam_generate_defaults or {}
+        params.SetBool("prefer_cam", bool(defaults.get("prefer_cam", True)))
+        params.SetString("preset_name", str(defaults.get("preset_name", "Custom")))
+        params.SetString("units", str(defaults.get("units", "mm")))
+        params.SetFloat("feed_rate", float(defaults.get("feed_rate", 800.0)))
+        params.SetFloat("plunge_rate", float(defaults.get("plunge_rate", 300.0)))
+        params.SetString("post_processor", str(defaults.get("post_processor", "grbl_post")))
+        params.SetFloat("start_depth", float(defaults.get("start_depth", 0.0)))
+        params.SetFloat("final_depth", float(defaults.get("final_depth", -1.0)))
+        params.SetFloat("step_down", float(defaults.get("step_down", 1.0)))
+        params.SetString("profile_side", str(defaults.get("profile_side", "Outside")))
+        params.SetString("profile_direction", str(defaults.get("profile_direction", "CCW")))
+        params.SetFloat("safe_z", float(defaults.get("safe_z", 5.0)))
+        params.SetFloat("start_z", float(defaults.get("start_z", 0.0)))
+        params.SetFloat("cut_z", float(defaults.get("cut_z", -1.0)))
+        params.SetFloat("pass_depth", float(defaults.get("pass_depth", 0.0)))
+        params.SetFloat("ramp_length", float(defaults.get("ramp_length", 0.0)))
+        params.SetFloat("lead_in", float(defaults.get("lead_in", 0.0)))
+        params.SetFloat("lead_out", float(defaults.get("lead_out", 0.0)))
+        params.SetInt("spindle_speed", int(defaults.get("spindle_speed", 0)))
+        params.SetInt("laser_power", int(defaults.get("laser_power", 0)))
+        params.SetBool("start_spindle", bool(defaults.get("start_spindle", True)))
+
+    def _load_cam_user_presets(self, params=None):
+        if App is None:
+            return []
+        if params is None:
+            params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/CAM")
+        raw = params.GetString("user_presets", "")
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return []
+        presets = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            values = entry.get("values")
+            if not name or not isinstance(values, dict):
+                continue
+            presets.append((name, values))
+        return presets
+
+    def _save_cam_user_presets(self, params=None):
+        if App is None:
+            return
+        if params is None:
+            params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/CAM")
+        payload = [{"name": name, "values": values} for name, values in self._cam_user_presets]
+        try:
+            raw = json.dumps(payload, separators=(",", ":"))
+        except Exception:
+            return
+        params.SetString("user_presets", raw)
+
+    def _show_cam_settings_dialog(self):
+        try:
+            from ..cam.hybrid import CamJobSettings
+        except ImportError:
+            from cam.hybrid import CamJobSettings
+        try:
+            from ..cam.simple_engine import SimpleJobSettings
+        except ImportError:
+            from cam.simple_engine import SimpleJobSettings
+
+        defaults = dict(self._cam_generate_defaults or {})
+        cam_defaults = CamJobSettings()
+        simple_defaults = SimpleJobSettings()
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Generate CAM G-code")
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        general_group = QtWidgets.QGroupBox("General")
+        general_layout = QtWidgets.QFormLayout(general_group)
+        prefer_cam = QtWidgets.QCheckBox("Prefer CAM/Path when available")
+        prefer_cam.setChecked(defaults.get("prefer_cam", True))
+        general_layout.addRow(prefer_cam)
+
+        preset_combo = QtWidgets.QComboBox()
+        preset_name = defaults.get("preset_name", "Custom")
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.addWidget(preset_combo, 1)
+        preset_apply_btn = QtWidgets.QPushButton("Apply Preset")
+        preset_save_btn = QtWidgets.QPushButton("Save Preset")
+        preset_delete_btn = QtWidgets.QPushButton("Delete Preset")
+        preset_row.addWidget(preset_apply_btn)
+        preset_row.addWidget(preset_save_btn)
+        preset_row.addWidget(preset_delete_btn)
+        general_layout.addRow("Preset", preset_row)
+
+        units = QtWidgets.QComboBox()
+        units.addItems(["mm", "inch"])
+        units.setCurrentText(defaults.get("units", simple_defaults.units))
+        general_layout.addRow("Units", units)
+
+        feed_rate = QtWidgets.QDoubleSpinBox()
+        feed_rate.setDecimals(1)
+        feed_rate.setRange(0, 50000)
+        feed_rate.setValue(defaults.get("feed_rate", cam_defaults.feed_rate))
+        general_layout.addRow("Feed rate (mm/min)", feed_rate)
+
+        plunge_rate = QtWidgets.QDoubleSpinBox()
+        plunge_rate.setDecimals(1)
+        plunge_rate.setRange(0, 50000)
+        plunge_rate.setValue(defaults.get("plunge_rate", cam_defaults.plunge_rate))
+        general_layout.addRow("Plunge rate (mm/min)", plunge_rate)
+        layout.addWidget(general_group)
+
+        cam_group = QtWidgets.QGroupBox("CAM/Path job")
+        cam_layout = QtWidgets.QFormLayout(cam_group)
+        post_processor = QtWidgets.QLineEdit(defaults.get("post_processor", cam_defaults.post_processor))
+        cam_layout.addRow("Post processor", post_processor)
+
+        start_depth = QtWidgets.QDoubleSpinBox()
+        start_depth.setDecimals(3)
+        start_depth.setRange(-1000, 1000)
+        start_depth.setValue(defaults.get("start_depth", cam_defaults.start_depth))
+        cam_layout.addRow("Start depth", start_depth)
+
+        final_depth = QtWidgets.QDoubleSpinBox()
+        final_depth.setDecimals(3)
+        final_depth.setRange(-1000, 1000)
+        final_depth.setValue(defaults.get("final_depth", cam_defaults.final_depth))
+        cam_layout.addRow("Final depth", final_depth)
+
+        step_down = QtWidgets.QDoubleSpinBox()
+        step_down.setDecimals(3)
+        step_down.setRange(0, 1000)
+        step_down.setValue(defaults.get("step_down", cam_defaults.step_down))
+        cam_layout.addRow("Step down", step_down)
+
+        profile_side = QtWidgets.QComboBox()
+        profile_side.addItems(["Outside", "Inside", "On"])
+        profile_side.setCurrentText(defaults.get("profile_side", cam_defaults.profile_side))
+        cam_layout.addRow("Profile side", profile_side)
+
+        profile_direction = QtWidgets.QComboBox()
+        profile_direction.addItems(["CCW", "CW"])
+        profile_direction.setCurrentText(defaults.get("profile_direction", cam_defaults.profile_direction))
+        cam_layout.addRow("Profile direction", profile_direction)
+        layout.addWidget(cam_group)
+
+        simple_group = QtWidgets.QGroupBox("Simple fallback")
+        simple_layout = QtWidgets.QFormLayout(simple_group)
+        safe_z = QtWidgets.QDoubleSpinBox()
+        safe_z.setDecimals(3)
+        safe_z.setRange(-1000, 1000)
+        safe_z.setValue(defaults.get("safe_z", simple_defaults.safe_z))
+        simple_layout.addRow("Safe Z", safe_z)
+
+        start_z = QtWidgets.QDoubleSpinBox()
+        start_z.setDecimals(3)
+        start_z.setRange(-1000, 1000)
+        start_z.setValue(defaults.get("start_z", simple_defaults.start_z))
+        simple_layout.addRow("Start Z", start_z)
+
+        cut_z = QtWidgets.QDoubleSpinBox()
+        cut_z.setDecimals(3)
+        cut_z.setRange(-1000, 1000)
+        cut_z.setValue(defaults.get("cut_z", simple_defaults.cut_z))
+        simple_layout.addRow("Cut Z", cut_z)
+
+        pass_depth = QtWidgets.QDoubleSpinBox()
+        pass_depth.setDecimals(3)
+        pass_depth.setRange(0, 1000)
+        pass_depth.setValue(defaults.get("pass_depth", simple_defaults.pass_depth))
+        simple_layout.addRow("Pass depth", pass_depth)
+
+        ramp_length = QtWidgets.QDoubleSpinBox()
+        ramp_length.setDecimals(3)
+        ramp_length.setRange(0, 10000)
+        ramp_length.setValue(defaults.get("ramp_length", simple_defaults.ramp_length))
+        simple_layout.addRow("Ramp length", ramp_length)
+
+        lead_in = QtWidgets.QDoubleSpinBox()
+        lead_in.setDecimals(3)
+        lead_in.setRange(0, 10000)
+        lead_in.setValue(defaults.get("lead_in", simple_defaults.lead_in))
+        simple_layout.addRow("Lead-in", lead_in)
+
+        lead_out = QtWidgets.QDoubleSpinBox()
+        lead_out.setDecimals(3)
+        lead_out.setRange(0, 10000)
+        lead_out.setValue(defaults.get("lead_out", simple_defaults.lead_out))
+        simple_layout.addRow("Lead-out", lead_out)
+
+        spindle_speed = QtWidgets.QSpinBox()
+        spindle_speed.setRange(0, 60000)
+        spindle_speed.setValue(defaults.get("spindle_speed", simple_defaults.spindle_speed))
+        simple_layout.addRow("Spindle speed (M3 S)", spindle_speed)
+
+        laser_power = QtWidgets.QSpinBox()
+        laser_power.setRange(0, 10000)
+        laser_power.setValue(defaults.get("laser_power", simple_defaults.laser_power))
+        simple_layout.addRow("Laser power (M3 S)", laser_power)
+
+        start_spindle = QtWidgets.QCheckBox("Start spindle/laser (M3)")
+        start_spindle.setChecked(defaults.get("start_spindle", simple_defaults.start_spindle))
+        simple_layout.addRow(start_spindle)
+        layout.addWidget(simple_group)
+
+        preset_map = {}
+
+        def refresh_preset_combo(selected=None):
+            entries = list(_CAM_PRESETS) + list(self._cam_user_presets)
+            names = [name for name, _preset in entries]
+            preset_combo.blockSignals(True)
+            preset_combo.clear()
+            preset_combo.addItems(names)
+            if selected in names:
+                preset_combo.setCurrentText(selected)
+            else:
+                preset_combo.setCurrentText("Custom")
+            preset_combo.blockSignals(False)
+            preset_map.clear()
+            preset_map.update({name: preset for name, preset in entries})
+
+        builtin_names = {preset_name for preset_name, _preset in _CAM_PRESETS}
+
+        def apply_preset(name):
+            if name == "Custom":
+                return
+            preset = preset_map.get(name, {})
+            if not preset:
+                return
+            if "prefer_cam" in preset:
+                prefer_cam.setChecked(bool(preset["prefer_cam"]))
+            if "units" in preset:
+                units.setCurrentText(preset["units"])
+            if "feed_rate" in preset:
+                feed_rate.setValue(preset["feed_rate"])
+            if "plunge_rate" in preset:
+                plunge_rate.setValue(preset["plunge_rate"])
+            if "post_processor" in preset:
+                post_processor.setText(preset["post_processor"])
+            if "start_depth" in preset:
+                start_depth.setValue(preset["start_depth"])
+            if "final_depth" in preset:
+                final_depth.setValue(preset["final_depth"])
+            if "step_down" in preset:
+                step_down.setValue(preset["step_down"])
+            if "profile_side" in preset:
+                profile_side.setCurrentText(preset["profile_side"])
+            if "profile_direction" in preset:
+                profile_direction.setCurrentText(preset["profile_direction"])
+            if "safe_z" in preset:
+                safe_z.setValue(preset["safe_z"])
+            if "start_z" in preset:
+                start_z.setValue(preset["start_z"])
+            if "cut_z" in preset:
+                cut_z.setValue(preset["cut_z"])
+            if "pass_depth" in preset:
+                pass_depth.setValue(preset["pass_depth"])
+            if "ramp_length" in preset:
+                ramp_length.setValue(preset["ramp_length"])
+            if "lead_in" in preset:
+                lead_in.setValue(preset["lead_in"])
+            if "lead_out" in preset:
+                lead_out.setValue(preset["lead_out"])
+            if "spindle_speed" in preset:
+                spindle_speed.setValue(preset["spindle_speed"])
+            if "laser_power" in preset:
+                laser_power.setValue(preset["laser_power"])
+            if "start_spindle" in preset:
+                start_spindle.setChecked(bool(preset["start_spindle"]))
+
+        preset_combo.currentTextChanged.connect(apply_preset)
+        preset_apply_btn.clicked.connect(lambda: apply_preset(preset_combo.currentText()))
+        refresh_preset_combo(preset_name)
+
+        def collect_preset_values():
+            return {
+                "prefer_cam": prefer_cam.isChecked(),
+                "units": units.currentText(),
+                "feed_rate": feed_rate.value(),
+                "plunge_rate": plunge_rate.value(),
+                "post_processor": post_processor.text().strip() or cam_defaults.post_processor,
+                "start_depth": start_depth.value(),
+                "final_depth": final_depth.value(),
+                "step_down": step_down.value(),
+                "profile_side": profile_side.currentText(),
+                "profile_direction": profile_direction.currentText(),
+                "safe_z": safe_z.value(),
+                "start_z": start_z.value(),
+                "cut_z": cut_z.value(),
+                "pass_depth": pass_depth.value(),
+                "ramp_length": ramp_length.value(),
+                "lead_in": lead_in.value(),
+                "lead_out": lead_out.value(),
+                "spindle_speed": spindle_speed.value(),
+                "laser_power": laser_power.value(),
+                "start_spindle": start_spindle.isChecked(),
+            }
+
+        def save_preset():
+            name, ok = QtWidgets.QInputDialog.getText(
+                dialog,
+                "Save Preset",
+                "Preset name:",
+                text=preset_combo.currentText(),
+            )
+            if not ok:
+                return
+            name = name.strip()
+            if not name:
+                QtWidgets.QMessageBox.warning(dialog, "Save Preset", "Preset name cannot be empty.")
+                return
+            if name == "Custom":
+                QtWidgets.QMessageBox.warning(dialog, "Save Preset", "'Custom' is reserved.")
+                return
+            if name in builtin_names:
+                QtWidgets.QMessageBox.warning(
+                    dialog,
+                    "Save Preset",
+                    "Preset name matches a built-in preset. Choose another name.",
+                )
+                return
+
+            existing_index = None
+            for idx, (existing_name, _preset) in enumerate(self._cam_user_presets):
+                if existing_name == name:
+                    existing_index = idx
+                    break
+            if existing_index is not None:
+                result = QtWidgets.QMessageBox.question(
+                    dialog,
+                    "Overwrite Preset?",
+                    f"Preset '{name}' already exists. Overwrite it?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                )
+                if result != QtWidgets.QMessageBox.Yes:
+                    return
+                self._cam_user_presets[existing_index] = (name, collect_preset_values())
+            else:
+                self._cam_user_presets.append((name, collect_preset_values()))
+
+            self._save_cam_user_presets()
+            self._cam_generate_defaults["preset_name"] = name
+            self._save_cam_generate_defaults()
+            refresh_preset_combo(name)
+            _status_message(f"Saved preset: {name}\n")
+
+        preset_save_btn.clicked.connect(save_preset)
+
+        def delete_preset():
+            name = preset_combo.currentText()
+            if not name or name == "Custom":
+                QtWidgets.QMessageBox.information(
+                    dialog,
+                    "Delete Preset",
+                    "Select a user preset to delete.",
+                )
+                return
+            if name in builtin_names:
+                QtWidgets.QMessageBox.information(
+                    dialog,
+                    "Delete Preset",
+                    "Built-in presets cannot be deleted.",
+                )
+                return
+
+            match_index = None
+            for idx, (existing_name, _preset) in enumerate(self._cam_user_presets):
+                if existing_name == name:
+                    match_index = idx
+                    break
+            if match_index is None:
+                QtWidgets.QMessageBox.information(
+                    dialog,
+                    "Delete Preset",
+                    "Preset not found.",
+                )
+                return
+
+            result = QtWidgets.QMessageBox.question(
+                dialog,
+                "Delete Preset?",
+                f"Delete preset '{name}'?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            if result != QtWidgets.QMessageBox.Yes:
+                return
+
+            self._cam_user_presets.pop(match_index)
+            self._save_cam_user_presets()
+            self._cam_generate_defaults["preset_name"] = "Custom"
+            self._save_cam_generate_defaults()
+            refresh_preset_combo("Custom")
+            _status_message(f"Deleted preset: {name}\n")
+
+        preset_delete_btn.clicked.connect(delete_preset)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        ok_btn = QtWidgets.QPushButton("Generate")
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        button_row.addWidget(ok_btn)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        cam_settings = CamJobSettings(
+            post_processor=post_processor.text().strip() or cam_defaults.post_processor,
+            start_depth=start_depth.value(),
+            final_depth=final_depth.value(),
+            step_down=step_down.value(),
+            profile_side=profile_side.currentText(),
+            profile_direction=profile_direction.currentText(),
+            feed_rate=feed_rate.value(),
+            plunge_rate=plunge_rate.value(),
+        )
+        simple_settings = SimpleJobSettings(
+            safe_z=safe_z.value(),
+            cut_z=cut_z.value(),
+            start_z=start_z.value(),
+            pass_depth=pass_depth.value(),
+            ramp_length=ramp_length.value(),
+            lead_in=lead_in.value(),
+            lead_out=lead_out.value(),
+            feed_rate=feed_rate.value(),
+            plunge_rate=plunge_rate.value(),
+            units=units.currentText(),
+            spindle_speed=spindle_speed.value(),
+            laser_power=laser_power.value(),
+            start_spindle=start_spindle.isChecked(),
+        )
+
+        self._cam_generate_defaults = {
+            "prefer_cam": prefer_cam.isChecked(),
+            "preset_name": preset_combo.currentText(),
+            "units": units.currentText(),
+            "feed_rate": feed_rate.value(),
+            "plunge_rate": plunge_rate.value(),
+            "post_processor": cam_settings.post_processor,
+            "start_depth": cam_settings.start_depth,
+            "final_depth": cam_settings.final_depth,
+            "step_down": cam_settings.step_down,
+            "profile_side": cam_settings.profile_side,
+            "profile_direction": cam_settings.profile_direction,
+            "safe_z": simple_settings.safe_z,
+            "start_z": simple_settings.start_z,
+            "cut_z": simple_settings.cut_z,
+            "pass_depth": simple_settings.pass_depth,
+            "ramp_length": simple_settings.ramp_length,
+            "lead_in": simple_settings.lead_in,
+            "lead_out": simple_settings.lead_out,
+            "spindle_speed": simple_settings.spindle_speed,
+            "laser_power": simple_settings.laser_power,
+            "start_spindle": simple_settings.start_spindle,
+        }
+        self._save_cam_generate_defaults()
+
+        return cam_settings, simple_settings, prefer_cam.isChecked()
 
     def _build_ai_tab(self, parent):
         layout = QtWidgets.QVBoxLayout(parent)
