@@ -177,7 +177,7 @@ Erster echter Nutzen.
    - Ordner fuer Workbench-Code, UI, Ressourcen, Tests
    - Basis-Konfiguration, Logging-Setup, Versionsinfo
 
-2. [ ] FreeCAD-Workbench-Skeleton bauen
+2. [x] FreeCAD-Workbench-Skeleton bauen
    - Workbench-Registrierung
    - Commands/Actions als Platzhalter
    - Minimaler Panel-Container

@@ -14,6 +14,7 @@ Project intent:
 - G-code streaming with queue and ok/ALARM handling
 - CNC/Laser mode switch (post processor profile)
 - Setup/calibration screens (steps/mm, limits, spindle/laser params)
+- DXF import to simple G-code generation with preview
 
 ## Install (dev, symlink)
 Run from the repo root:

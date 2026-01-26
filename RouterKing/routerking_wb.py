@@ -20,6 +20,9 @@ class RouterKingWorkbench(Gui.Workbench):
         self.appendToolbar("RouterKing", commands.COMMANDS)
         self.appendMenu("RouterKing", commands.COMMANDS)
 
+    def GetClassName(self):
+        return "Gui::PythonWorkbench"
+
     def Activated(self):
         # Keep activation light; user can open the panel via the toolbar.
         pass

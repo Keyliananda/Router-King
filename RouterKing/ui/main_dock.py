@@ -60,6 +60,47 @@ _ALARM_CODES = {
     8: "Homing fail. Pull-off failed.",
     9: "Homing fail. Could not find switch.",
 }
+_DEFAULT_AI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"]
+_AI_MODEL_SHORTLIST = [
+    "gpt-5.2",
+    "gpt-5.2-pro",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-5-pro",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o4-mini",
+    "o3",
+    "o3-mini",
+    "o3-pro",
+    "o1",
+    "o1-mini",
+    "gpt-4",
+    "gpt-3.5-turbo",
+]
+_AI_MODEL_PREFIX_ORDER = [
+    "gpt-6", "gpt-5", "gpt-4.1", "gpt-4o", 
+    "o5", "o4", "o3", "o2", "o1", 
+    "gpt-4", "gpt-3.5"
+]
+_AI_MODEL_EXCLUDE_SUBSTRINGS = (
+    "realtime",
+    "audio",
+    "vision",
+    "transcribe",
+    "whisper",
+    "tts",
+    "embedding",
+    "moderation",
+    "dall-e",
+    "image",
+)
+_AI_SETTINGS_HELP_TEXT = "Stored in FreeCAD preferences (plain text). ENV overrides saved values."
 
 _CAM_PRESETS = [
     ("Custom", {}),
@@ -210,6 +251,29 @@ class _AiChatWorker(QtCore.QObject):
         self.finished.emit(response.text, None)
 
 
+class _AiModelListWorker(QtCore.QObject):
+    finished = QtCore.Signal(object, object)
+
+    def __init__(self, api_key, base_url):
+        super().__init__()
+        self._api_key = api_key
+        self._base_url = base_url
+
+    def run(self):
+        try:
+            from ..ai.client import list_models
+        except ImportError:
+            from ai.client import list_models
+
+        try:
+            models = list_models(self._api_key, self._base_url)
+        except Exception as exc:
+            self.finished.emit(None, exc)
+            return
+
+        self.finished.emit(models, None)
+
+
 def _find_main_window():
     for widget in QtWidgets.QApplication.topLevelWidgets():
         if widget.metaObject().className() == "Gui::MainWindow":
@@ -288,6 +352,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ai_worker = None
         self._ai_worker_thread = None
         self._ai_chat_busy = False
+        self._ai_models_loading = False
+        self._ai_model_worker = None
+        self._ai_model_worker_thread = None
         self._ai_preview_objects = []
         self._ai_last_optimization = None
         self._cam_status = None
@@ -1704,7 +1771,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         settings_layout.addWidget(QtWidgets.QLabel("Model"), 3, 0)
         self._ai_model = QtWidgets.QComboBox()
         self._ai_model.setEditable(True)
-        self._ai_model.addItems(["gpt-4o", "gpt-4o-mini", "o1-mini", "o1"])
+        self._ai_model.addItems(list(_DEFAULT_AI_MODELS))
         settings_layout.addWidget(self._ai_model, 3, 1)
 
         settings_layout.addWidget(QtWidgets.QLabel("Reasoning effort"), 4, 0)
@@ -1713,9 +1780,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         settings_layout.addWidget(self._ai_reasoning, 4, 1)
 
         self._ai_save_btn = QtWidgets.QPushButton("Save Settings")
-        self._ai_settings_status = QtWidgets.QLabel(
-            "Stored in FreeCAD preferences (plain text). ENV overrides saved values."
-        )
+        self._ai_settings_status = QtWidgets.QLabel()
+        self._set_ai_settings_status()
         settings_layout.addWidget(self._ai_save_btn, 5, 1)
         settings_layout.addWidget(self._ai_settings_status, 6, 0, 1, 2)
         layout.addWidget(settings_group)
@@ -2097,16 +2163,171 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         self._ai_temperature = float(chat.get("temperature", 0.2))
         self._ai_max_output_tokens = int(chat.get("max_output_tokens", 512))
+        self._refresh_ai_models()
+
+    def _set_ai_settings_status(self, message=None):
+        if message:
+            self._ai_settings_status.setText(f"{message}\n{_AI_SETTINGS_HELP_TEXT}")
+        else:
+            self._ai_settings_status.setText(_AI_SETTINGS_HELP_TEXT)
+
+    def _refresh_ai_models(self, force=False):
+        if self._ai_models_loading:
+            return
+        api_key = self._ai_api_key.text().strip()
+        if not api_key:
+            if force:
+                self._set_ai_settings_status("API key required to load models.")
+            return
+        base_url = self._ai_base_url.text().strip() or "https://api.openai.com/v1"
+        self._ai_models_loading = True
+        self._set_ai_settings_status("Loading models...")
+
+        self._ai_model_worker_thread = QtCore.QThread(self)
+        self._ai_model_worker = _AiModelListWorker(api_key, base_url)
+        self._ai_model_worker.moveToThread(self._ai_model_worker_thread)
+        self._ai_model_worker_thread.started.connect(self._ai_model_worker.run)
+        self._ai_model_worker.finished.connect(self._on_ai_models_ready)
+        self._ai_model_worker.finished.connect(self._ai_model_worker_thread.quit)
+        self._ai_model_worker_thread.finished.connect(self._ai_model_worker.deleteLater)
+        self._ai_model_worker_thread.finished.connect(self._ai_model_worker_thread.deleteLater)
+        self._ai_model_worker_thread.start()
+
+    def _on_ai_models_ready(self, model_ids, error):
+        self._ai_models_loading = False
+        if error:
+            self._set_ai_settings_status("Model list unavailable; using cached/default.")
+            _status_message(f"RouterKing AI model list failed: {error}\n", error=True)
+            return
+
+        models = self._select_ai_models(model_ids)
+        if not models:
+            self._set_ai_settings_status("Model list empty; using cached/default.")
+            return
+
+        self._apply_ai_model_items(models)
+        self._set_ai_settings_status(f"Loaded {len(models)} models.")
+
+    def _apply_ai_model_items(self, models):
+        try:
+            from ..ai.pricing import format_model_with_cost
+        except ImportError:
+            from ai.pricing import format_model_with_cost
+        
+        current_text = self._ai_model.currentText().strip()
+        # Remove cost indicator from current text for matching
+        current_model = re.sub(r'\s*\([$$]+\)\s*$', '', current_text)
+        
+        self._ai_model.blockSignals(True)
+        self._ai_model.clear()
+        
+        # Add models with cost indicators
+        formatted_models = [format_model_with_cost(m) for m in models]
+        self._ai_model.addItems(formatted_models)
+        
+        if current_model:
+            # Try to find the model (with or without cost indicator)
+            index = -1
+            for i, formatted in enumerate(formatted_models):
+                if current_model in formatted or formatted.startswith(current_model + " "):
+                    index = i
+                    break
+            
+            if index != -1:
+                self._ai_model.setCurrentIndex(index)
+            else:
+                # Insert the original selection if not found
+                self._ai_model.insertItem(0, current_text)
+                self._ai_model.setCurrentIndex(0)
+        self._ai_model.blockSignals(False)
+
+    def _select_ai_models(self, model_ids):
+        if not model_ids:
+            return []
+        normalized = [m.strip() for m in model_ids if isinstance(m, str)]
+        normalized = [m for m in normalized if m]
+        candidates = sorted(set(m for m in normalized if self._is_ai_chat_model(m)))
+        if not candidates:
+            return []
+        selected = [model for model in _AI_MODEL_SHORTLIST if model in candidates]
+        remaining = [model for model in candidates if model not in selected]
+
+        families = {}
+        for model_id in remaining:
+            family = self._ai_model_family(model_id)
+            families.setdefault(family, []).append(model_id)
+        best_per_family = []
+        for family_models in families.values():
+            best = sorted(family_models, key=self._ai_model_rank_key)[0]
+            if best not in selected:
+                best_per_family.append(best)
+        best_per_family.sort(key=self._ai_model_display_sort_key)
+
+        merged = selected + best_per_family
+        max_models = max(len(selected), 12)
+        return merged[:max_models]
+
+    def _is_ai_chat_model(self, model_id):
+        lowered = model_id.lower()
+        # Exclude fine-tuned models
+        if lowered.startswith("ft:") or ":ft-" in lowered:
+            return False
+        # Include all GPT models and o-series reasoning models (o1, o3, o4, etc.)
+        if not (lowered.startswith("gpt-") or re.match(r"^o\d", lowered)):
+            return False
+        # Exclude specialized models (audio, vision, embeddings, etc.)
+        for token in _AI_MODEL_EXCLUDE_SUBSTRINGS:
+            if token in lowered:
+                return False
+        return True
+
+    def _ai_model_family(self, model_id):
+        return re.sub(r"-(\d{4}-\d{2}-\d{2}|\d{8})$", "", model_id)
+
+    def _ai_model_date_key(self, model_id):
+        match = re.search(r"-(\d{4}-\d{2}-\d{2}|\d{8})$", model_id)
+        if not match:
+            return None
+        digits = match.group(1).replace("-", "")
+        try:
+            return int(digits)
+        except ValueError:
+            return None
+
+    def _ai_model_rank_key(self, model_id):
+        lowered = model_id.lower()
+        penalty = 0
+        if "preview" in lowered or "beta" in lowered or "test" in lowered:
+            penalty += 1
+        date_value = self._ai_model_date_key(model_id)
+        if date_value is None:
+            date_value = 99999999
+        return (penalty, -date_value, len(model_id), model_id)
+
+    def _ai_model_display_sort_key(self, model_id):
+        lowered = model_id.lower()
+        rank = len(_AI_MODEL_PREFIX_ORDER)
+        for idx, prefix in enumerate(_AI_MODEL_PREFIX_ORDER):
+            if lowered.startswith(prefix):
+                rank = idx
+                break
+        return (rank, len(model_id), model_id)
 
     def _on_ai_settings_save(self):
         params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/AI")
         params.SetString("provider", self._ai_provider.currentText())
         params.SetString("openai_api_key", self._ai_api_key.text().strip())
         params.SetString("openai_base_url", self._ai_base_url.text().strip())
-        params.SetString("openai_model", self._ai_model.currentText().strip())
+        
+        # Remove cost indicator from model name before saving
+        model_text = self._ai_model.currentText().strip()
+        model_name = re.sub(r'\s*\([$$]+\)\s*$', '', model_text)
+        params.SetString("openai_model", model_name)
+        
         params.SetString("openai_reasoning_effort", self._ai_reasoning.currentText().strip())
-        self._ai_settings_status.setText("Saved to FreeCAD preferences.")
+        self._set_ai_settings_status("Saved to FreeCAD preferences.")
         _status_message("RouterKing AI settings saved.\n")
+        self._refresh_ai_models(force=True)
 
     def _on_ai_clear_chat(self):
         self._ai_chat_log.clear()
