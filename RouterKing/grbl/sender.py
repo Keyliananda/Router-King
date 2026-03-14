@@ -70,10 +70,13 @@ class GrblSender:
         with self._lock:
             if not self._connected:
                 return
-            self.stop_stream()
+            self.stop_stream(reset_progress=True)
             self._stop_event.set()
             reader_thread = self._reader_thread
             self._reader_thread = None
+            self._status_line = None
+            self._status_data = None
+            self._last_error = None
             self._close_serial_unlocked()
             self._connected = False
             self._disconnect_reason = None
@@ -173,11 +176,15 @@ class GrblSender:
             self._paused = False
             self._send_next_line()
 
-    def stop_stream(self):
+    def stop_stream(self, reset_progress=False):
         self._stream_queue.clear()
         self._streaming = False
         self._paused = False
         self._awaiting_ok = False
+        if reset_progress:
+            self._total_lines = 0
+            self._sent_lines = 0
+            self._acked_lines = 0
 
     def abort_stream(self):
         self.stop_stream()
@@ -283,10 +290,9 @@ class GrblSender:
     def _mark_connection_lost(self, exc):
         message = f"[serial error] {exc}"
         with self._lock:
-            self._stream_queue.clear()
-            self._streaming = False
-            self._paused = False
-            self._awaiting_ok = False
+            self.stop_stream(reset_progress=True)
+            self._status_line = None
+            self._status_data = None
             self._connected = False
             self._disconnect_reason = message
             self._last_error = message

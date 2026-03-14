@@ -110,17 +110,42 @@ class TestGrblSender(unittest.TestCase):
         self.assertIn(b"\x18", serial_instance.writes)
         sender.disconnect()
 
+    def test_disconnect_clears_status_and_progress(self):
+        serial_instance = FakeSerial([b"<Idle|MPos:0.000,0.000,0.000>\n"])
+        sender = self.make_sender(serial_instance)
+        sender.connect("/dev/ttyUSB0")
+
+        sender.poll()
+        sender.start_stream(["G1 X1", "G1 X2"])
+        sender.disconnect()
+
+        progress = sender.get_progress()
+        self.assertFalse(sender.is_connected())
+        self.assertIsNone(sender.get_status())
+        self.assertEqual(progress["total"], 0)
+        self.assertEqual(progress["sent"], 0)
+        self.assertEqual(progress["acked"], 0)
+        self.assertIsNone(progress["last_error"])
+
     def test_serial_failure_marks_sender_disconnected(self):
         serial_instance = FakeSerial([b"<Idle|MPos:0.000,0.000,0.000>\n"], fail_on_read=True)
         sender = self.make_sender(serial_instance)
         sender.connect("/dev/ttyUSB0")
+        sender.poll()
+        sender.start_stream(["G1 X1", "G1 X2"])
 
         deadline = time.time() + 1.0
         while sender.is_connected() and time.time() < deadline:
             time.sleep(0.02)
 
         self.assertFalse(sender.is_connected())
+        self.assertIsNone(sender.get_status())
         self.assertIn("serial lost", sender.get_disconnect_reason())
+        progress = sender.get_progress()
+        self.assertEqual(progress["total"], 0)
+        self.assertEqual(progress["sent"], 0)
+        self.assertEqual(progress["acked"], 0)
+        self.assertIn("serial lost", progress["last_error"])
         lines = sender.poll()
         self.assertTrue(any("serial error" in line for line in lines))
 
