@@ -2616,6 +2616,32 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._limit_z.setText(format_value(self._limits["Z"]))
         self._update_machine_controls()
 
+    def _reset_explore_state(self):
+        self._explore_active = False
+        self._explore_phase = None
+        self._explore_axis_queue = []
+        self._explore_axis = None
+        self._explore_distance = 0.0
+        self._explore_pending = False
+        self._explore_next_action = 0.0
+        self._explore_results = {}
+        self._explore_unlock_sent_at = None
+        self._explore_unlocked = False
+        self._explore_last_command_at = None
+        self._explore_recover_attempts = 0
+        self._explore_dir_override = {"X": None, "Y": None, "Z": None}
+        self._explore_retry_axes.clear()
+        self._explore_retry_axis = None
+        self._explore_known_limits = {}
+        self._explore_retry_measurements = {}
+        self._explore_ramp_remaining = 0.0
+        self._explore_ramp_feed = 0.0
+        self._explore_ramp_increment_current = 0.0
+        self._explore_ramp_max_feed_axis = 0.0
+        self._explore_ramp_last_step = 0.0
+        self._explore_preflight_sent = False
+        self._explore_preflight_started_at = 0.0
+
     def _connect_to_port(self, port):
         try:
             self._sender.connect(port)
@@ -2865,10 +2891,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _on_explore_limits(self):
         if self._explore_active:
-            self._explore_active = False
-            self._explore_phase = None
-            self._explore_axis_queue = []
-            self._explore_pending = False
+            self._reset_explore_state()
             self._append_console("Explore limits stopped.")
             self._update_machine_controls()
             return
@@ -3455,6 +3478,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._poll_timer.stop()
         self._status_tick = 0
         self._sender_was_connected = False
+        self._reset_explore_state()
         self._connection_status.setText("Connection: disconnected")
         self._machine_status.setText("Machine: n/a")
         self._alarm_status.setText("Alarm: none")
