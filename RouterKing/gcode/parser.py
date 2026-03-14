@@ -5,6 +5,7 @@ import re
 
 _WORD_RE = re.compile(r"([A-Za-z])([-+]?\d*\.?\d+)")
 _COMMENT_RE = re.compile(r"\(.*?\)")
+_SPINDLE_RE = re.compile(r"^M0?[345](?:\s|$)", re.IGNORECASE)
 
 
 class GcodePath:
@@ -54,6 +55,25 @@ def parse_gcode(text):
     for line in iter_gcode_lines(text):
         parser.handle_line(line)
     return parser.path
+
+
+def prepare_stream_lines(text, dry_run=False):
+    lines = list(iter_gcode_lines(text))
+    if not dry_run:
+        return lines, []
+    return filter_spindle_commands(lines)
+
+
+def filter_spindle_commands(lines):
+    kept = []
+    removed = []
+    for line in lines:
+        stripped = line.strip()
+        if _SPINDLE_RE.match(stripped):
+            removed.append(stripped)
+            continue
+        kept.append(stripped)
+    return kept, removed
 
 
 class _Parser:

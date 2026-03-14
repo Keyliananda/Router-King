@@ -26,10 +26,10 @@ except Exception:
     from serial.tools import list_ports as _list_ports
 
 try:
-    from ..gcode.parser import iter_gcode_lines, parse_gcode
+    from ..gcode.parser import iter_gcode_lines, parse_gcode, prepare_stream_lines
     from ..grbl.sender import GrblSender
 except ImportError:
-    from gcode.parser import iter_gcode_lines, parse_gcode
+    from gcode.parser import iter_gcode_lines, parse_gcode, prepare_stream_lines
     from grbl.sender import GrblSender
 
 _dock = None
@@ -211,6 +211,7 @@ class _AiChatWorker(QtCore.QObject):
         reasoning_effort,
         temperature,
         max_output_tokens,
+        allow_actions,
         context_payload=None,
         context_summary="",
     ):
@@ -222,6 +223,7 @@ class _AiChatWorker(QtCore.QObject):
         self._reasoning_effort = reasoning_effort
         self._temperature = temperature
         self._max_output_tokens = max_output_tokens
+        self._allow_actions = allow_actions
         self._context_payload = context_payload
         self._context_summary = context_summary
 
@@ -243,6 +245,7 @@ class _AiChatWorker(QtCore.QObject):
                 context=self._context_payload,
                 context_summary=self._context_summary,
                 allow_llm=True,
+                allow_actions=self._allow_actions,
             )
         except Exception as exc:
             self.finished.emit("", exc)
@@ -303,6 +306,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         super().__init__(parent)
 
         self._sender = GrblSender()
+        self._sender_was_connected = False
         self._last_gcode_path = None
         self._last_dxf_path = None
         self._status_tick = 0
@@ -616,6 +620,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         job_row.addWidget(self._start_btn)
         job_row.addWidget(self._pause_btn)
         job_row.addWidget(self._stop_btn)
+        self._dry_run_check = QtWidgets.QCheckBox("Dry Run")
+        self._dry_run_check.setToolTip("Skip spindle/laser commands (M3/M4/M5) while streaming.")
+        job_row.addWidget(self._dry_run_check)
         job_row.addStretch(1)
         layout.addLayout(job_row)
 
@@ -1779,11 +1786,18 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ai_reasoning.addItems(["off", "low", "medium", "high"])
         settings_layout.addWidget(self._ai_reasoning, 4, 1)
 
+        settings_layout.addWidget(QtWidgets.QLabel("Allow AI actions"), 5, 0)
+        self._ai_allow_actions = QtWidgets.QCheckBox("Enable model-driven edits")
+        self._ai_allow_actions.setToolTip(
+            "Allow the LLM to create/modify geometry via RouterKing actions."
+        )
+        settings_layout.addWidget(self._ai_allow_actions, 5, 1)
+
         self._ai_save_btn = QtWidgets.QPushButton("Save Settings")
         self._ai_settings_status = QtWidgets.QLabel()
         self._set_ai_settings_status()
-        settings_layout.addWidget(self._ai_save_btn, 5, 1)
-        settings_layout.addWidget(self._ai_settings_status, 6, 0, 1, 2)
+        settings_layout.addWidget(self._ai_save_btn, 6, 1)
+        settings_layout.addWidget(self._ai_settings_status, 7, 0, 1, 2)
         layout.addWidget(settings_group)
 
         chat_group = QtWidgets.QGroupBox("AI Chat")
@@ -2157,6 +2171,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         reasoning_index = self._ai_reasoning.findText(reasoning)
         if reasoning_index != -1:
             self._ai_reasoning.setCurrentIndex(reasoning_index)
+        self._ai_allow_actions.setChecked(bool(provider.get("allow_actions", False)))
         self._ai_system_prompt = chat.get(
             "system_prompt",
             "You are RouterKing AI, a helpful assistant for FreeCAD CNC workflows.",
@@ -2215,8 +2230,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             from ai.pricing import format_model_with_cost
         
         current_text = self._ai_model.currentText().strip()
-        # Remove cost indicator from current text for matching
-        current_model = re.sub(r'\s*\([$$]+\)\s*$', '', current_text)
+        current_model = self._strip_ai_model_cost(current_text)
         
         self._ai_model.blockSignals(True)
         self._ai_model.clear()
@@ -2319,12 +2333,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         params.SetString("openai_api_key", self._ai_api_key.text().strip())
         params.SetString("openai_base_url", self._ai_base_url.text().strip())
         
-        # Remove cost indicator from model name before saving
         model_text = self._ai_model.currentText().strip()
-        model_name = re.sub(r'\s*\([$$]+\)\s*$', '', model_text)
+        model_name = self._strip_ai_model_cost(model_text)
         params.SetString("openai_model", model_name)
         
         params.SetString("openai_reasoning_effort", self._ai_reasoning.currentText().strip())
+        params.SetBool("allow_actions", self._ai_allow_actions.isChecked())
         self._set_ai_settings_status("Saved to FreeCAD preferences.")
         _status_message("RouterKing AI settings saved.\n")
         self._refresh_ai_models(force=True)
@@ -2358,8 +2372,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _ai_start_chat_request(self):
         api_key = self._ai_api_key.text().strip()
         base_url = self._ai_base_url.text().strip() or "https://api.openai.com/v1"
-        model = self._ai_model.currentText().strip()
+        model = self._strip_ai_model_cost(self._ai_model.currentText().strip())
         reasoning = self._ai_reasoning.currentText().strip()
+        allow_actions = self._ai_allow_actions.isChecked()
         context_payload = None
         context_summary = ""
         try:
@@ -2387,6 +2402,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             reasoning,
             self._ai_temperature,
             self._ai_max_output_tokens,
+            allow_actions,
             context_payload=context_payload,
             context_summary=context_summary,
         )
@@ -2397,6 +2413,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._ai_worker_thread.finished.connect(self._ai_worker.deleteLater)
         self._ai_worker_thread.finished.connect(self._ai_worker_thread.deleteLater)
         self._ai_worker_thread.start()
+
+    @staticmethod
+    def _strip_ai_model_cost(text):
+        return re.sub(r"\s*\([$$]+\)\s*$", "", text or "").strip()
 
     def _on_ai_chat_finished(self, response, error):
         if error:
@@ -2412,20 +2432,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _on_connect(self):
         if self._sender.is_connected():
             self._sender.disconnect()
-            self._poll_timer.stop()
-            self._connection_status.setText("Connection: disconnected")
-            self._machine_status.setText("Machine: n/a")
-            self._alarm_status.setText("Alarm: none")
-            self._last_alarm_info = None
-            self._limits = {"X": None, "Y": None, "Z": None}
-            self._limits_announced = False
-            self._update_limit_labels()
-            self._connect_btn.setText("Connect")
-            self._port.setEnabled(True)
-            self._refresh_ports()
-            self._append_console("Disconnected.")
-            self._update_job_controls()
-            _status_message("RouterKing: disconnected\n")
+            self._apply_disconnected_state("Disconnected.", unexpected=False)
             return
 
         port = self._current_port()
@@ -2443,11 +2450,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         for line in lines:
             self._handle_console_line(line)
 
-        if self._sender.is_connected():
+        connected = self._sender.is_connected()
+        if connected:
             self._status_tick += 1
             if self._status_tick >= 10:
                 self._request_status()
                 self._status_tick = 0
+        elif self._sender_was_connected:
+            reason = self._sender.get_disconnect_reason() or "Serial connection lost."
+            self._apply_disconnected_state(reason, unexpected=True)
+            return
 
         status = self._sender.get_status()
         if status:
@@ -2462,6 +2474,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._update_job_controls()
         self._update_machine_controls()
         self._explore_tick()
+        self._sender_was_connected = connected
 
     def _append_console(self, text, force=False):
         if not force and self._console_verbose is not None and not self._console_verbose.isChecked():
@@ -2615,11 +2628,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._alarm_status.setText("Alarm: none")
         self._last_alarm_info = None
         self._limits_announced = False
+        self._sender_was_connected = True
         self._connect_btn.setText("Disconnect")
         self._port.setEnabled(False)
         self._append_console("Connected.")
         self._poll_timer.start()
+        self._request_status()
         self._update_job_controls()
+        self._update_machine_controls()
         _status_message("RouterKing: connected\n")
         self._remember_port(port)
         return True
@@ -3343,12 +3359,28 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if not self._sender.is_connected():
             self._append_console("Start failed: not connected.")
             return
-        lines = list(iter_gcode_lines(self._gcode_edit.toPlainText()))
+        if self._sender.is_streaming():
+            self._append_console("Start failed: sender busy.")
+            return
+        state = self._machine_state()
+        if state is None:
+            self._append_console("Start failed: machine status unknown. Wait for an Idle status.")
+            self._request_status()
+            return
+        if state != "idle":
+            self._append_console(f"Start failed: machine not idle ({state}).")
+            return
+        dry_run = self._dry_run_check.isChecked()
+        lines, removed = prepare_stream_lines(self._gcode_edit.toPlainText(), dry_run=dry_run)
         if not lines:
             self._append_console("Start failed: G-code is empty.")
             return
         try:
             self._sender.start_stream(lines)
+            if dry_run and removed:
+                self._append_console(
+                    f"Dry run active: skipped {len(removed)} spindle/laser command(s)."
+                )
             self._append_console(f"Streaming {len(lines)} lines.")
         except Exception as exc:
             self._append_console(f"Start failed: {exc}")
@@ -3357,19 +3389,25 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _on_pause_resume_job(self):
         if not self._sender.is_streaming():
             return
-        if self._sender.is_paused():
-            self._sender.resume_stream()
-            self._append_console("Job resumed.")
-        else:
-            self._sender.pause_stream()
-            self._append_console("Job paused.")
+        try:
+            if self._sender.is_paused():
+                self._sender.resume_stream()
+                self._append_console("Job resumed.")
+            else:
+                self._sender.pause_stream()
+                self._append_console("Job paused with feed hold.")
+        except Exception as exc:
+            self._append_console(f"Pause/Resume failed: {exc}")
         self._update_job_controls()
 
     def _on_stop_job(self):
         if not self._sender.is_streaming():
             return
-        self._sender.stop_stream()
-        self._append_console("Job stopped.")
+        try:
+            self._sender.abort_stream()
+            self._append_console("Job aborted with soft reset.")
+        except Exception as exc:
+            self._append_console(f"Stop failed: {exc}")
         self._update_job_controls()
 
     def _update_job_controls(self):
@@ -3384,7 +3422,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         streaming = progress.get("streaming")
         paused = progress.get("paused")
-        self._start_btn.setEnabled(self._sender.is_connected() and not streaming)
+        self._start_btn.setEnabled(self._sender.is_connected() and not streaming and self._machine_state() == "idle")
         self._pause_btn.setEnabled(streaming)
         self._stop_btn.setEnabled(streaming)
         self._pause_btn.setText("Resume" if paused else "Pause")
@@ -3407,6 +3445,34 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._travel_test_btn.setEnabled(False)
         else:
             self._explore_limits_btn.setText("Explore Limits")
+
+    def _machine_state(self):
+        status = self._sender.get_status() or {}
+        state = str(status.get("state", "")).strip().lower()
+        return state or None
+
+    def _apply_disconnected_state(self, message=None, unexpected=False):
+        self._poll_timer.stop()
+        self._status_tick = 0
+        self._sender_was_connected = False
+        self._connection_status.setText("Connection: disconnected")
+        self._machine_status.setText("Machine: n/a")
+        self._alarm_status.setText("Alarm: none")
+        self._last_alarm_info = None
+        self._limits = {"X": None, "Y": None, "Z": None}
+        self._limits_announced = False
+        self._update_limit_labels()
+        self._connect_btn.setText("Connect")
+        self._port.setEnabled(True)
+        self._refresh_ports()
+        if message and message != self._last_console_line:
+            self._append_console(message, force=unexpected)
+        self._update_job_controls()
+        self._update_machine_controls()
+        if unexpected:
+            _status_message(f"RouterKing: disconnected unexpectedly ({message})\n", error=True)
+        else:
+            _status_message("RouterKing: disconnected\n")
 
     def _axis_explore_dir(self, axis):
         override = self._explore_dir_override.get(axis)

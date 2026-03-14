@@ -1,6 +1,5 @@
 """Tests for AI pricing module."""
 
-import pytest
 from RouterKing.ai.pricing import (
     get_model_pricing,
     calculate_cost_tier,

@@ -16,6 +16,18 @@ class TestAiAssistant(unittest.TestCase):
         self.assertFalse(response.used_llm)
         self.assertEqual(response.source, "rules")
 
+    def test_help_request_returns_tool_prompt(self):
+        messages = [{"role": "user", "content": "Was kannst du?"}]
+        response = ask_assistant(
+            messages,
+            api_key="",
+            allow_llm=False,
+            context=AssistantContext(),
+        )
+        self.assertIn("Allowed actions", response.text)
+        self.assertFalse(response.used_llm)
+        self.assertEqual(response.source, "rules")
+
 
 if __name__ == "__main__":
     unittest.main()

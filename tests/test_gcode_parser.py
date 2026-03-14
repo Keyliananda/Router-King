@@ -1,6 +1,6 @@
 import unittest
 
-from RouterKing.gcode.parser import iter_gcode_lines, parse_gcode
+from RouterKing.gcode.parser import filter_spindle_commands, iter_gcode_lines, parse_gcode, prepare_stream_lines
 
 
 class TestGcodeParser(unittest.TestCase):
@@ -17,6 +17,16 @@ class TestGcodeParser(unittest.TestCase):
         text = "G0 X0 Y0\nG2 X1 Y0 I0.5 J0"
         path = parse_gcode(text)
         self.assertTrue(len(path.segments) >= 8)
+
+    def test_filter_spindle_commands_for_dry_run(self):
+        lines, removed = prepare_stream_lines("M3 S18000\nG1 X1\nM5", dry_run=True)
+        self.assertEqual(lines, ["G1 X1"])
+        self.assertEqual(removed, ["M3 S18000", "M5"])
+
+    def test_filter_spindle_commands_keeps_non_spindle_m_codes(self):
+        lines, removed = filter_spindle_commands(["M30", "G1 X1", "M4 S400"])
+        self.assertEqual(lines, ["M30", "G1 X1"])
+        self.assertEqual(removed, ["M4 S400"])
 
 
 if __name__ == "__main__":

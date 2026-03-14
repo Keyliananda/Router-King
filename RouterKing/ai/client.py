@@ -1,6 +1,7 @@
 """Minimal OpenAI client helpers for RouterKing AI chat."""
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -51,7 +52,10 @@ def send_chat_request(
     url = f"{base}/chat/completions"
     payload = {"model": model, "messages": messages, "temperature": temperature}
     if max_output_tokens:
-        payload["max_tokens"] = max_output_tokens
+        if _uses_max_completion_tokens(model):
+            payload["max_completion_tokens"] = max_output_tokens
+        else:
+            payload["max_tokens"] = max_output_tokens
     return _post_json(url, api_key, payload, extractor=_extract_chat_text)
 
 
@@ -103,7 +107,14 @@ def _get_json(url, api_key):
 
 def _uses_responses_api(model):
     lowered = (model or "").lower()
-    return lowered.startswith("o1") or lowered.startswith("o3")
+    if lowered.startswith("gpt-5"):
+        return True
+    return re.match(r"^o\d", lowered) is not None
+
+
+def _uses_max_completion_tokens(model):
+    lowered = (model or "").lower()
+    return re.match(r"^o\d", lowered) is not None
 
 
 def _extract_chat_text(payload):
