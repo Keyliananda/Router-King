@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any, Optional
 
 from .freecad_connection import FreeCADConnection
+from .safety import RISK_DANGEROUS_DEV, log_tool_request, validate_risk
+
+LOG = logging.getLogger("routerking.mcp.tools")
 
 
 def routerking_list_actions(connection: Optional[FreeCADConnection] = None):
@@ -27,3 +32,99 @@ def routerking_apply_actions(
         screenshot_path=screenshot_path,
     )
 
+
+def routerking_analyze_selection(*, connection: Optional[FreeCADConnection] = None):
+    """Run analysis on the current FreeCAD selection."""
+    return routerking_apply_actions(
+        {"actions": [{"type": "analyze_selection"}]},
+        include_context=True,
+        connection=connection,
+    )
+
+
+def routerking_optimize_splines_preview(*, connection: Optional[FreeCADConnection] = None):
+    """Create a spline optimization preview for the current selection."""
+    return routerking_apply_actions(
+        {"actions": [{"type": "optimize_splines_preview"}]},
+        capture_view=True,
+        connection=connection,
+    )
+
+
+def routerking_generate_gcode(
+    *,
+    model: Optional[str] = None,
+    operations: Optional[Any] = None,
+    output_path: Optional[str] = None,
+    prefer_cam: Optional[bool] = None,
+    use_cam_defaults: Optional[bool] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """Generate G-code from the current model or specified parameters."""
+    action: dict[str, Any] = {"type": "generate_gcode"}
+    for key, val in [("model", model), ("operations", operations), ("output_path", output_path), ("prefer_cam", prefer_cam), ("use_cam_defaults", use_cam_defaults)]:
+        if val is not None:
+            action[key] = val
+    return routerking_apply_actions(
+        {"actions": [action]},
+        connection=connection,
+    )
+
+
+def routerking_cam_generate_job(
+    *,
+    model: Optional[str] = None,
+    operations: Optional[Any] = None,
+    output_path: Optional[str] = None,
+    prefer_cam: Optional[bool] = None,
+    use_cam_defaults: Optional[bool] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """Generate a CAM job from the current model or specified parameters."""
+    action: dict[str, Any] = {"type": "cam_generate_job"}
+    for key, val in [("model", model), ("operations", operations), ("output_path", output_path), ("prefer_cam", prefer_cam), ("use_cam_defaults", use_cam_defaults)]:
+        if val is not None:
+            action[key] = val
+    return routerking_apply_actions(
+        {"actions": [action]},
+        capture_view=True,
+        connection=connection,
+    )
+
+
+def routerking_run_script(
+    code: str,
+    *,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """[UNSAFE / DEV ONLY] Execute arbitrary Python in the FreeCAD context.
+
+    Gated behind ROUTERKING_MCP_DEV_TOOLS=1.
+    """
+    dev_tools_enabled = os.getenv("ROUTERKING_MCP_DEV_TOOLS", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+    errors = validate_risk(
+        "routerking_run_script",
+        RISK_DANGEROUS_DEV,
+        {"code": code},
+        dev_tools_enabled=dev_tools_enabled,
+    )
+    if errors:
+        return {"success": False, "message": "; ".join(errors), "data": None, "errors": errors}
+
+    snippet = code[:120] + ("..." if len(code) > 120 else "")
+    log_tool_request("routerking_run_script", RISK_DANGEROUS_DEV, {"code_snippet": snippet})
+
+    result = (connection or FreeCADConnection()).invoke("run_script", code=code)
+
+    LOG.info(
+        "routerking_run_script result success=%s output_len=%d errors=%d",
+        result.get("success"),
+        len(result.get("data", {}).get("output", "")),
+        len(result.get("errors", [])),
+    )
+    return result

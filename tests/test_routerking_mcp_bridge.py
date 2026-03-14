@@ -125,6 +125,98 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         self.assertIn("Screenshot unavailable", response["message"])
 
 
+    def test_analyze_selection_builds_correct_payload(self):
+        captured = {}
+
+        def executor(actions):
+            captured["actions"] = actions
+            return (["Analysis complete."], [])
+
+        bridge = RouterKingBridge(
+            action_executor=executor,
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.apply_actions(
+            {"actions": [{"type": "analyze_selection"}]},
+            include_context=True,
+        )
+        self.assertTrue(response["success"])
+        self.assertEqual(captured["actions"][0]["type"], "analyze_selection")
+        self.assertIn("context", response["data"])
+
+    def test_generate_gcode_filters_none_params(self):
+        captured = {}
+
+        def executor(actions):
+            captured["actions"] = actions
+            return (["G-code generated."], [])
+
+        bridge = RouterKingBridge(
+            action_executor=executor,
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        action = {"type": "generate_gcode", "output_path": "/tmp/out.gcode"}
+        response = bridge.apply_actions({"actions": [action]})
+        self.assertTrue(response["success"])
+        sent_action = captured["actions"][0]
+        self.assertEqual(sent_action["type"], "generate_gcode")
+        self.assertEqual(sent_action["output_path"], "/tmp/out.gcode")
+        self.assertNotIn("model", sent_action)
+        self.assertNotIn("operations", sent_action)
+        self.assertNotIn("prefer_cam", sent_action)
+        self.assertNotIn("use_cam_defaults", sent_action)
+
+    def test_cam_generate_job_includes_capture_view(self):
+        captured = {}
+
+        def executor(actions):
+            captured["actions"] = actions
+            return (["Job created."], [])
+
+        bridge = RouterKingBridge(
+            action_executor=executor,
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.apply_actions(
+            {"actions": [{"type": "cam_generate_job"}]},
+            capture_view=True,
+        )
+        self.assertTrue(response["success"])
+        self.assertIn("screenshot", response["data"])
+
+    def test_run_script_executes_code(self):
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.run_script("print('hello world')")
+        self.assertTrue(response["success"])
+        self.assertEqual(response["message"], "Script executed.")
+        self.assertIn("hello world", response["data"]["output"])
+
+    def test_run_script_captures_errors(self):
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.run_script("raise ValueError('boom')")
+        self.assertFalse(response["success"])
+        self.assertEqual(response["message"], "Script raised an exception.")
+        self.assertTrue(len(response["errors"]) > 0)
+        self.assertIn("ValueError", response["errors"][0])
+        self.assertIn("boom", response["errors"][0])
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import traceback
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from mcp.server.safety import log_tool_request, validate_risk
@@ -255,6 +258,30 @@ class RouterKingBridge:
             payload.get("message") or "Screenshot request completed.",
             data=payload,
             errors=[] if payload.get("available") else [payload.get("message") or "Screenshot unavailable."],
+        )
+
+    def run_script(self, code: str) -> Dict[str, Any]:
+        """Execute arbitrary Python code in the FreeCAD context.
+
+        UNSAFE / DEV ONLY -- intended as a development fallback.
+        """
+        namespace: Dict[str, Any] = {}
+        stdout_capture = io.StringIO()
+        errors: List[str] = []
+        try:
+            with contextlib.redirect_stdout(stdout_capture):
+                exec(code, namespace)  # noqa: S102
+        except Exception:
+            errors.append(traceback.format_exc())
+
+        output = stdout_capture.getvalue()
+        success = len(errors) == 0
+        message = "Script executed." if success else "Script raised an exception."
+        return make_response(
+            success,
+            message,
+            data={"output": output},
+            errors=errors,
         )
 
     def list_actions(self) -> Dict[str, Any]:

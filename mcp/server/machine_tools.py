@@ -18,7 +18,7 @@ def routerking_machine_connect(
 ):
     return routerking_apply_actions(
         {"actions": [{"type": "machine_connect", "port": port, "baudrate": baudrate, "confirm": confirm, "reason": reason}]},
-        include_context=False,
+        include_context=True,
         connection=connection,
     )
 
@@ -26,7 +26,7 @@ def routerking_machine_connect(
 def routerking_machine_disconnect(*, confirm: bool = False, reason: str = "", connection: Optional[FreeCADConnection] = None):
     return routerking_apply_actions(
         {"actions": [{"type": "machine_disconnect", "confirm": confirm, "reason": reason}]},
-        include_context=False,
+        include_context=True,
         connection=connection,
     )
 
@@ -34,7 +34,7 @@ def routerking_machine_disconnect(*, confirm: bool = False, reason: str = "", co
 def routerking_machine_request_status(*, confirm: bool = False, reason: str = "", connection: Optional[FreeCADConnection] = None):
     return routerking_apply_actions(
         {"actions": [{"type": "machine_request_status", "confirm": confirm, "reason": reason}]},
-        include_context=False,
+        include_context=True,
         connection=connection,
     )
 
@@ -63,7 +63,7 @@ def routerking_machine_jog(
                 }
             ]
         },
-        include_context=False,
+        include_context=True,
         connection=connection,
     )
 
@@ -77,7 +77,7 @@ def routerking_machine_stream_gcode(
 ):
     return routerking_apply_actions(
         {"actions": [{"type": "machine_stream_gcode", "gcode": gcode, "confirm": confirm, "reason": reason}]},
-        include_context=False,
+        include_context=True,
         connection=connection,
     )
 
@@ -85,7 +85,7 @@ def routerking_machine_stream_gcode(
 def routerking_machine_stop(*, confirm: bool = False, reason: str = "", connection: Optional[FreeCADConnection] = None):
     return routerking_apply_actions(
         {"actions": [{"type": "machine_stop", "confirm": confirm, "reason": reason}]},
-        include_context=False,
+        include_context=True,
         connection=connection,
     )
 

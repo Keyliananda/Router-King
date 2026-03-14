@@ -2,27 +2,24 @@
 
 ## Status 2026-03-14
 
-Bereits umgesetzt in dieser ersten Runde:
+Bereits umgesetzt:
 
 - Task Paket 1: Repo-Struktur fuer `mcp/server` und `RouterKing/mcp` angelegt, inkl. Einstiegspunkt in `mcp/server/main.py`
 - Task Paket 2: `FreeCADConnection` mit konfigurierbarem Embedded-Mode und `ping()` vorhanden
 - Task Paket 3: Bridge, Kontext-, Screenshot- und Transaction-Helfer unter `RouterKing/mcp/` vorhanden
 - Task Paket 4: `list_documents`, `get_active_document`, `get_scene_info`, `get_selection_context`, `capture_view` implementiert
 - Task Paket 5: `routerking_list_actions` und `routerking_apply_actions` mit Registry-Validierung implementiert
+- Task Paket 6: spezialisierte Domain-Tools (`routerking_analyze_selection`, `routerking_optimize_splines_preview`, `routerking_generate_gcode`, `routerking_cam_generate_job`) implementiert
 - Task Paket 7: Baseline-Safety fuer Risikoklassen sowie `confirm`/`reason` bei Maschinenaktionen implementiert
-- Task Paket 8: erste Machine-Wrapper angelegt, auf bestehende RouterKing-Aktionen gemappt
-- Task Paket 10: Basistests fuer Schemas, Bridge und Safety implementiert
-
-Teilweise begonnen:
-
-- Task Paket 11: erste MCP-Tool-Doku in `docs/concepts/ai/MCP_TOOLS.md`
+- Task Paket 8: Machine-Wrapper mit `include_context=True` fuer Statusrueckgaben nach connect/status/jog/stream/stop
+- Task Paket 9: Dev-Fallback `routerking_run_script` mit `RISK_DANGEROUS_DEV` Safety-Gate und stdout-Capture implementiert
+- Task Paket 10: 18 Tests fuer Schemas, Bridge, Safety und alle neuen Tools (alle bestanden)
+- Task Paket 11: `MCP_TOOLS.md` mit Server-Start-Doku und allen Tools, `WORKBENCH_API.md` mit vollstaendiger Action-Registry
 
 Noch offen:
 
-- Task Paket 6: spezialisierte RouterKing-Domain-Tools
-- Task Paket 8: vollstaendige maschinennahe Statusrueckgaben und robustere Laufzeitintegration
-- Task Paket 9: optionaler Dev-Fallback
-- Task Paket 11: ausfuehrlichere Start-/Nutzungsdokumentation
+- externer RPC-/Socket-Transport zu laufendem FreeCAD statt nur Embedded-Mode
+- robustere Laufzeitintegration fuer maschinennahe Statusrueckgaben (strukturierte Position/State-Daten aus GRBL)
 
 ## Scope
 

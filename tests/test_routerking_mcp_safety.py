@@ -44,5 +44,19 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         self.assertIn("machine_jog: confirm=true required.", response["errors"])
 
 
+    def test_dangerous_dev_blocked_without_flag(self):
+        from mcp.server.safety import RISK_DANGEROUS_DEV, validate_risk
+
+        errors = validate_risk("routerking_run_script", RISK_DANGEROUS_DEV, {"code": "print(1)"}, dev_tools_enabled=False)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("dangerous development tools are disabled", errors[0])
+
+    def test_dangerous_dev_allowed_with_flag(self):
+        from mcp.server.safety import RISK_DANGEROUS_DEV, validate_risk
+
+        errors = validate_risk("routerking_run_script", RISK_DANGEROUS_DEV, {"code": "print(1)"}, dev_tools_enabled=True)
+        self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()
