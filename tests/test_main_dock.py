@@ -25,6 +25,40 @@ class _DummyTimer:
         self.stopped = True
 
 
+class _FakeDisconnectedSender:
+    def __init__(self, lines=None, reason="[serial error] serial lost"):
+        self._lines = list(lines or [])
+        self._reason = reason
+
+    def poll(self):
+        lines = list(self._lines)
+        self._lines = []
+        return lines
+
+    def is_connected(self):
+        return False
+
+    def get_disconnect_reason(self):
+        return self._reason
+
+    def get_status(self):
+        return None
+
+    def get_progress(self):
+        return {
+            "streaming": False,
+            "paused": False,
+            "awaiting_ok": False,
+            "sent": 0,
+            "acked": 0,
+            "total": 0,
+            "last_error": self._reason,
+        }
+
+    def is_streaming(self):
+        return False
+
+
 def _load_main_dock_module():
     sys.modules.pop("RouterKing.ui.main_dock", None)
 
@@ -100,17 +134,29 @@ def _load_main_dock_module():
 
 
 class TestMainDock(unittest.TestCase):
-    def test_apply_disconnected_state_resets_explore_state(self):
-        main_dock = _load_main_dock_module()
+    def _make_widget(self, main_dock, sender=None):
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender or _FakeDisconnectedSender()
         widget._poll_timer = _DummyTimer()
         widget._status_tick = 3
         widget._sender_was_connected = True
         widget._connection_status = _DummyWidget()
         widget._machine_status = _DummyWidget()
         widget._alarm_status = _DummyWidget()
+        widget._job_status = _DummyWidget()
+        widget._limit_x = _DummyWidget()
+        widget._limit_y = _DummyWidget()
+        widget._limit_z = _DummyWidget()
         widget._connect_btn = _DummyWidget()
         widget._port = _DummyWidget()
+        widget._start_btn = _DummyWidget()
+        widget._pause_btn = _DummyWidget()
+        widget._stop_btn = _DummyWidget()
+        widget._read_limits_btn = _DummyWidget()
+        widget._travel_test_btn = _DummyWidget()
+        widget._explore_limits_btn = _DummyWidget()
+        widget._explore_z_btn = _DummyWidget()
+        widget._z_speed_test_btn = _DummyWidget()
         widget._last_alarm_info = "Hard limit"
         widget._limits = {"X": 100.0, "Y": 200.0, "Z": 50.0}
         widget._limits_announced = True
@@ -141,6 +187,11 @@ class TestMainDock(unittest.TestCase):
         widget._explore_preflight_started_at = 4.0
         widget._append_console = mock.Mock()
         widget._refresh_ports = mock.Mock()
+        return widget
+
+    def test_apply_disconnected_state_resets_explore_state(self):
+        main_dock = _load_main_dock_module()
+        widget = self._make_widget(main_dock)
         widget._update_limit_labels = mock.Mock()
         widget._update_job_controls = mock.Mock()
         widget._update_machine_controls = mock.Mock()
@@ -167,6 +218,43 @@ class TestMainDock(unittest.TestCase):
         widget._append_console.assert_called_once_with("Serial connection lost.", force=True)
         status_message.assert_called_once_with(
             "RouterKing: disconnected unexpectedly (Serial connection lost.)\n",
+            error=True,
+        )
+
+    def test_drain_sender_applies_disconnect_state_for_active_job(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeDisconnectedSender(
+            lines=["[serial error] serial lost"],
+            reason="[serial error] serial lost",
+        )
+        widget = self._make_widget(main_dock, sender=sender)
+        widget._handle_console_line = mock.Mock()
+        widget._request_status = mock.Mock()
+        widget._explore_tick = mock.Mock()
+
+        with mock.patch.object(main_dock, "_status_message") as status_message:
+            widget._drain_sender()
+
+        widget._handle_console_line.assert_called_once_with("[serial error] serial lost")
+        self.assertTrue(widget._poll_timer.stopped)
+        self.assertFalse(widget._sender_was_connected)
+        self.assertEqual(widget._connection_status.text, "Connection: disconnected")
+        self.assertEqual(widget._machine_status.text, "Machine: n/a")
+        self.assertEqual(widget._alarm_status.text, "Alarm: none")
+        self.assertEqual(widget._job_status.text, "Job: idle")
+        self.assertEqual(widget._connect_btn.text, "Connect")
+        self.assertEqual(widget._pause_btn.text, "Pause")
+        self.assertEqual(widget._explore_limits_btn.text, "Explore Limits")
+        self.assertFalse(widget._start_btn.enabled)
+        self.assertFalse(widget._pause_btn.enabled)
+        self.assertFalse(widget._stop_btn.enabled)
+        self.assertFalse(widget._sender_was_connected)
+        widget._refresh_ports.assert_called_once_with()
+        widget._append_console.assert_called_once_with("[serial error] serial lost", force=True)
+        widget._explore_tick.assert_not_called()
+        widget._request_status.assert_not_called()
+        status_message.assert_called_once_with(
+            "RouterKing: disconnected unexpectedly ([serial error] serial lost)\n",
             error=True,
         )
 
