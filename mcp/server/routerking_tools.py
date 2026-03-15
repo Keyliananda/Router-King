@@ -12,6 +12,19 @@ from .safety import RISK_DANGEROUS_DEV, log_tool_request, validate_risk
 LOG = logging.getLogger("routerking.mcp.tools")
 
 
+def _dev_tools_enabled() -> bool:
+    return os.getenv("ROUTERKING_MCP_DEV_TOOLS", "").lower() in ("1", "true", "yes")
+
+
+def _guard_dev_tool(tool_name: str, payload: dict[str, Any]) -> list[str]:
+    return validate_risk(
+        tool_name,
+        RISK_DANGEROUS_DEV,
+        payload,
+        dev_tools_enabled=_dev_tools_enabled(),
+    )
+
+
 def routerking_list_actions(connection: Optional[FreeCADConnection] = None):
     return (connection or FreeCADConnection()).invoke("list_actions")
 
@@ -101,18 +114,7 @@ def routerking_run_script(
 
     Gated behind ROUTERKING_MCP_DEV_TOOLS=1.
     """
-    dev_tools_enabled = os.getenv("ROUTERKING_MCP_DEV_TOOLS", "").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-
-    errors = validate_risk(
-        "routerking_run_script",
-        RISK_DANGEROUS_DEV,
-        {"code": code},
-        dev_tools_enabled=dev_tools_enabled,
-    )
+    errors = _guard_dev_tool("routerking_run_script", {"code": code})
     if errors:
         return {"success": False, "message": "; ".join(errors), "data": None, "errors": errors}
 
@@ -128,3 +130,64 @@ def routerking_run_script(
         len(result.get("errors", [])),
     )
     return result
+
+
+def routerking_console_exec(
+    code: str,
+    *,
+    persist: bool = True,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """[UNSAFE / DEV ONLY] Execute code in persistent FreeCAD console namespace."""
+    errors = _guard_dev_tool("routerking_console_exec", {"code": code, "persist": persist})
+    if errors:
+        return {"success": False, "message": "; ".join(errors), "data": None, "errors": errors}
+
+    snippet = code[:120] + ("..." if len(code) > 120 else "")
+    log_tool_request(
+        "routerking_console_exec",
+        RISK_DANGEROUS_DEV,
+        {"code_snippet": snippet, "persist": bool(persist)},
+    )
+    return (connection or FreeCADConnection()).invoke("console_exec", code=code, persist=bool(persist))
+
+
+def routerking_console_read(
+    *,
+    limit: int = 20,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """[UNSAFE / DEV ONLY] Read recent persistent console history entries."""
+    errors = _guard_dev_tool("routerking_console_read", {"limit": limit})
+    if errors:
+        return {"success": False, "message": "; ".join(errors), "data": None, "errors": errors}
+
+    log_tool_request(
+        "routerking_console_read",
+        RISK_DANGEROUS_DEV,
+        {"limit": int(limit)},
+    )
+    return (connection or FreeCADConnection()).invoke("console_read", limit=int(limit))
+
+
+def routerking_console_reset(
+    *,
+    reset_namespace: bool = True,
+    clear_history: bool = True,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """[UNSAFE / DEV ONLY] Reset persistent console namespace and/or history."""
+    payload = {
+        "reset_namespace": bool(reset_namespace),
+        "clear_history": bool(clear_history),
+    }
+    errors = _guard_dev_tool("routerking_console_reset", payload)
+    if errors:
+        return {"success": False, "message": "; ".join(errors), "data": None, "errors": errors}
+
+    log_tool_request("routerking_console_reset", RISK_DANGEROUS_DEV, payload)
+    return (connection or FreeCADConnection()).invoke(
+        "console_reset",
+        reset_namespace=bool(reset_namespace),
+        clear_history=bool(clear_history),
+    )

@@ -216,7 +216,38 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         self.assertIn("ValueError", response["errors"][0])
         self.assertIn("boom", response["errors"][0])
 
+    def test_console_exec_persists_namespace(self):
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        first = bridge.console_exec("x = 41")
+        self.assertTrue(first["success"])
+        second = bridge.console_exec("x + 1")
+        self.assertTrue(second["success"])
+        self.assertEqual(second["data"]["result"], "42")
+
+    def test_console_read_and_reset(self):
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        bridge.console_exec("print('hello')")
+        bridge.console_exec("123")
+        history = bridge.console_read(limit=5)
+        self.assertTrue(history["success"])
+        self.assertEqual(history["data"]["total"], 2)
+        self.assertEqual(len(history["data"]["entries"]), 2)
+
+        reset = bridge.console_reset(reset_namespace=True, clear_history=True)
+        self.assertTrue(reset["success"])
+        history_after = bridge.console_read(limit=5)
+        self.assertEqual(history_after["data"]["total"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
-

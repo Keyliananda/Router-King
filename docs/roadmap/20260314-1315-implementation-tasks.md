@@ -16,10 +16,12 @@ Bereits umgesetzt:
 - Task Paket 10: 18 Tests fuer Schemas, Bridge, Safety und alle neuen Tools (alle bestanden)
 - Task Paket 11: `MCP_TOOLS.md` mit Server-Start-Doku und allen Tools, `WORKBENCH_API.md` mit vollstaendiger Action-Registry
 
-Noch offen:
+Zuletzt umgesetzt:
 
-- externer RPC-/Socket-Transport zu laufendem FreeCAD statt nur Embedded-Mode
-- robustere Laufzeitintegration fuer maschinennahe Statusrueckgaben (strukturierte Position/State-Daten aus GRBL)
+- Socket-Transport in `FreeCADConnection`: Modus `socket` sendet JSON-RPC ueber TCP mit Length-Prefixed Framing an laufendes FreeCAD (`ROUTERKING_MCP_MODE=socket`, `ROUTERKING_MCP_HOST`, `ROUTERKING_MCP_PORT`)
+- Strukturierte GRBL-Statusdaten: `machine_request_status` liefert geparstes `machine_position` (x/y/z), `work_position`, `feed_speed` (feed/spindle), Streaming-Progress und Connection-State
+- Action-Executor-Pipeline erweitert: `_call_action_executor` und `_result_item` transportieren jetzt `data`-Felder aus Action-Responses
+- 21 neue Tests in `test_mcp_socket_transport.py` und `test_mcp_machine_status.py`
 
 ## Scope
 

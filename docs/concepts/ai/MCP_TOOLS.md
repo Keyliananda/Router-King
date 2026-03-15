@@ -2,15 +2,16 @@
 
 ## Status
 
-Der erste Implementierungslauf legt die MCP-Struktur direkt im Repo an.
-Die aktuelle Verbindungsschicht nutzt vorerst einen eingebetteten Modus:
+Die MCP-Struktur liegt direkt im Repo:
 
 - `mcp/server/*` enthaelt die Server-seitigen Tools, Schemas und Safety-Regeln.
 - `RouterKing/mcp/*` enthaelt die FreeCAD-/RouterKing-seitige Bridge.
 - `mcp/server/freecad_connection.py` kapselt die Verbindungsentscheidung.
 
-Ein spaeterer Socket-/RPC-Transport soll hinter derselben Connection-API
-eingehangen werden, ohne die Tool-Module neu schneiden zu muessen.
+Unterstuetzte Verbindungsmodi:
+
+- **embedded** (Default): MCP-Bridge laeuft direkt im FreeCAD-Prozess.
+- **socket**: TCP JSON-RPC-Verbindung zu einem laufenden FreeCAD mit Length-Prefixed Framing. Konfigurierbar ueber `ROUTERKING_MCP_HOST` und `ROUTERKING_MCP_PORT`.
 
 ## Server starten
 
@@ -22,9 +23,9 @@ python -m mcp.server.main
 
 | Variable | Default | Beschreibung |
 |---|---|---|
-| `ROUTERKING_MCP_MODE` | `embedded` | Verbindungsmodus (`embedded` ist aktuell der einzige) |
-| `ROUTERKING_MCP_HOST` | `127.0.0.1` | Host fuer kuenftigen Socket-Transport |
-| `ROUTERKING_MCP_PORT` | `4400` | Port fuer kuenftigen Socket-Transport |
+| `ROUTERKING_MCP_MODE` | `embedded` | Verbindungsmodus (`embedded` oder `socket`) |
+| `ROUTERKING_MCP_HOST` | `127.0.0.1` | Host fuer Socket-Transport |
+| `ROUTERKING_MCP_PORT` | `4400` | Port fuer Socket-Transport |
 | `ROUTERKING_MCP_DEV_TOOLS` | _(leer)_ | `1` / `true` / `yes` aktiviert `routerking_run_script` |
 
 ### CLI-Flags
@@ -129,7 +130,7 @@ Alle Machine-Tools verlangen `confirm=true` und `reason` (Freitext). Sie nutzen 
 |---|---|---|
 | `routerking_machine_connect` | `port` | `baudrate` (Default: 115200) |
 | `routerking_machine_disconnect` | -- | -- |
-| `routerking_machine_request_status` | -- | -- |
+| `routerking_machine_request_status` | -- | -- (liefert strukturierte Statusdaten) |
 | `routerking_machine_jog` | `feed` | `dx`, `dy`, `dz` |
 | `routerking_machine_stream_gcode` | `gcode` | -- |
 | `routerking_machine_stop` | -- | -- |
@@ -143,6 +144,64 @@ Beispiel:
   "confirm": true,
   "reason": "Verbindung zum Controller herstellen"
 }
+```
+
+### Strukturierte Maschinen-Statusdaten
+
+`routerking_machine_request_status` liefert in `results[].data.machine_status` strukturierte GRBL-Daten:
+
+```json
+{
+  "state": "Idle",
+  "machine_position": {"x": 0.0, "y": 0.0, "z": 0.0},
+  "work_position": {"x": 0.0, "y": 0.0, "z": 0.0},
+  "feed_speed": {"feed": 500.0, "spindle": 12000.0},
+  "connected": true,
+  "streaming": false,
+  "paused": false,
+  "stream_progress": {"sent": 0, "acked": 0, "total": 0},
+  "last_error": null,
+  "raw": {"state": "Idle", "MPos": "0.000,0.000,0.000", "FS": "500,12000"}
+}
+```
+
+- `state`: GRBL-Zustand (Idle, Run, Hold, Alarm, etc.)
+- `machine_position` / `work_position`: geparstes x/y/z oder `null` wenn nicht verfuegbar
+- `feed_speed`: aktueller Vorschub und Spindeldrehzahl
+- `stream_progress`: Fortschritt beim G-Code-Streaming
+- `raw`: ungeparstes GRBL-Status-Dictionary fuer Debugging
+
+## Claude Code Integration
+
+Der MCP-Server kann direkt von Claude Code als Tool-Provider genutzt werden. Dafuer liegt die Konfiguration in `.claude/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "routerking": {
+      "command": "python3",
+      "args": ["-m", "mcp.server.stdio_server"],
+      "cwd": "/Users/kilianvolz/Code/Router-King",
+      "env": {
+        "ROUTERKING_MCP_MODE": "embedded"
+      }
+    }
+  }
+}
+```
+
+Der stdio-Server spricht JSON-RPC 2.0 ueber stdin/stdout (eine JSON-Zeile pro Message) und implementiert:
+
+- `initialize` — Server-Info und Capabilities
+- `tools/list` — alle Tools mit JSON-Schema
+- `tools/call` — Tool ausfuehren und Ergebnis zurueckgeben
+
+Fuer Socket-Modus statt embedded: `ROUTERKING_MCP_MODE=socket` und `ROUTERKING_MCP_HOST`/`ROUTERKING_MCP_PORT` setzen.
+
+Manueller Test:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | python3 -m mcp.server.stdio_server
 ```
 
 ## Safety

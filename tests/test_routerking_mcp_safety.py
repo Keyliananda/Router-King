@@ -1,7 +1,8 @@
 import unittest
 
 from RouterKing.mcp.bridge import RouterKingBridge
-from mcp.server.machine_tools import routerking_machine_jog
+from mcp.server.machine_tools import routerking_machine_jog, routerking_machine_validate_gcode
+from mcp.server.routerking_tools import routerking_console_exec
 from mcp.server.safety import validate_machine_confirmation
 
 
@@ -25,6 +26,18 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         payload = connection.kwargs["payload"]
         self.assertEqual(payload["actions"][0]["type"], "machine_jog")
         self.assertEqual(payload["actions"][0]["reason"], "fixture test")
+
+    def test_machine_validate_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_machine_validate_gcode(
+            gcode="G90\nG0 X0",
+            machine_profile_path="/tmp/machine_profile.json",
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        payload = connection.kwargs["payload"]
+        self.assertEqual(payload["actions"][0]["type"], "machine_validate_gcode")
+        self.assertEqual(payload["actions"][0]["machine_profile_path"], "/tmp/machine_profile.json")
 
     def test_bridge_rejects_machine_jog_without_confirm(self):
         bridge = RouterKingBridge(
@@ -56,6 +69,21 @@ class TestRouterKingMcpSafety(unittest.TestCase):
 
         errors = validate_risk("routerking_run_script", RISK_DANGEROUS_DEV, {"code": "print(1)"}, dev_tools_enabled=True)
         self.assertEqual(errors, [])
+
+    def test_console_exec_blocked_without_flag(self):
+        connection = StubConnection()
+        with unittest.mock.patch.dict("os.environ", {}, clear=False):
+            response = routerking_console_exec("print('hi')", connection=connection)
+        self.assertFalse(response["success"])
+        self.assertIn("dangerous development tools are disabled", response["message"])
+
+    def test_console_exec_allowed_with_flag(self):
+        connection = StubConnection()
+        with unittest.mock.patch.dict("os.environ", {"ROUTERKING_MCP_DEV_TOOLS": "1"}, clear=False):
+            response = routerking_console_exec("print('hi')", connection=connection)
+        self.assertTrue(response["success"])
+        self.assertEqual(connection.operation, "console_exec")
+        self.assertEqual(connection.kwargs["code"], "print('hi')")
 
 
 if __name__ == "__main__":

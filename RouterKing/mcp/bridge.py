@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import traceback
@@ -15,12 +16,27 @@ try:
 except Exception:  # pragma: no cover - fallback for FreeCAD import path
     from ai.actions import execute_actions
 
+try:
+    from RouterKing.main_thread import run_on_main_thread
+except Exception:  # pragma: no cover - fallback for FreeCAD import path
+    try:
+        from main_thread import run_on_main_thread
+    except Exception:
+        def run_on_main_thread(fn, timeout=60.0):  # type: ignore[misc]
+            return fn()
+
 from . import context as context_helpers
 from . import screenshots as screenshot_helpers
 from .transactions import DocumentTransaction
 
 
 ACTION_REGISTRY: Dict[str, ActionDefinition] = {
+    "create_document": ActionDefinition(
+        name="create_document",
+        description="Create a new FreeCAD document.",
+        optional_params=("name",),
+        risk_class="modify",
+    ),
     "create_part_box": ActionDefinition(
         name="create_part_box",
         description="Create Part::Box geometry.",
@@ -115,6 +131,25 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         ),
         risk_class="modify",
     ),
+    "machine_autoconnect": ActionDefinition(
+        name="machine_autoconnect",
+        description="Auto-detect serial ports and connect to GRBL controller.",
+        optional_params=("confirm", "reason"),
+        risk_class="machine",
+    ),
+    "machine_travel_test": ActionDefinition(
+        name="machine_travel_test",
+        description="XY travel test using machine coordinates (G53).",
+        required_params=("max_x", "max_y"),
+        optional_params=("margin", "feed", "confirm", "reason"),
+        risk_class="machine",
+    ),
+    "machine_z_speed_test": ActionDefinition(
+        name="machine_z_speed_test",
+        description="Z axis speed test using relative movement.",
+        optional_params=("step", "feed", "direction", "confirm", "reason"),
+        risk_class="machine",
+    ),
     "machine_connect": ActionDefinition(
         name="machine_connect",
         description="Connect to the GRBL controller.",
@@ -142,11 +177,18 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         optional_params=("confirm", "reason"),
         risk_class="machine",
     ),
+    "machine_validate_gcode": ActionDefinition(
+        name="machine_validate_gcode",
+        description="Validate G-code against machine travel limits before streaming.",
+        required_params=("gcode",),
+        optional_params=("machine_profile_path",),
+        risk_class="read",
+    ),
     "machine_stream_gcode": ActionDefinition(
         name="machine_stream_gcode",
         description="Stream G-code text to the controller.",
         required_params=("gcode",),
-        optional_params=("confirm", "reason"),
+        optional_params=("confirm", "reason", "machine_profile_path"),
         risk_class="machine",
     ),
     "machine_feed_hold": ActionDefinition(
@@ -186,6 +228,24 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         optional_params=("dx", "dy", "dz", "confirm", "reason"),
         risk_class="machine",
     ),
+    "machine_home": ActionDefinition(
+        name="machine_home",
+        description="Home all axes synchronously. Blocks until homing cycle completes (up to 60s).",
+        optional_params=("confirm", "reason"),
+        risk_class="machine",
+    ),
+    "machine_read_settings": ActionDefinition(
+        name="machine_read_settings",
+        description="Read GRBL $$ settings and return all parameters.",
+        optional_params=("confirm", "reason"),
+        risk_class="machine",
+    ),
+    "machine_identify": ActionDefinition(
+        name="machine_identify",
+        description="Identify machine capabilities: work area, max feeds, spindle, limits, homing, laser mode.",
+        optional_params=("confirm", "reason"),
+        risk_class="machine",
+    ),
 }
 
 
@@ -204,6 +264,9 @@ class RouterKingBridge:
         self._context = context_module or context_helpers
         self._screenshots = screenshot_module or screenshot_helpers
         self._transaction_factory = transaction_factory or DocumentTransaction
+        self._console_globals: Dict[str, Any] = {"__name__": "__routerking_console__"}
+        self._console_history: List[Dict[str, Any]] = []
+        self._console_history_limit = 200
 
     def healthcheck(self) -> Dict[str, Any]:
         active_document = self.get_active_document()
@@ -265,23 +328,80 @@ class RouterKingBridge:
 
         UNSAFE / DEV ONLY -- intended as a development fallback.
         """
-        namespace: Dict[str, Any] = {}
-        stdout_capture = io.StringIO()
-        errors: List[str] = []
-        try:
-            with contextlib.redirect_stdout(stdout_capture):
-                exec(code, namespace)  # noqa: S102
-        except Exception:
-            errors.append(traceback.format_exc())
-
-        output = stdout_capture.getvalue()
-        success = len(errors) == 0
+        result = run_on_main_thread(lambda: self._execute_python(code, {}))
+        success = len(result["errors"]) == 0
         message = "Script executed." if success else "Script raised an exception."
         return make_response(
             success,
             message,
-            data={"output": output},
-            errors=errors,
+            data={
+                "output": result["stdout"],
+                "stderr": result["stderr"],
+                "result": result["result"],
+            },
+            errors=result["errors"],
+        )
+
+    def console_exec(self, code: str, persist: bool = True) -> Dict[str, Any]:
+        """Execute Python in a persistent FreeCAD console-like namespace."""
+        namespace = self._console_globals if persist else {}
+        result = run_on_main_thread(lambda: self._execute_python(code, namespace))
+
+        entry = {
+            "code": code,
+            "success": len(result["errors"]) == 0,
+            "output": result["stdout"],
+            "stderr": result["stderr"],
+            "result": result["result"],
+            "errors": result["errors"],
+        }
+        self._console_history.append(entry)
+        if len(self._console_history) > self._console_history_limit:
+            self._console_history = self._console_history[-self._console_history_limit:]
+
+        success = entry["success"]
+        message = "Console code executed." if success else "Console code raised an exception."
+        return make_response(
+            success,
+            message,
+            data={
+                "output": entry["output"],
+                "stderr": entry["stderr"],
+                "result": entry["result"],
+                "persist": bool(persist),
+                "history_size": len(self._console_history),
+            },
+            errors=entry["errors"],
+        )
+
+    def console_read(self, limit: int = 20) -> Dict[str, Any]:
+        """Read recent console execution history entries."""
+        try:
+            size = max(1, int(limit))
+        except Exception:
+            size = 20
+        entries = self._console_history[-size:]
+        return make_response(
+            True,
+            f"Returned {len(entries)} console entr{'y' if len(entries) == 1 else 'ies'}.",
+            data={"entries": entries, "total": len(self._console_history)},
+            errors=[],
+        )
+
+    def console_reset(self, reset_namespace: bool = True, clear_history: bool = True) -> Dict[str, Any]:
+        """Reset persistent console namespace and/or clear console history."""
+        if reset_namespace:
+            self._console_globals = {"__name__": "__routerking_console__"}
+        if clear_history:
+            self._console_history = []
+        return make_response(
+            True,
+            "Console state reset.",
+            data={
+                "reset_namespace": bool(reset_namespace),
+                "clear_history": bool(clear_history),
+            },
+            errors=[],
         )
 
     def list_actions(self) -> Dict[str, Any]:
@@ -349,13 +469,13 @@ class RouterKingBridge:
         execution_failed = False
         for index, action, definition in validated_actions:
             log_tool_request(action["type"], definition.risk_class, action)
-            messages, exec_errors = _call_action_executor(self._action_executor, action)
+            messages, exec_errors, exec_data = _call_action_executor(self._action_executor, action)
             message = messages[0] if messages else ("; ".join(exec_errors) if exec_errors else "Action completed.")
             success = not exec_errors and not _message_looks_like_error(action["type"], message)
             errors = list(exec_errors)
             if not success and not errors:
                 errors = [message]
-            results.append(_result_item(index, action["type"], success, message, errors))
+            results.append(_result_item(index, action["type"], success, message, errors, data=exec_data))
             if not success:
                 execution_failed = True
                 break
@@ -390,17 +510,48 @@ class RouterKingBridge:
 
         return make_response(success, message, data=response_data, errors=errors)
 
+    def _execute_python(self, code: str, namespace: Dict[str, Any]) -> Dict[str, Any]:
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        errors: List[str] = []
+        result_repr = ""
 
-def _call_action_executor(executor: Callable[[List[Dict[str, Any]]], Any], action: Dict[str, Any]) -> tuple[List[str], List[str]]:
+        if "__builtins__" not in namespace:
+            namespace["__builtins__"] = __builtins__
+
+        try:
+            with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
+                result = _exec_with_optional_last_expr(code, namespace)
+                if result is not None:
+                    result_repr = repr(result)
+        except Exception:
+            errors.append(traceback.format_exc())
+
+        return {
+            "stdout": stdout_capture.getvalue(),
+            "stderr": stderr_capture.getvalue(),
+            "result": result_repr,
+            "errors": errors,
+        }
+
+
+def _call_action_executor(
+    executor: Callable[[List[Dict[str, Any]]], Any],
+    action: Dict[str, Any],
+) -> tuple[List[str], List[str], Any]:
     response = executor([action])
     if isinstance(response, tuple) and len(response) == 2:
         messages, errors = response
-        return list(messages or []), list(errors or [])
+        return list(messages or []), list(errors or []), None
     if isinstance(response, dict):
-        return list(response.get("messages") or []), list(response.get("errors") or [])
+        return (
+            list(response.get("messages") or []),
+            list(response.get("errors") or []),
+            response.get("data"),
+        )
     if isinstance(response, str):
-        return [response], []
-    return [], ["Action executor returned an unsupported response format."]
+        return [response], [], None
+    return [], ["Action executor returned an unsupported response format."], None
 
 
 def _missing_required_fields(action: Mapping[str, Any], definition: ActionDefinition) -> List[str]:
@@ -424,11 +575,41 @@ def _message_looks_like_error(action_type: str, message: str) -> bool:
     return any(fragment in text for fragment in (" failed:", " not found", " required.", " unavailable"))
 
 
-def _result_item(index: int, action_type: str | None, success: bool, message: str, errors: Iterable[str]) -> Dict[str, Any]:
-    return {
+def _result_item(
+    index: int,
+    action_type: str | None,
+    success: bool,
+    message: str,
+    errors: Iterable[str],
+    *,
+    data: Any = None,
+) -> Dict[str, Any]:
+    item = {
         "index": index,
         "type": action_type,
         "success": bool(success),
         "message": message,
         "errors": [str(error) for error in errors if str(error)],
     }
+    if data is not None:
+        item["data"] = data
+    return item
+
+
+def _exec_with_optional_last_expr(code: str, namespace: Dict[str, Any]) -> Any:
+    """Execute code and return final expression value when present."""
+    tree = ast.parse(code, mode="exec")
+    if not tree.body:
+        return None
+
+    last_stmt = tree.body[-1]
+    if isinstance(last_stmt, ast.Expr):
+        exec_body = ast.Module(body=tree.body[:-1], type_ignores=[])  # noqa: S102
+        expr = ast.Expression(body=last_stmt.value)
+        ast.fix_missing_locations(exec_body)
+        ast.fix_missing_locations(expr)
+        exec(compile(exec_body, "<routerking-console>", "exec"), namespace, namespace)  # noqa: S102
+        return eval(compile(expr, "<routerking-console>", "eval"), namespace, namespace)  # noqa: S307
+
+    exec(compile(tree, "<routerking-console>", "exec"), namespace, namespace)  # noqa: S102
+    return None

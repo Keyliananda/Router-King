@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "routerking": {
+      "command": "python3",
+      "args": ["-m", "mcp.server.stdio_server"]
+    }
+  }
+}

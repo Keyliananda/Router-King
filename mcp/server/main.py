@@ -21,8 +21,16 @@ from .machine_tools import (
     routerking_machine_request_status,
     routerking_machine_stop,
     routerking_machine_stream_gcode,
+    routerking_machine_validate_gcode,
 )
-from .routerking_tools import routerking_apply_actions, routerking_list_actions
+from .routerking_tools import (
+    routerking_apply_actions,
+    routerking_console_exec,
+    routerking_console_read,
+    routerking_console_reset,
+    routerking_list_actions,
+    routerking_run_script,
+)
 
 
 def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str, Callable[..., Dict[str, Any]]]:
@@ -34,11 +42,36 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
         "get_selection_context": lambda **_: get_selection_context(bound_connection),
         "capture_view": lambda **payload: capture_view(connection=bound_connection, output_path=payload.get("output_path")),
         "routerking_list_actions": lambda **_: routerking_list_actions(bound_connection),
-        "routerking_apply_actions": lambda **payload: routerking_apply_actions(connection=bound_connection, **payload),
+        "routerking_apply_actions": lambda **kwargs: routerking_apply_actions(
+            payload=kwargs.get("payload"),
+            include_context=kwargs.get("include_context", True),
+            capture_view=kwargs.get("capture_view", False),
+            screenshot_path=kwargs.get("screenshot_path"),
+            connection=bound_connection,
+        ),
+        "routerking_run_script": lambda **payload: routerking_run_script(
+            code=payload.get("code", ""),
+            connection=bound_connection,
+        ),
+        "routerking_console_exec": lambda **payload: routerking_console_exec(
+            code=payload.get("code", ""),
+            persist=payload.get("persist", True),
+            connection=bound_connection,
+        ),
+        "routerking_console_read": lambda **payload: routerking_console_read(
+            limit=payload.get("limit", 20),
+            connection=bound_connection,
+        ),
+        "routerking_console_reset": lambda **payload: routerking_console_reset(
+            reset_namespace=payload.get("reset_namespace", True),
+            clear_history=payload.get("clear_history", True),
+            connection=bound_connection,
+        ),
         "routerking_machine_connect": lambda **payload: routerking_machine_connect(connection=bound_connection, **payload),
         "routerking_machine_disconnect": lambda **payload: routerking_machine_disconnect(connection=bound_connection, **payload),
         "routerking_machine_request_status": lambda **payload: routerking_machine_request_status(connection=bound_connection, **payload),
         "routerking_machine_jog": lambda **payload: routerking_machine_jog(connection=bound_connection, **payload),
+        "routerking_machine_validate_gcode": lambda **payload: routerking_machine_validate_gcode(connection=bound_connection, **payload),
         "routerking_machine_stream_gcode": lambda **payload: routerking_machine_stream_gcode(connection=bound_connection, **payload),
         "routerking_machine_stop": lambda **payload: routerking_machine_stop(connection=bound_connection, **payload),
     }
@@ -87,4 +120,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - CLI wrapper
     raise SystemExit(main())
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 
@@ -58,6 +59,14 @@ def normalize_actions_payload(payload: Any) -> tuple[List[Dict[str, Any]], List[
     if payload is None:
         return [], ["Expected an action object, a list of actions, or {'actions': [...]}."]
 
+    # String fallback: MCP framework may pass payload as JSON string if schema
+    # lacks an explicit "type": "object" definition.
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return [], [f"Payload is a string but not valid JSON: {payload[:200]}"]
+
     if isinstance(payload, list):
         return list(payload), []
 
@@ -68,7 +77,7 @@ def normalize_actions_payload(payload: Any) -> tuple[List[Dict[str, Any]], List[
             return [dict(payload)], []
         return [], ["Payload object must contain 'actions' or a single action 'type'."]
 
-    return [], ["Unsupported payload type for actions."]
+    return [], [f"Unsupported payload type for actions: {type(payload).__name__}"]
 
 
 def coerce_action(action: Any) -> tuple[Dict[str, Any], List[str]]:
