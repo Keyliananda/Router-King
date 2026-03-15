@@ -224,6 +224,36 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "routerking_machine_probe_z",
+        "description": "Run a Z touch-plate probe cycle and set Z0. Requires confirm=true and reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "block_height": {"type": "number", "description": "Touch plate height in mm."},
+                "max_depth": {"type": "number", "default": -30.0},
+                "feed": {"type": "number", "default": 50.0},
+                "retract": {"type": "number", "default": 3.0},
+                "confirm": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["block_height", "confirm", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_machine_probe_config",
+        "description": "Read or update persisted probe defaults in machine_profile.json.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "block_height": {"type": "number"},
+                "probe_feed": {"type": "number"},
+                "retract": {"type": "number"},
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 _TOOL_SCHEMA_MAP = {t["name"]: t for t in TOOL_SCHEMAS}

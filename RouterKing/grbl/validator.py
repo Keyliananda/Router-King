@@ -610,6 +610,13 @@ def _simulate_gcode(
                     machine_coords_block = True
                 elif _near(number, 54.0):
                     pass
+                elif any(_near(number, value) for value in (38.0, 38.2, 38.3, 38.4, 38.5)):
+                    _append_error(
+                        errors,
+                        line=line_no,
+                        command=raw_line,
+                        reason="G38.x probing commands are not allowed in normal G-code streaming; use machine_probe_z.",
+                    )
                 elif any(_near(number, value) for value in (55.0, 56.0, 57.0, 58.0, 59.0)):
                     _append_error(
                         errors,
@@ -1211,4 +1218,3 @@ def _unique_angles(angles: Iterable[float]) -> list[float]:
             continue
         unique.append(float(angle))
     return unique
-

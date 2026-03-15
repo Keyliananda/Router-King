@@ -84,6 +84,18 @@ class TestGrblValidator(unittest.TestCase):
         self.assertTrue(any("M3" in reason for reason in reasons))
         self.assertTrue(any("M7" in reason for reason in reasons))
 
+    def test_rejects_probe_cycle_commands_in_streaming_gcode(self):
+        gcode = "G90 G21\nG38.2 Z-20 F50\nG1 X-1 F200"
+        report = validate_gcode(
+            gcode,
+            machine_profile=PROFILE,
+            grbl_settings=PROFILE["settings"],
+            status=STATUS,
+        )
+        self.assertFalse(report["valid"])
+        reasons = [item["reason"] for item in report["errors"]]
+        self.assertTrue(any("G38.x" in reason for reason in reasons))
+
     def test_calculate_offset_success_and_command(self):
         limits, _ = resolve_machine_limits(PROFILE, PROFILE["settings"])
         result = calculate_g54_offset(

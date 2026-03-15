@@ -254,6 +254,19 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         optional_params=("confirm", "reason"),
         risk_class="machine",
     ),
+    "machine_probe_z": ActionDefinition(
+        name="machine_probe_z",
+        description="Probe Z using a conductive touch plate and set Z0.",
+        required_params=("block_height",),
+        optional_params=("max_depth", "feed", "retract", "confirm", "reason"),
+        risk_class="machine",
+    ),
+    "machine_probe_config": ActionDefinition(
+        name="machine_probe_config",
+        description="Read/update persisted probe defaults in machine_profile.json.",
+        optional_params=("block_height", "probe_feed", "retract"),
+        risk_class="read",
+    ),
     "machine_identify": ActionDefinition(
         name="machine_identify",
         description="Identify machine capabilities: work area, max feeds, spindle, limits, homing, laser mode.",

@@ -84,6 +84,11 @@
     "$5": "0",
     "$6": "0"
   },
+  "probe": {
+    "block_height": 15.0,
+    "probe_feed": 50.0,
+    "retract_height": 3.0
+  },
   "status": {
     "Bf": "35,254",
     "FS": "0,0",

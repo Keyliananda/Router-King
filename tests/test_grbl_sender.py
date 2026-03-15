@@ -1,4 +1,5 @@
 import collections
+import threading
 import time
 import unittest
 
@@ -88,8 +89,7 @@ class TestGrblSender(unittest.TestCase):
         self.assertTrue(sender.is_paused())
         self.assertEqual(serial_instance.writes[-1], b"!")
 
-        sender._rx_queue.put("ok")
-        sender.poll()
+        sender._handle_line("ok")
         self.assertNotIn(b"G1 X2\n", serial_instance.writes)
 
         sender.resume_stream()
@@ -148,6 +148,31 @@ class TestGrblSender(unittest.TestCase):
         self.assertIn("serial lost", progress["last_error"])
         lines = sender.poll()
         self.assertTrue(any("serial error" in line for line in lines))
+
+    def test_collect_routes_prb_lines(self):
+        sender = GrblSender()
+        sender._collecting_settings = True
+
+        sender._handle_line("[PRB:1.000,2.000,-3.000:1]")
+
+        self.assertEqual(sender._settings_queue.get_nowait(), "[PRB:1.000,2.000,-3.000:1]")
+
+    def test_probe_timeout_is_extended_for_g38_commands(self):
+        sender = GrblSender()
+        sender.send_line = lambda _command: None
+
+        def complete_later():
+            time.sleep(0.2)
+            sender._settings_queue.put("__SETTINGS_OK__")
+
+        worker = threading.Thread(target=complete_later, daemon=True)
+        worker.start()
+        start = time.time()
+        sender.send_and_collect("G38.2 Z-30 F50", timeout=0.01)
+        elapsed = time.time() - start
+        worker.join(timeout=1.0)
+
+        self.assertGreaterEqual(elapsed, 0.15)
 
 
 if __name__ == "__main__":

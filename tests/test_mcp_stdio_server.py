@@ -49,6 +49,8 @@ class TestToolsList:
         assert "routerking_console_read" in names
         assert "routerking_machine_stop" in names
         assert "routerking_machine_validate_gcode" in names
+        assert "routerking_machine_probe_z" in names
+        assert "routerking_machine_probe_config" in names
         assert "list_documents" in names
         assert "capture_view" in names
 

@@ -106,6 +106,8 @@ _ACTION_HELP: Dict[str, str] = {
     "machine_home": "Home all axes synchronously, waits for completion (no params)",
     "machine_read_settings": "Read GRBL $$ settings (no params)",
     "machine_identify": "Identify machine: work area, spindle, limits, capabilities (no params)",
+    "machine_probe_z": "Probe Z with touch plate and set Z0 (block_height, max_depth?, feed?, retract?, confirm=true)",
+    "machine_probe_config": "Read/update persisted probe defaults (block_height?, probe_feed?, retract?)",
 }
 
 
@@ -812,6 +814,192 @@ def _action_machine_read_settings(action, params):
     return "GRBL Settings: " + " | ".join(parts) + profile_note
 
 
+def _action_machine_probe_z(action, params):
+    sender = _get_sender()
+    if sender is None:
+        return "machine_probe_z: no sender available."
+    if not sender.is_connected():
+        return "machine_probe_z: not connected."
+    if sender.is_streaming():
+        return "machine_probe_z: sender busy (streaming)."
+    if not _require_machine_confirm(action, params, "machine_probe_z"):
+        return "machine_probe_z: confirm=true required."
+
+    profile, _ = grbl_load_machine_profile(None)
+    probe_config = _extract_probe_config(profile)
+
+    if not _has_param(action, params, "block_height"):
+        return "machine_probe_z: block_height required."
+    block_height = _to_float(_get_param(action, params, "block_height"))
+    if block_height is None:
+        return "machine_probe_z: block_height must be numeric."
+    if block_height <= 0.0:
+        return "machine_probe_z: block_height must be > 0."
+
+    max_depth = _to_float(_get_param(action, params, "max_depth", default=-30.0))
+    if max_depth is None:
+        max_depth = -30.0
+    if max_depth >= 0.0:
+        return "machine_probe_z: max_depth must be negative (probing down)."
+
+    feed = _to_float(_get_param(action, params, "feed"))
+    if feed is None:
+        feed = _to_float(probe_config.get("probe_feed"))
+    if feed is None:
+        feed = 50.0
+    if feed <= 0.0:
+        return "machine_probe_z: feed must be > 0."
+
+    retract = _to_float(_get_param(action, params, "retract"))
+    if retract is None:
+        retract = _to_float(probe_config.get("retract_height"))
+    if retract is None:
+        retract = 3.0
+    if retract < 0.0:
+        return "machine_probe_z: retract must be >= 0."
+
+    status_before = _read_machine_status(sender)
+    state = str((status_before or {}).get("state", "")).strip().lower()
+    if state != "idle":
+        return f"machine_probe_z: machine must be Idle, got '{state or '?'}'."
+    if _status_probe_pin_triggered(status_before):
+        return "machine_probe_z: probe pin already triggered (ALARM:5). Remove touch plate/check wiring."
+
+    probe_timeout = (abs(max_depth) / feed) * 60.0 + 10.0
+    probe_command = f"G91 G38.2 Z{max_depth:.3f} F{feed:.3f}"
+
+    try:
+        probe_lines = sender.send_and_collect(probe_command, timeout=probe_timeout)
+    except Exception as exc:
+        return f"machine_probe_z: probing command failed: {exc}"
+    finally:
+        try:
+            sender.send_and_collect("G90", timeout=1.5)
+        except Exception:
+            pass
+
+    prb = None
+    alarm_line = ""
+    for line in probe_lines:
+        text = str(line or "").strip()
+        if not alarm_line and text.upper().startswith("ALARM:"):
+            alarm_line = text
+        parsed = _parse_probe_response_line(text)
+        if parsed is not None:
+            prb = parsed
+
+    if alarm_line.startswith("ALARM:5"):
+        return "machine_probe_z: probe already triggered at start (ALARM:5). Remove plate/check wiring."
+
+    if alarm_line.startswith("ALARM:4") or (prb is not None and int(prb["success"]) == 0):
+        _unlock_after_probe_fail(sender)
+        return "machine_probe_z: probing failed (no contact, ALARM:4). Machine unlocked with $X."
+
+    if prb is None:
+        if alarm_line:
+            return f"machine_probe_z: probing failed: {alarm_line}"
+        return "machine_probe_z: probing failed (missing [PRB:x,y,z:s] response)."
+
+    if int(prb["success"]) != 1:
+        _unlock_after_probe_fail(sender)
+        return "machine_probe_z: probing failed (probe status != 1). Machine unlocked with $X."
+
+    if retract > 0.0:
+        try:
+            retract_timeout = max(2.0, (retract / max(feed, 1.0)) * 60.0 + 2.0)
+            retract_lines = sender.send_and_collect(f"G91 G0 Z{retract:.3f}", timeout=retract_timeout)
+        except Exception as exc:
+            return f"machine_probe_z: retract failed: {exc}"
+        finally:
+            try:
+                sender.send_and_collect("G90", timeout=1.5)
+            except Exception:
+                pass
+        retract_error = next(
+            (str(line).strip() for line in retract_lines if str(line).strip().lower().startswith(("error", "alarm"))),
+            "",
+        )
+        if retract_error:
+            return f"machine_probe_z: retract failed: {retract_error}"
+
+    set_zero_command = f"G10 L20 P1 Z{block_height:.3f}"
+    try:
+        set_zero_lines = sender.send_and_collect(set_zero_command, timeout=2.0)
+    except Exception as exc:
+        return f"machine_probe_z: failed to set Z zero: {exc}"
+    set_zero_error = next(
+        (str(line).strip() for line in set_zero_lines if str(line).strip().lower().startswith(("error", "alarm"))),
+        "",
+    )
+    if set_zero_error:
+        return f"machine_probe_z: failed to set Z zero: {set_zero_error}"
+
+    status_after = _read_machine_status(sender)
+    work_pos = _parse_position((status_after or {}).get("WPos"))
+
+    return {
+        "message": (
+            f"Z probe successful at X{prb['x']:.3f} Y{prb['y']:.3f} Z{prb['z']:.3f}. "
+            f"Applied {set_zero_command}."
+        ),
+        "errors": [],
+        "data": {
+            "success": True,
+            "probe_position": {"x": prb["x"], "y": prb["y"], "z": prb["z"]},
+            "block_height": float(block_height),
+            "new_z_zero": "Z0 is now at workpiece surface",
+            "work_position": work_pos,
+        },
+    }
+
+
+def _action_machine_probe_config(action, params):
+    has_updates = any(_has_param(action, params, key) for key in ("block_height", "probe_feed", "retract"))
+    profile, profile_path = grbl_load_machine_profile(None)
+    profile_data = dict(profile or {})
+    current = _extract_probe_config(profile_data)
+
+    if not has_updates:
+        return {
+            "message": "Probe configuration loaded.",
+            "errors": [],
+            "data": {
+                "probe": current,
+                "profile_path": profile_path,
+                "probe_pin_invert": _probe_pin_invert((profile_data.get("settings") or {})),
+            },
+        }
+
+    updated = dict(current)
+    if _has_param(action, params, "block_height"):
+        block_height = _to_float(_get_param(action, params, "block_height"))
+        if block_height is None or block_height <= 0.0:
+            return "machine_probe_config: block_height must be > 0."
+        updated["block_height"] = float(block_height)
+    if _has_param(action, params, "probe_feed"):
+        probe_feed = _to_float(_get_param(action, params, "probe_feed"))
+        if probe_feed is None or probe_feed <= 0.0:
+            return "machine_probe_config: probe_feed must be > 0."
+        updated["probe_feed"] = float(probe_feed)
+    if _has_param(action, params, "retract"):
+        retract = _to_float(_get_param(action, params, "retract"))
+        if retract is None or retract < 0.0:
+            return "machine_probe_config: retract must be >= 0."
+        updated["retract_height"] = float(retract)
+
+    profile_data["probe"] = updated
+    saved_path = grbl_save_machine_profile(profile_data, profile_path or None)
+    return {
+        "message": f"Probe configuration saved: {saved_path}",
+        "errors": [],
+        "data": {
+            "probe": updated,
+            "profile_path": saved_path,
+            "probe_pin_invert": _probe_pin_invert((profile_data.get("settings") or {})),
+        },
+    }
+
+
 def _action_machine_identify(action, params):
     """Identify machine: read settings, version, status → build machine profile."""
     import time
@@ -1299,12 +1487,66 @@ def _parse_feed_speed(value):
     return data
 
 
+def _status_probe_pin_triggered(status):
+    if not isinstance(status, dict):
+        return False
+    pins = str(status.get("Pn") or "").upper()
+    return "P" in pins
+
+
+def _parse_probe_response_line(line):
+    match = _PRB_RESPONSE_RE.match(str(line or "").strip())
+    if not match:
+        return None
+    try:
+        return {
+            "x": float(match.group("x")),
+            "y": float(match.group("y")),
+            "z": float(match.group("z")),
+            "success": int(match.group("s")),
+        }
+    except Exception:
+        return None
+
+
+def _unlock_after_probe_fail(sender):
+    if sender is None:
+        return
+    try:
+        sender.send_and_collect("$X", timeout=2.0)
+    except Exception:
+        return
+
+
+def _probe_pin_invert(settings):
+    try:
+        return int(float((settings or {}).get("$6", 0))) == 1
+    except Exception:
+        return False
+
+
+def _extract_probe_config(profile):
+    probe = dict((profile or {}).get("probe") or {})
+    block_height = _to_float(probe.get("block_height"))
+    probe_feed = _to_float(probe.get("probe_feed"))
+    retract_height = _to_float(probe.get("retract_height"))
+    return {
+        "block_height": 15.0 if block_height is None else float(block_height),
+        "probe_feed": 50.0 if probe_feed is None else float(probe_feed),
+        "retract_height": 3.0 if retract_height is None else float(retract_height),
+    }
+
+
 def _get_param(action, params, key, default=None):
     if key in action:
         return action.get(key)
     if key in params:
         return params.get(key)
     return default
+
+
+def _has_param(action, params, key):
+    return key in action or key in params
 
 
 def _require_doc():
@@ -1396,6 +1638,9 @@ def _attach_to_active_body(obj):
 _GCODE_WORD_RE = re.compile(r"([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)")
 _PAREN_COMMENT_RE = re.compile(r"\([^)]*\)")
 _EPS = 1e-9
+_PRB_RESPONSE_RE = re.compile(
+    r"^\[PRB:(?P<x>[+-]?(?:\d+(?:\.\d*)?|\.\d+)),(?P<y>[+-]?(?:\d+(?:\.\d*)?|\.\d+)),(?P<z>[+-]?(?:\d+(?:\.\d*)?|\.\d+)):(?P<s>[01])\]$"
+)
 
 
 def _prepare_gcode_lines(gcode_text):
@@ -1476,6 +1721,11 @@ def _simulate_gcode_motion(lines, *, start_work, wco, limits):
                 elif _near(number, 54.0):
                     # Validator uses the active G54/WCO offset as requested.
                     pass
+                elif any(_near(number, value) for value in (38.0, 38.2, 38.3, 38.4, 38.5)):
+                    raise ValueError(
+                        f"line {line_no}: G38.x probing commands are not allowed in normal G-code streaming. "
+                        "Use machine_probe_z."
+                    )
                 elif any(_near(number, value) for value in (55.0, 56.0, 57.0, 58.0, 59.0)):
                     raise ValueError(
                         f"line {line_no}: unsupported work coordinate system G{int(round(number))}. "
@@ -2039,6 +2289,8 @@ _ACTION_HANDLERS = {
     "machine_jog": _action_machine_jog,
     "machine_home": _action_machine_home,
     "machine_read_settings": _action_machine_read_settings,
+    "machine_probe_z": _action_machine_probe_z,
+    "machine_probe_config": _action_machine_probe_config,
     "machine_identify": _action_machine_identify,
 }
 

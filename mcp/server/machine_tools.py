@@ -108,3 +108,53 @@ def routerking_machine_stop(*, confirm: bool = False, reason: str = "", connecti
         include_context=True,
         connection=connection,
     )
+
+
+def routerking_machine_probe_z(
+    *,
+    block_height: float,
+    max_depth: float = -30.0,
+    feed: float = 50.0,
+    retract: float = 3.0,
+    confirm: bool = False,
+    reason: str = "",
+    connection: Optional[FreeCADConnection] = None,
+):
+    return routerking_apply_actions(
+        {
+            "actions": [
+                {
+                    "type": "machine_probe_z",
+                    "block_height": block_height,
+                    "max_depth": max_depth,
+                    "feed": feed,
+                    "retract": retract,
+                    "confirm": confirm,
+                    "reason": reason,
+                }
+            ]
+        },
+        include_context=True,
+        connection=connection,
+    )
+
+
+def routerking_machine_probe_config(
+    *,
+    block_height: Optional[float] = None,
+    probe_feed: Optional[float] = None,
+    retract: Optional[float] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    action = {"type": "machine_probe_config"}
+    if block_height is not None:
+        action["block_height"] = block_height
+    if probe_feed is not None:
+        action["probe_feed"] = probe_feed
+    if retract is not None:
+        action["retract"] = retract
+    return routerking_apply_actions(
+        {"actions": [action]},
+        include_context=True,
+        connection=connection,
+    )

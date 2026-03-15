@@ -1,7 +1,12 @@
 import unittest
 
 from RouterKing.mcp.bridge import RouterKingBridge
-from mcp.server.machine_tools import routerking_machine_jog, routerking_machine_validate_gcode
+from mcp.server.machine_tools import (
+    routerking_machine_jog,
+    routerking_machine_probe_config,
+    routerking_machine_probe_z,
+    routerking_machine_validate_gcode,
+)
 from mcp.server.routerking_tools import routerking_console_exec
 from mcp.server.safety import validate_machine_confirmation
 
@@ -38,6 +43,32 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         payload = connection.kwargs["payload"]
         self.assertEqual(payload["actions"][0]["type"], "machine_validate_gcode")
         self.assertEqual(payload["actions"][0]["machine_profile_path"], "/tmp/machine_profile.json")
+
+    def test_machine_probe_z_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_machine_probe_z(
+            block_height=15.0,
+            confirm=True,
+            reason="touch plate setup",
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        payload = connection.kwargs["payload"]
+        self.assertEqual(payload["actions"][0]["type"], "machine_probe_z")
+        self.assertEqual(payload["actions"][0]["block_height"], 15.0)
+
+    def test_machine_probe_config_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_machine_probe_config(
+            probe_feed=35.0,
+            retract=2.0,
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        payload = connection.kwargs["payload"]
+        self.assertEqual(payload["actions"][0]["type"], "machine_probe_config")
+        self.assertEqual(payload["actions"][0]["probe_feed"], 35.0)
+        self.assertEqual(payload["actions"][0]["retract"], 2.0)
 
     def test_bridge_rejects_machine_jog_without_confirm(self):
         bridge = RouterKingBridge(

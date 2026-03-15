@@ -2,6 +2,7 @@
 
 import collections
 import queue
+import re
 import threading
 import time
 
@@ -115,6 +116,11 @@ class GrblSender:
         Returns a list of response lines.  Blocks up to *timeout* seconds
         waiting for the final ``ok`` that GRBL sends after the output.
         """
+        effective_timeout = float(timeout)
+        probe_timeout = self._calculate_probe_timeout(command)
+        if probe_timeout is not None:
+            effective_timeout = max(effective_timeout, probe_timeout)
+
         # Drain any stale settings
         while not self._settings_queue.empty():
             try:
@@ -126,7 +132,7 @@ class GrblSender:
         try:
             self.send_line(command)
             lines = []
-            deadline = time.time() + timeout
+            deadline = time.time() + effective_timeout
             while time.time() < deadline:
                 try:
                     item = self._settings_queue.get(timeout=0.1)
@@ -270,7 +276,7 @@ class GrblSender:
             return
         # Route $-settings and $I info lines to the settings queue
         if self._collecting_settings:
-            if line.startswith("$") or line.startswith("[") or line.startswith("Grbl"):
+            if self._is_collect_response_line(line):
                 self._settings_queue.put(line)
                 return
             if line.lower().startswith("ok"):
@@ -363,6 +369,35 @@ class GrblSender:
             self._serial.close()
         finally:
             self._serial = None
+
+    @staticmethod
+    def _is_collect_response_line(line):
+        if line.startswith("$") or line.startswith("Grbl"):
+            return True
+        if line.startswith("[PRB:"):
+            return True
+        if line.startswith("["):
+            return True
+        return False
+
+    @staticmethod
+    def _calculate_probe_timeout(command):
+        text = str(command or "")
+        if not re.search(r"\bG38(?:\.\d+)?\b", text, flags=re.IGNORECASE):
+            return None
+
+        axis_values = [abs(float(value)) for value in re.findall(r"\b[XYZ]\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))", text, flags=re.IGNORECASE)]
+        feed_matches = re.findall(r"\bF\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))", text, flags=re.IGNORECASE)
+        if not axis_values or not feed_matches:
+            return None
+        try:
+            distance = max(axis_values)
+            feed = abs(float(feed_matches[-1]))
+        except Exception:
+            return None
+        if distance <= 0.0 or feed <= 0.0:
+            return None
+        return (distance / feed) * 60.0 + 10.0
 
     @staticmethod
     def _contains_grbl_signature(lines):
