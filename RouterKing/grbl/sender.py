@@ -31,6 +31,9 @@ class GrblSender:
         self._status_line = None
         self._status_data = None
         self._disconnect_reason = None
+        # Separate queue for $-setting and $I info responses
+        self._settings_queue = queue.Queue()
+        self._collecting_settings = False
 
     def connect(self, port, baudrate=115200, timeout=0.1, handshake_timeout=1.0):
         """Connect to the GRBL controller over serial."""
@@ -106,6 +109,39 @@ class GrblSender:
         """Request a GRBL status report."""
         self.send_realtime_command("?")
 
+    def send_and_collect(self, command, timeout=2.0):
+        """Send a command (like $$ or $I) and collect all response lines.
+
+        Returns a list of response lines.  Blocks up to *timeout* seconds
+        waiting for the final ``ok`` that GRBL sends after the output.
+        """
+        # Drain any stale settings
+        while not self._settings_queue.empty():
+            try:
+                self._settings_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._collecting_settings = True
+        try:
+            self.send_line(command)
+            lines = []
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    item = self._settings_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if item == "__SETTINGS_OK__":
+                    break
+                if item.startswith("__SETTINGS_ERROR__:"):
+                    lines.append(item.replace("__SETTINGS_ERROR__:", ""))
+                    break
+                lines.append(item)
+            return lines
+        finally:
+            self._collecting_settings = False
+
     def drain_lines(self, limit=None):
         """Return any received lines without blocking."""
         lines = []
@@ -117,11 +153,12 @@ class GrblSender:
         return lines
 
     def poll(self):
-        """Drain received lines and update sender state."""
-        lines = self.drain_lines()
-        for line in lines:
-            self._handle_line(line)
-        return lines
+        """Drain received lines for UI/consumer use.
+
+        Note: _handle_line is already called in the reader thread, so we
+        only drain the queue here without re-processing.
+        """
+        return self.drain_lines()
 
     def is_connected(self):
         return self._connected
@@ -231,6 +268,19 @@ class GrblSender:
             self._status_line = line
             self._status_data = self._parse_status_line(line)
             return
+        # Route $-settings and $I info lines to the settings queue
+        if self._collecting_settings:
+            if line.startswith("$") or line.startswith("[") or line.startswith("Grbl"):
+                self._settings_queue.put(line)
+                return
+            if line.lower().startswith("ok"):
+                # End of settings block
+                self._settings_queue.put("__SETTINGS_OK__")
+                if self._streaming:
+                    self._acked_lines += 1
+                    self._awaiting_ok = False
+                    self._send_next_line()
+                return
         if line.lower().startswith("ok"):
             if self._streaming:
                 self._acked_lines += 1
@@ -239,6 +289,8 @@ class GrblSender:
             return
         if line.lower().startswith("error") or line.lower().startswith("alarm"):
             self._last_error = line
+            if self._collecting_settings:
+                self._settings_queue.put(f"__SETTINGS_ERROR__:{line}")
             self._streaming = False
             self._paused = False
             self._awaiting_ok = False
@@ -285,6 +337,10 @@ class GrblSender:
                 continue
             line = raw.decode("utf-8", errors="replace").strip()
             if line:
+                # Process streaming-critical lines immediately in the reader
+                # thread so streaming doesn't stall waiting for poll().
+                # The line is still queued for UI/poll consumers.
+                self._handle_line(line)
                 self._rx_queue.put(line)
 
     def _mark_connection_lost(self, exc):

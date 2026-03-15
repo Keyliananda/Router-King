@@ -305,7 +305,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        # Create sender and register as global singleton so MCP can access it
         self._sender = GrblSender()
+        try:
+            from ..grbl.manager import set_sender
+        except ImportError:
+            from grbl.manager import set_sender
+        set_sender(self._sender)
         self._sender_was_connected = False
         self._last_gcode_path = None
         self._last_dxf_path = None

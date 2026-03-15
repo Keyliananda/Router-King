@@ -71,12 +71,32 @@ def routerking_machine_jog(
 def routerking_machine_stream_gcode(
     *,
     gcode: str,
+    machine_profile_path: Optional[str] = None,
     confirm: bool = False,
     reason: str = "",
     connection: Optional[FreeCADConnection] = None,
 ):
+    action = {"type": "machine_stream_gcode", "gcode": gcode, "confirm": confirm, "reason": reason}
+    if machine_profile_path:
+        action["machine_profile_path"] = machine_profile_path
     return routerking_apply_actions(
-        {"actions": [{"type": "machine_stream_gcode", "gcode": gcode, "confirm": confirm, "reason": reason}]},
+        {"actions": [action]},
+        include_context=True,
+        connection=connection,
+    )
+
+
+def routerking_machine_validate_gcode(
+    *,
+    gcode: str,
+    machine_profile_path: Optional[str] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    action = {"type": "machine_validate_gcode", "gcode": gcode}
+    if machine_profile_path:
+        action["machine_profile_path"] = machine_profile_path
+    return routerking_apply_actions(
+        {"actions": [action]},
         include_context=True,
         connection=connection,
     )
@@ -88,4 +108,3 @@ def routerking_machine_stop(*, confirm: bool = False, reason: str = "", connecti
         include_context=True,
         connection=connection,
     )
-

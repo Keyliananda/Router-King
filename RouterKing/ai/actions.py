@@ -1,11 +1,53 @@
 """Action execution helpers for RouterKing AI chat."""
 
-from typing import Dict, List, Tuple
+import json
+import math
+import os
+import re
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 try:  # FreeCAD may not be available during tests or linting.
     import FreeCAD as App
 except Exception:  # pragma: no cover - FreeCAD not available in CI
     App = None
+
+# ---------------------------------------------------------------------------
+# Thread-safety: FreeCAD GUI objects may only be touched from the Qt main
+# thread.  The MCP socket server dispatches requests on worker threads, so
+# every FreeCAD-mutating action must be marshalled back via the polling-based
+# MainThreadDispatcher (see RouterKing.main_thread).
+# ---------------------------------------------------------------------------
+
+try:
+    from RouterKing.main_thread import run_on_main_thread
+except ImportError:
+    try:
+        from main_thread import run_on_main_thread
+    except ImportError:
+        # Fallback: direct execution (tests / headless / no Qt).
+        def run_on_main_thread(fn, timeout=60.0):  # type: ignore[misc]
+            return fn()
+
+
+# Action types that call FreeCAD / Qt APIs and must execute on the main thread.
+_FREECAD_ACTIONS = frozenset({
+    "create_document",
+    "create_part_box",
+    "create_part_cylinder",
+    "create_part_sphere",
+    "create_sketch",
+    "add_rectangle",
+    "add_circle",
+    "delete_object",
+    "translate_object",
+    "set_visibility",
+    "analyze_selection",
+    "optimize_splines_preview",
+    "generate_gcode",
+    "cam_generate_job",
+})
 
 
 _ACTION_HELP: Dict[str, str] = {
@@ -26,6 +68,7 @@ _ACTION_HELP: Dict[str, str] = {
     "machine_disconnect": "Disconnect from GRBL controller (no params)",
     "machine_send_line": "Send single G-code/command line (line, confirm=true)",
     "machine_stream_file": "Stream G-code file (path, confirm=true)",
+    "machine_validate_gcode": "Validate G-code against machine limits (gcode, machine_profile_path?)",
     "machine_stream_gcode": "Stream G-code text (gcode, confirm=true)",
     "machine_feed_hold": "Pause motion (confirm=true)",
     "machine_resume": "Resume motion (confirm=true)",
@@ -33,6 +76,9 @@ _ACTION_HELP: Dict[str, str] = {
     "machine_soft_reset": "Soft reset GRBL (confirm=true)",
     "machine_request_status": "Request status report (no params)",
     "machine_jog": "Jog move (dx?, dy?, dz?, feed, confirm=true)",
+    "machine_home": "Home all axes synchronously, waits for completion (no params)",
+    "machine_read_settings": "Read GRBL $$ settings (no params)",
+    "machine_identify": "Identify machine: work area, spindle, limits, capabilities (no params)",
 }
 
 
@@ -69,7 +115,10 @@ def execute_actions(actions: List[Dict]) -> Tuple[List[str], List[str]]:
             errors.append(f"Unsupported action: {action_type}")
             continue
         try:
-            message = handler(action, params)
+            if action_type in _FREECAD_ACTIONS:
+                message = run_on_main_thread(lambda h=handler, a=action, p=params: h(a, p))
+            else:
+                message = handler(action, params)
             if message:
                 results.append(message)
         except Exception as exc:
@@ -325,6 +374,439 @@ def _action_cam_generate_job(action, params):
     return f"CAM job generated via {result.engine}, saved to {output_path}.{job_note}{warning_text}"
 
 
+def _action_machine_autoconnect(action, params):
+    """Scan serial ports and connect to GRBL directly (no double-open).
+
+    Instead of probing with a separate serial connection (which resets the
+    controller via DTR and triggers Alarm), we try sender.connect() directly
+    on each candidate port.  This avoids the close-reopen cycle that causes
+    spurious GRBL resets.  After connecting, we auto-unlock ($X) if the
+    machine is in Alarm state.
+    """
+    import time
+
+    try:
+        from serial.tools import list_ports as _list_ports
+    except Exception:
+        try:
+            from ..vendor import import_serial as _import_serial
+            _import_serial()
+            from serial.tools import list_ports as _list_ports
+        except Exception:
+            from vendor import import_serial as _import_serial
+            _import_serial()
+            from serial.tools import list_ports as _list_ports
+
+    sender = _get_sender()
+    if sender is None:
+        return "machine_autoconnect: no sender available."
+
+    if sender.is_connected():
+        # Already connected – just check state and unlock if needed
+        sender.poll()
+        sender.request_status()
+        time.sleep(0.15)
+        sender.poll()
+        status = sender.get_status() or {}
+        if status.get("state", "").lower() == "alarm":
+            sender.send_line("$X")
+            time.sleep(0.15)
+            sender.poll()
+            sender.request_status()
+            time.sleep(0.15)
+            sender.poll()
+            status = sender.get_status() or {}
+        state = status.get("state", "?")
+        pos = status.get("MPos", status.get("WPos", "?"))
+        return f"Already connected. State: {state} | Pos: {pos}"
+
+    ports = list(_list_ports.comports())
+    # Filter out Bluetooth
+    filtered = []
+    for port in ports:
+        text = " ".join([str(port.device or ""), str(port.description or "")]).lower()
+        if "bluetooth" in text:
+            continue
+        filtered.append(port)
+
+    if not filtered:
+        return "machine_autoconnect: no serial ports found."
+
+    # Rank: prefer USB serial devices
+    def _score(port):
+        text = " ".join([
+            str(port.device or ""), str(port.description or ""),
+            str(getattr(port, "manufacturer", "") or ""),
+            str(getattr(port, "hwid", "") or ""),
+        ]).lower()
+        s = 0
+        if "usb" in text:
+            s += 10
+        if "serial" in text:
+            s += 5
+        if "ch340" in text or "cp210" in text or "ftdi" in text:
+            s += 8
+        return -s
+    filtered.sort(key=_score)
+
+    # Try connecting directly via sender (single open, no probe-then-reopen)
+    last_error = None
+    for port in filtered:
+        device = port.device
+        try:
+            sender.connect(device)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+
+        # Connected! Now poll status and auto-unlock if in Alarm
+        time.sleep(0.2)
+        sender.poll()
+        sender.request_status()
+        time.sleep(0.15)
+        sender.poll()
+        status = sender.get_status() or {}
+        state = status.get("state", "?")
+
+        if state.lower() == "alarm":
+            sender.send_line("$X")
+            time.sleep(0.15)
+            sender.poll()
+            sender.request_status()
+            time.sleep(0.15)
+            sender.poll()
+            status = sender.get_status() or {}
+            state = status.get("state", "?")
+
+        pos = status.get("MPos", status.get("WPos", "?"))
+        return f"Auto connected to {device}. State: {state} | Pos: {pos}"
+
+    return f"machine_autoconnect: no GRBL controller found. Last error: {last_error}"
+
+
+def _action_machine_travel_test(action, params):
+    """XY travel test using machine coordinates (G53) with safety checks."""
+    import time
+
+    sender = _get_sender()
+    if sender is None:
+        return "machine_travel_test: no sender available."
+    if not sender.is_connected():
+        return "machine_travel_test: not connected."
+    if sender.is_streaming():
+        return "machine_travel_test: sender busy."
+
+    sender.poll()
+    sender.request_status()
+    time.sleep(0.15)
+    sender.poll()
+    status = sender.get_status() or {}
+    state = status.get("state", "").lower()
+    if state == "alarm":
+        return "machine_travel_test: alarm active. Unlock and home first."
+
+    max_x = float(_get_param(action, params, "max_x", default=0))
+    max_y = float(_get_param(action, params, "max_y", default=0))
+    margin = float(_get_param(action, params, "margin", default=5.0))
+    feed = float(_get_param(action, params, "feed", default=600))
+
+    if max_x <= 0 or max_y <= 0:
+        return "machine_travel_test: max_x and max_y required (machine travel limits in mm)."
+
+    target_x = max_x - margin
+    target_y = max_y - margin
+    if target_x <= 0 or target_y <= 0:
+        return f"machine_travel_test: margin ({margin}) too large for limits ({max_x}x{max_y})."
+
+    lines = [
+        "G90",
+        "G21",
+        f"G53 G1 X0 Y0 F{feed:.0f}",
+        f"G53 G1 X{target_x:.3f} F{feed:.0f}",
+        "G53 G1 X0",
+        f"G53 G1 Y{target_y:.3f} F{feed:.0f}",
+        "G53 G1 Y0",
+    ]
+    sender.start_stream(lines)
+    return f"Travel test started: X0→{target_x:.1f}→0, Y0→{target_y:.1f}→0 at F{feed:.0f} (margin {margin}mm)."
+
+
+def _action_machine_z_speed_test(action, params):
+    """Z axis speed test using relative coordinates (G91)."""
+    import time
+
+    sender = _get_sender()
+    if sender is None:
+        return "machine_z_speed_test: no sender available."
+    if not sender.is_connected():
+        return "machine_z_speed_test: not connected."
+    if sender.is_streaming():
+        return "machine_z_speed_test: sender busy."
+
+    sender.poll()
+    sender.request_status()
+    time.sleep(0.15)
+    sender.poll()
+    status = sender.get_status() or {}
+    state = status.get("state", "").lower()
+    if state == "alarm":
+        return "machine_z_speed_test: alarm active. Unlock and home first."
+
+    step = float(_get_param(action, params, "step", default=5.0))
+    feed = float(_get_param(action, params, "feed", default=300))
+    direction = int(_get_param(action, params, "direction", default=-1))
+    if direction >= 0:
+        direction = 1
+    else:
+        direction = -1
+
+    distance = direction * step
+    lines = [
+        "G91 G21",
+        f"G1 Z{distance:.3f} F{feed:.0f}",
+        f"G0 Z{-distance:.3f}",
+        "G90",
+    ]
+    sender.start_stream(lines)
+    return f"Z speed test: {step:.1f}mm at F{feed:.0f} (direction {'+'if direction > 0 else '-'})."
+
+
+def _action_create_document(action, params):
+    """Create a new FreeCAD document.
+
+    Note: App.newDocument() may not be thread-safe in all FreeCAD builds.
+    If it crashes, the user should create the document manually (Ctrl+N).
+    """
+    if App is None:
+        return "create_document: FreeCAD not available."
+    name = _get_param(action, params, "name", default="Unnamed")
+    try:
+        doc = App.newDocument(str(name))
+    except Exception as exc:
+        return f"create_document failed: {exc}. Please create document manually (Ctrl+N)."
+    if doc is None:
+        return "create_document: FreeCAD returned None. Please create document manually (Ctrl+N)."
+    return f"Document created: {doc.Label}"
+
+
+def _action_machine_home(action, params):
+    """Home all axes synchronously — waits for GRBL 'ok' before returning.
+
+    Uses send_and_collect to block until homing is complete (up to 60s).
+    After homing, polls status to return the actual home position.
+    """
+    import time
+
+    sender = _get_sender()
+    if sender is None:
+        return "machine_home: no sender available."
+    if not sender.is_connected():
+        return "machine_home: not connected."
+    if sender.is_streaming():
+        return "machine_home: sender busy (streaming)."
+
+    # Send $H and wait for completion (homing can take 30-60s)
+    lines = sender.send_and_collect("$H", timeout=60.0)
+
+    # Check for errors in the response
+    for line in lines:
+        if "error" in line.lower() or "alarm" in line.lower():
+            return f"machine_home: homing failed: {line}"
+
+    # Poll status to get the actual home position
+    time.sleep(0.3)
+    sender.poll()
+    sender.request_status()
+    time.sleep(0.3)
+    sender.poll()
+    status = sender.get_status() or {}
+    state = status.get("state", "?")
+    pos = status.get("MPos", status.get("WPos", "?"))
+
+    return f"Homing complete. State: {state} | Pos: {pos}"
+
+
+def _action_machine_read_settings(action, params):
+    """Read GRBL $$ settings and return them as structured data."""
+    sender = _get_sender()
+    if sender is None:
+        return "machine_read_settings: no sender available."
+    if not sender.is_connected():
+        return "machine_read_settings: not connected."
+    if sender.is_streaming():
+        return "machine_read_settings: sender busy (streaming)."
+
+    lines = sender.send_and_collect("$$", timeout=2.0)
+    if not lines:
+        return "machine_read_settings: no response from GRBL."
+
+    settings = {}
+    for line in lines:
+        line = line.strip()
+        if line.startswith("$") and "=" in line:
+            key, _, value = line.partition("=")
+            settings[key.strip()] = value.strip()
+
+    if not settings:
+        return f"machine_read_settings: no settings parsed. Raw: {'; '.join(lines[:5])}"
+
+    # Build human-readable summary of key settings
+    SETTING_NAMES = {
+        "$0": "step_pulse_us",
+        "$1": "step_idle_delay_ms",
+        "$2": "step_port_invert",
+        "$3": "direction_port_invert",
+        "$4": "step_enable_invert",
+        "$5": "limit_pins_invert",
+        "$6": "probe_pin_invert",
+        "$10": "status_report_mask",
+        "$11": "junction_deviation_mm",
+        "$12": "arc_tolerance_mm",
+        "$13": "report_inches",
+        "$20": "soft_limits",
+        "$21": "hard_limits",
+        "$22": "homing_cycle",
+        "$23": "homing_dir_invert",
+        "$24": "homing_feed_mm_min",
+        "$25": "homing_seek_mm_min",
+        "$26": "homing_debounce_ms",
+        "$27": "homing_pull_off_mm",
+        "$30": "max_spindle_rpm",
+        "$31": "min_spindle_rpm",
+        "$32": "laser_mode",
+        "$100": "x_steps_per_mm",
+        "$101": "y_steps_per_mm",
+        "$102": "z_steps_per_mm",
+        "$110": "x_max_rate_mm_min",
+        "$111": "y_max_rate_mm_min",
+        "$112": "z_max_rate_mm_min",
+        "$120": "x_acceleration_mm_sec2",
+        "$121": "y_acceleration_mm_sec2",
+        "$122": "z_acceleration_mm_sec2",
+        "$130": "x_max_travel_mm",
+        "$131": "y_max_travel_mm",
+        "$132": "z_max_travel_mm",
+    }
+
+    parts = []
+    for key in sorted(settings.keys(), key=lambda k: int(k.replace("$", "")) if k.replace("$", "").isdigit() else 999):
+        name = SETTING_NAMES.get(key, "")
+        label = f"{key}({name})" if name else key
+        parts.append(f"{label}={settings[key]}")
+
+    return "GRBL Settings: " + " | ".join(parts)
+
+
+def _action_machine_identify(action, params):
+    """Identify machine: read settings, version, status → build machine profile."""
+    import time
+
+    sender = _get_sender()
+    if sender is None:
+        return "machine_identify: no sender available."
+    if not sender.is_connected():
+        return "machine_identify: not connected."
+    if sender.is_streaming():
+        return "machine_identify: sender busy (streaming)."
+
+    profile = {}
+
+    # 1) Read $$ settings
+    settings_lines = sender.send_and_collect("$$", timeout=2.0)
+    settings = {}
+    for line in settings_lines:
+        line = line.strip()
+        if line.startswith("$") and "=" in line:
+            key, _, value = line.partition("=")
+            settings[key.strip()] = value.strip()
+    profile["settings"] = settings
+
+    # 2) Read $I (build info)
+    time.sleep(0.1)
+    info_lines = sender.send_and_collect("$I", timeout=1.5)
+    profile["build_info"] = [l.strip() for l in info_lines if l.strip()]
+
+    # 3) Get current status
+    time.sleep(0.1)
+    sender.poll()
+    sender.request_status()
+    deadline = time.time() + 0.5
+    while time.time() < deadline:
+        sender.poll()
+        status = sender.get_status()
+        if status and status.get("state", "?") != "?":
+            break
+        time.sleep(0.05)
+    status = sender.get_status() or {}
+    profile["status"] = status
+
+    # 4) Extract machine capabilities
+    capabilities = {}
+
+    # Work area
+    def _float(key, default=0.0):
+        try:
+            return float(settings.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    capabilities["work_area"] = {
+        "x_mm": _float("$130"),
+        "y_mm": _float("$131"),
+        "z_mm": _float("$132"),
+    }
+    capabilities["max_feed_rates"] = {
+        "x_mm_min": _float("$110"),
+        "y_mm_min": _float("$111"),
+        "z_mm_min": _float("$112"),
+    }
+    capabilities["acceleration"] = {
+        "x_mm_sec2": _float("$120"),
+        "y_mm_sec2": _float("$121"),
+        "z_mm_sec2": _float("$122"),
+    }
+    capabilities["steps_per_mm"] = {
+        "x": _float("$100"),
+        "y": _float("$101"),
+        "z": _float("$102"),
+    }
+    capabilities["soft_limits"] = _float("$20") == 1.0
+    capabilities["hard_limits"] = _float("$21") == 1.0
+    capabilities["homing_enabled"] = _float("$22") == 1.0
+    capabilities["homing_dir_invert"] = int(_float("$23"))
+    capabilities["laser_mode"] = _float("$32") == 1.0
+    capabilities["spindle"] = {
+        "max_rpm": _float("$30"),
+        "min_rpm": _float("$31"),
+    }
+    capabilities["report_inches"] = _float("$13") == 1.0
+
+    profile["capabilities"] = capabilities
+
+    # 5) Build summary string
+    wa = capabilities["work_area"]
+    mf = capabilities["max_feed_rates"]
+    sp = capabilities["spindle"]
+    state = status.get("state", "?")
+    pos = status.get("MPos", status.get("WPos", "?"))
+
+    summary_parts = [
+        f"State: {state}",
+        f"Pos: {pos}",
+        f"Work Area: X={wa['x_mm']}mm Y={wa['y_mm']}mm Z={wa['z_mm']}mm",
+        f"Max Feed: X={mf['x_mm_min']} Y={mf['y_mm_min']} Z={mf['z_mm_min']} mm/min",
+        f"Spindle: {sp['min_rpm']}-{sp['max_rpm']} RPM",
+        f"Soft Limits: {'ON' if capabilities['soft_limits'] else 'OFF'}",
+        f"Hard Limits: {'ON' if capabilities['hard_limits'] else 'OFF'}",
+        f"Homing: {'ON' if capabilities['homing_enabled'] else 'OFF'}",
+        f"Laser Mode: {'ON' if capabilities['laser_mode'] else 'OFF'}",
+    ]
+    if profile["build_info"]:
+        summary_parts.append(f"Build: {'; '.join(profile['build_info'][:3])}")
+
+    return " | ".join(summary_parts)
+
+
 def _action_machine_connect(action, params):
     sender = _get_sender()
     if sender is None:
@@ -374,6 +856,43 @@ def _action_machine_stream_file(action, params):
     return f"Streaming started: {path} ({len(lines)} lines)."
 
 
+def _action_machine_validate_gcode(action, params):
+    sender = _get_sender()
+    if sender is None:
+        return "machine_validate_gcode: RouterKing UI not available."
+    gcode = _get_param(action, params, "gcode")
+    if not gcode:
+        return "machine_validate_gcode: gcode required."
+
+    lines = _prepare_gcode_lines(str(gcode))
+    if not lines:
+        return "machine_validate_gcode: no G-code lines found."
+
+    profile_path = _get_param(action, params, "machine_profile_path")
+    try:
+        report = _validate_gcode_lines_for_machine(
+            lines,
+            sender=sender,
+            profile_path=str(profile_path) if profile_path else None,
+        )
+    except Exception as exc:
+        return f"machine_validate_gcode: {exc}"
+
+    bbox = report["bbox_work"]
+    limits = report["limits_machine"]
+    return (
+        "G-code validation passed "
+        f"({report['move_count']} move(s)). "
+        f"Work bbox: X[{bbox['x'][0]:.3f}, {bbox['x'][1]:.3f}] "
+        f"Y[{bbox['y'][0]:.3f}, {bbox['y'][1]:.3f}] "
+        f"Z[{bbox['z'][0]:.3f}, {bbox['z'][1]:.3f}] | "
+        f"Machine limits: X[{limits['x'][0]:.3f}, {limits['x'][1]:.3f}] "
+        f"Y[{limits['y'][0]:.3f}, {limits['y'][1]:.3f}] "
+        f"Z[{limits['z'][0]:.3f}, {limits['z'][1]:.3f}] "
+        f"(offset source: {report['offset_source']}, limits source: {report['limits_source']})."
+    )
+
+
 def _action_machine_stream_gcode(action, params):
     sender = _get_sender()
     if sender is None:
@@ -383,9 +902,18 @@ def _action_machine_stream_gcode(action, params):
     gcode = _get_param(action, params, "gcode")
     if not gcode:
         return "machine_stream_gcode: gcode required."
-    lines = [line.strip() for line in str(gcode).splitlines() if line.strip()]
+    lines = _prepare_gcode_lines(str(gcode))
     if not lines:
         return "machine_stream_gcode: no G-code lines found."
+    profile_path = _get_param(action, params, "machine_profile_path")
+    try:
+        _validate_gcode_lines_for_machine(
+            lines,
+            sender=sender,
+            profile_path=str(profile_path) if profile_path else None,
+        )
+    except Exception as exc:
+        return f"machine_stream_gcode: validation failed: {exc}"
     sender.start_stream(lines)
     return f"Streaming started ({len(lines)} lines)."
 
@@ -431,13 +959,46 @@ def _action_machine_soft_reset(action, params):
 
 
 def _action_machine_request_status(action, params):
+    import time
+
     sender = _get_sender()
     if sender is None:
         return "machine_request_status: RouterKing UI not available."
+
+    # Poll any pending lines first, then request fresh status
+    sender.poll()
     sender.request_status()
+
+    # Wait briefly for the GRBL response to arrive via reader thread
+    deadline = time.time() + 0.5
+    while time.time() < deadline:
+        sender.poll()
+        status = sender.get_status()
+        if status and status.get("state", "?") != "?":
+            break
+        time.sleep(0.05)
+
     status = sender.get_status() or {}
+    progress = sender.get_progress() or {}
     state = status.get("state", "?")
-    return f"Status requested (state={state})."
+    pos_parts = []
+    for key in ("MPos", "WPos"):
+        if key in status:
+            pos_parts.append(f"{key}:{status[key]}")
+    pos_str = ", ".join(pos_parts) if pos_parts else "unknown"
+
+    parts = [f"State: {state}", f"Position: {pos_str}"]
+    if progress.get("streaming"):
+        parts.append(f"Streaming: {progress['acked']}/{progress['total']} lines")
+        if progress.get("paused"):
+            parts.append("(paused)")
+    if sender.get_disconnect_reason():
+        parts.append(f"Disconnect: {sender.get_disconnect_reason()}")
+    last_err = status.get("last_error") or progress.get("last_error")
+    if last_err:
+        parts.append(f"Error: {last_err}")
+
+    return " | ".join(parts)
 
 
 def _action_machine_jog(action, params):
@@ -462,6 +1023,45 @@ def _action_machine_jog(action, params):
     command = "$J=G91 " + " ".join(parts) + f" F{feed}"
     sender.send_line(command)
     return f"Jog sent: {command}"
+
+
+def _parse_position(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = [p.strip() for p in text.split(",")]
+    if len(parts) != 3:
+        return {"raw": text}
+    try:
+        return {
+            "x": float(parts[0]),
+            "y": float(parts[1]),
+            "z": float(parts[2]),
+        }
+    except Exception:
+        return {"raw": text}
+
+
+def _parse_feed_speed(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = [p.strip() for p in text.split(",")]
+    try:
+        feed = float(parts[0])
+    except Exception:
+        return {"raw": text}
+    data = {"feed": feed}
+    if len(parts) > 1:
+        try:
+            data["spindle"] = float(parts[1])
+        except Exception:
+            return {"raw": text}
+    return data
 
 
 def _get_param(action, params, key, default=None):
@@ -558,6 +1158,618 @@ def _attach_to_active_body(obj):
             pass
 
 
+_GCODE_WORD_RE = re.compile(r"([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)")
+_PAREN_COMMENT_RE = re.compile(r"\([^)]*\)")
+_EPS = 1e-9
+
+
+def _prepare_gcode_lines(gcode_text):
+    return [line.strip() for line in str(gcode_text or "").splitlines() if line.strip()]
+
+
+def _validate_gcode_lines_for_machine(lines, sender, profile_path=None):
+    if not lines:
+        raise ValueError("no G-code lines found.")
+
+    profile, profile_source = _load_machine_profile(profile_path)
+    status = _read_machine_status(sender)
+    settings = _read_grbl_settings(sender)
+    limits, limits_source = _resolve_machine_limits(profile, settings)
+    wco, offset_source = _resolve_work_offset(status, profile)
+    start_work = _resolve_start_work_position(status, wco, profile)
+
+    report = _simulate_gcode_motion(lines, start_work=start_work, wco=wco, limits=limits)
+    report["limits_machine"] = limits
+    report["limits_source"] = limits_source
+    report["offset_source"] = offset_source
+    report["profile_source"] = profile_source
+    return report
+
+
+def _simulate_gcode_motion(lines, *, start_work, wco, limits):
+    pos = dict(start_work)
+    bbox = {
+        "x": [pos["x"], pos["x"]],
+        "y": [pos["y"], pos["y"]],
+        "z": [pos["z"], pos["z"]],
+    }
+    state = {
+        "distance_absolute": True,
+        "arc_center_absolute": False,
+        "unit_scale": 1.0,  # millimeter units for validation
+        "plane": "G17",
+        "motion": 0,  # G0 as modal default
+    }
+    move_count = 0
+
+    for line_no, raw_line in enumerate(lines, start=1):
+        cleaned = _strip_gcode_comments(raw_line)
+        if not cleaned:
+            continue
+        words = _parse_gcode_words(cleaned)
+        if not words:
+            continue
+
+        axis_words: Dict[str, float] = {}
+        center_words: Dict[str, float] = {}
+        radius_value = None
+        line_motion = None
+        machine_coords_block = False
+
+        for letter, number in words:
+            if letter == "G":
+                if _near(number, 0.0):
+                    line_motion = 0
+                elif _near(number, 1.0):
+                    line_motion = 1
+                elif _near(number, 2.0):
+                    line_motion = 2
+                elif _near(number, 3.0):
+                    line_motion = 3
+                elif _near(number, 17.0):
+                    state["plane"] = "G17"
+                elif _near(number, 18.0):
+                    state["plane"] = "G18"
+                elif _near(number, 19.0):
+                    state["plane"] = "G19"
+                elif _near(number, 20.0):
+                    state["unit_scale"] = 25.4
+                elif _near(number, 21.0):
+                    state["unit_scale"] = 1.0
+                elif _near(number, 53.0):
+                    machine_coords_block = True
+                elif _near(number, 54.0):
+                    # Validator uses the active G54/WCO offset as requested.
+                    pass
+                elif any(_near(number, value) for value in (55.0, 56.0, 57.0, 58.0, 59.0)):
+                    raise ValueError(
+                        f"line {line_no}: unsupported work coordinate system G{int(round(number))}. "
+                        "Validator currently supports active G54/WCO only."
+                    )
+                elif _near(number, 90.0):
+                    state["distance_absolute"] = True
+                elif _near(number, 91.0):
+                    state["distance_absolute"] = False
+                elif _near(number, 90.1):
+                    state["arc_center_absolute"] = True
+                elif _near(number, 91.1):
+                    state["arc_center_absolute"] = False
+            elif letter in ("X", "Y", "Z"):
+                axis_words[letter.lower()] = number * state["unit_scale"]
+            elif letter in ("I", "J", "K"):
+                center_words[letter.lower()] = number * state["unit_scale"]
+            elif letter == "R":
+                radius_value = number * state["unit_scale"]
+
+        if line_motion is not None:
+            state["motion"] = line_motion
+        motion = state["motion"]
+        if motion not in (0, 1, 2, 3):
+            continue
+
+        target = dict(pos)
+        if machine_coords_block:
+            current_machine = _work_to_machine(pos, wco)
+            for axis in ("x", "y", "z"):
+                if axis not in axis_words:
+                    continue
+                value = axis_words[axis]
+                if state["distance_absolute"]:
+                    machine_value = value
+                else:
+                    machine_value = current_machine[axis] + value
+                target[axis] = machine_value - wco[axis]
+        else:
+            for axis in ("x", "y", "z"):
+                if axis not in axis_words:
+                    continue
+                value = axis_words[axis]
+                if state["distance_absolute"]:
+                    target[axis] = value
+                else:
+                    target[axis] += value
+
+        if motion in (0, 1):
+            if not _has_position_change(pos, target):
+                continue
+            _check_machine_limits(target, wco, limits, line_no, raw_line)
+            _update_bbox(bbox, target)
+            pos = target
+            move_count += 1
+            continue
+
+        if not _has_position_change(pos, target) and not center_words and radius_value is None:
+            continue
+
+        arc_points = _build_arc_check_points(
+            start=pos,
+            target=target,
+            plane=state["plane"],
+            clockwise=(motion == 2),
+            center_words=center_words,
+            radius_value=radius_value,
+            arc_center_absolute=state["arc_center_absolute"],
+            line_no=line_no,
+            raw_line=raw_line,
+        )
+        for point in arc_points:
+            _check_machine_limits(point, wco, limits, line_no, raw_line)
+            _update_bbox(bbox, point)
+        pos = target
+        move_count += 1
+
+    return {
+        "move_count": move_count,
+        "bbox_work": bbox,
+    }
+
+
+def _build_arc_check_points(
+    *,
+    start,
+    target,
+    plane,
+    clockwise,
+    center_words,
+    radius_value,
+    arc_center_absolute,
+    line_no,
+    raw_line,
+):
+    u_axis, v_axis, w_axis, c1_word, c2_word = _plane_axes(plane)
+    su = start[u_axis]
+    sv = start[v_axis]
+    eu = target[u_axis]
+    ev = target[v_axis]
+
+    if radius_value is not None:
+        cu, cv = _arc_center_from_radius(
+            su,
+            sv,
+            eu,
+            ev,
+            radius_value,
+            clockwise=clockwise,
+            line_no=line_no,
+            raw_line=raw_line,
+        )
+    else:
+        c1 = center_words.get(c1_word)
+        c2 = center_words.get(c2_word)
+        if c1 is None and c2 is None:
+            raise ValueError(
+                f"line {line_no}: arc move requires I/J/K center offsets or R radius. "
+                f"Line: {raw_line.strip()}"
+            )
+        c1 = 0.0 if c1 is None else c1
+        c2 = 0.0 if c2 is None else c2
+        if arc_center_absolute:
+            cu, cv = c1, c2
+        else:
+            cu, cv = su + c1, sv + c2
+
+    radius = math.hypot(su - cu, sv - cv)
+    if radius <= _EPS:
+        raise ValueError(f"line {line_no}: invalid arc radius ~0. Line: {raw_line.strip()}")
+
+    start_angle = math.atan2(sv - cv, su - cu)
+    end_angle = math.atan2(ev - cv, eu - cu)
+    full_circle = _near(su, eu) and _near(sv, ev)
+
+    candidate_angles = [start_angle, end_angle]
+    if full_circle:
+        candidate_angles = [0.0, math.pi * 0.5, math.pi, math.pi * 1.5, start_angle]
+    else:
+        for angle in (0.0, math.pi * 0.5, math.pi, math.pi * 1.5):
+            if _angle_on_sweep(angle, start_angle, end_angle, clockwise):
+                candidate_angles.append(angle)
+
+    points = []
+    for angle in _unique_angles(candidate_angles):
+        point = dict(start)
+        point[u_axis] = cu + radius * math.cos(angle)
+        point[v_axis] = cv + radius * math.sin(angle)
+        point[w_axis] = start[w_axis]
+        points.append(point)
+
+    # Include end point explicitly (important for helical arcs / final position).
+    points.append(dict(target))
+    return points
+
+
+def _arc_center_from_radius(su, sv, eu, ev, radius_value, *, clockwise, line_no, raw_line):
+    radius = abs(radius_value)
+    dx = eu - su
+    dy = ev - sv
+    chord = math.hypot(dx, dy)
+    if chord <= _EPS:
+        raise ValueError(
+            f"line {line_no}: arc with R and identical start/end is unsupported. Line: {raw_line.strip()}"
+        )
+    if chord > (2.0 * radius + 1e-6):
+        raise ValueError(
+            f"line {line_no}: arc radius R{radius_value:g} too small for chord length. Line: {raw_line.strip()}"
+        )
+
+    mx = (su + eu) * 0.5
+    my = (sv + ev) * 0.5
+    h_sq = max(radius * radius - (chord * chord) * 0.25, 0.0)
+    h = math.sqrt(h_sq)
+    ux = -dy / chord
+    uy = dx / chord
+    centers = [
+        (mx + ux * h, my + uy * h),
+        (mx - ux * h, my - uy * h),
+    ]
+
+    deltas = []
+    for center in centers:
+        delta = _arc_sweep_delta(center, su, sv, eu, ev, clockwise)
+        deltas.append((center, delta))
+    if radius_value >= 0:
+        chosen = min(deltas, key=lambda item: item[1])
+    else:
+        chosen = max(deltas, key=lambda item: item[1])
+    return chosen[0]
+
+
+def _arc_sweep_delta(center, su, sv, eu, ev, clockwise):
+    cu, cv = center
+    start_angle = math.atan2(sv - cv, su - cu)
+    end_angle = math.atan2(ev - cv, eu - cu)
+    if clockwise:
+        delta = (start_angle - end_angle) % (2.0 * math.pi)
+    else:
+        delta = (end_angle - start_angle) % (2.0 * math.pi)
+    if delta <= _EPS:
+        return 2.0 * math.pi
+    return delta
+
+
+def _angle_on_sweep(angle, start_angle, end_angle, clockwise):
+    if clockwise:
+        total = (start_angle - end_angle) % (2.0 * math.pi)
+        progress = (start_angle - angle) % (2.0 * math.pi)
+    else:
+        total = (end_angle - start_angle) % (2.0 * math.pi)
+        progress = (angle - start_angle) % (2.0 * math.pi)
+    return progress <= (total + 1e-8)
+
+
+def _plane_axes(plane):
+    if plane == "G18":
+        return "x", "z", "y", "i", "k"
+    if plane == "G19":
+        return "y", "z", "x", "j", "k"
+    return "x", "y", "z", "i", "j"
+
+
+def _parse_gcode_words(line):
+    words = []
+    for match in _GCODE_WORD_RE.finditer(line):
+        letter = match.group(1).upper()
+        try:
+            number = float(match.group(2))
+        except Exception:
+            continue
+        words.append((letter, number))
+    return words
+
+
+def _strip_gcode_comments(line):
+    stripped = str(line or "")
+    stripped = stripped.split(";", 1)[0]
+    previous = None
+    while previous != stripped:
+        previous = stripped
+        stripped = _PAREN_COMMENT_RE.sub("", stripped)
+    return stripped.strip()
+
+
+def _work_to_machine(work_pos, wco):
+    return {
+        "x": work_pos["x"] + wco["x"],
+        "y": work_pos["y"] + wco["y"],
+        "z": work_pos["z"] + wco["z"],
+    }
+
+
+def _check_machine_limits(work_pos, wco, limits, line_no, raw_line):
+    machine = _work_to_machine(work_pos, wco)
+    for axis in ("x", "y", "z"):
+        minimum, maximum = limits[axis]
+        value = machine[axis]
+        if value < (minimum - 1e-6) or value > (maximum + 1e-6):
+            axis_u = axis.upper()
+            raise ValueError(
+                f"line {line_no}: axis {axis_u} exceeds machine limits. "
+                f"Work {axis_u}={work_pos[axis]:.3f} -> Machine {axis_u}={value:.3f}, "
+                f"allowed [{minimum:.3f}, {maximum:.3f}]. "
+                f"Line: {raw_line.strip()}"
+            )
+
+
+def _update_bbox(bbox, pos):
+    for axis in ("x", "y", "z"):
+        bbox[axis][0] = min(bbox[axis][0], pos[axis])
+        bbox[axis][1] = max(bbox[axis][1], pos[axis])
+
+
+def _has_position_change(start, target):
+    return any(not _near(start[axis], target[axis]) for axis in ("x", "y", "z"))
+
+
+def _near(a, b, eps=1e-9):
+    return abs(float(a) - float(b)) <= eps
+
+
+def _read_machine_status(sender):
+    if sender is None:
+        return {}
+    status = {}
+    is_connected = bool(getattr(sender, "is_connected", lambda: False)())
+    if not is_connected:
+        try:
+            raw = sender.get_status()
+        except Exception:
+            raw = None
+        return dict(raw or {})
+
+    sender.poll()
+    sender.request_status()
+    deadline = time.time() + 0.6
+    while time.time() < deadline:
+        sender.poll()
+        raw = sender.get_status() or {}
+        if raw:
+            status = dict(raw)
+            if status.get("state", "?") != "?":
+                break
+        time.sleep(0.05)
+    return status
+
+
+def _read_grbl_settings(sender):
+    if sender is None:
+        return {}
+    if not bool(getattr(sender, "is_connected", lambda: False)()):
+        return {}
+    if bool(getattr(sender, "is_streaming", lambda: False)()):
+        return {}
+    try:
+        lines = sender.send_and_collect("$$", timeout=2.0)
+    except Exception:
+        return {}
+    settings = {}
+    for line in lines or []:
+        text = str(line or "").strip()
+        if not text.startswith("$") or "=" not in text:
+            continue
+        key, _, value = text.partition("=")
+        settings[key.strip()] = value.strip()
+    return settings
+
+
+def _load_machine_profile(profile_path=None):
+    candidates = []
+    if profile_path:
+        candidates.append(Path(profile_path).expanduser())
+    env_path = os.getenv("ROUTERKING_MACHINE_PROFILE", "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.append(Path.cwd() / "machine_profile.json")
+    candidates.append(Path.home() / "machine_profile.json")
+
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data, str(path)
+    return {}, ""
+
+
+def _resolve_machine_limits(profile, settings):
+    limits = {}
+    source = {}
+    for axis, setting_key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
+        profile_value = _profile_travel_value(profile, axis, setting_key)
+        settings_value = _to_float(settings.get(setting_key))
+        value = profile_value if profile_value is not None else settings_value
+        if value is None:
+            raise ValueError(
+                f"missing machine travel for {axis.upper()}. "
+                f"Provide machine_profile.json or readable GRBL setting {setting_key}."
+            )
+        travel = abs(value)
+        limits[axis] = (-travel, 0.0)
+        source[axis] = "machine_profile.json" if profile_value is not None else "grbl_$$"
+
+    source_text = source["x"]
+    if len({source["x"], source["y"], source["z"]}) > 1:
+        source_text = "machine_profile.json + grbl_$$"
+    return limits, source_text
+
+
+def _profile_travel_value(profile, axis, setting_key):
+    if not isinstance(profile, dict):
+        return None
+    axis_u = axis.upper()
+    axis_item = profile.get(axis) or profile.get(axis_u)
+    if isinstance(axis_item, dict):
+        for key in ("travel", "max_travel", "max", "size"):
+            value = _to_float(axis_item.get(key))
+            if value is not None:
+                return value
+    else:
+        value = _to_float(axis_item)
+        if value is not None:
+            return value
+
+    for key in (setting_key, setting_key.lstrip("$"), f"{axis}_travel", f"{axis}_max_travel", f"max_travel_{axis}"):
+        value = _to_float(profile.get(key))
+        if value is not None:
+            return value
+
+    for container_key in ("settings", "grbl", "grbl_settings"):
+        container = profile.get(container_key)
+        if isinstance(container, dict):
+            value = _to_float(container.get(setting_key))
+            if value is not None:
+                return value
+            value = _to_float(container.get(setting_key.lstrip("$")))
+            if value is not None:
+                return value
+
+    limits = profile.get("limits")
+    if isinstance(limits, dict):
+        axis_limits = limits.get(axis) or limits.get(axis_u)
+        if isinstance(axis_limits, dict):
+            for key in ("travel", "max_travel", "max", "size"):
+                value = _to_float(axis_limits.get(key))
+                if value is not None:
+                    return value
+        else:
+            value = _to_float(axis_limits)
+            if value is not None:
+                return value
+
+    travel = profile.get("travel")
+    if isinstance(travel, dict):
+        value = _to_float(travel.get(axis) or travel.get(axis_u))
+        if value is not None:
+            return value
+
+    capabilities = profile.get("capabilities")
+    if isinstance(capabilities, dict):
+        work_area = capabilities.get("work_area")
+        if isinstance(work_area, dict):
+            value = _to_float(work_area.get(f"{axis}_mm"))
+            if value is not None:
+                return value
+            value = _to_float(work_area.get(axis) or work_area.get(axis_u))
+            if value is not None:
+                return value
+
+    return None
+
+
+def _resolve_work_offset(status, profile):
+    wco = _parse_xyz_value(status.get("WCO")) if isinstance(status, dict) else None
+    if wco is not None:
+        return wco, "status.WCO"
+
+    mpos = _parse_xyz_value(status.get("MPos")) if isinstance(status, dict) else None
+    wpos = _parse_xyz_value(status.get("WPos")) if isinstance(status, dict) else None
+    if mpos is not None and wpos is not None:
+        return {
+            "x": mpos["x"] - wpos["x"],
+            "y": mpos["y"] - wpos["y"],
+            "z": mpos["z"] - wpos["z"],
+        }, "status.MPos-WPos"
+
+    for key in ("work_offset", "wco", "g54", "g54_offset"):
+        value = _parse_xyz_value(profile.get(key) if isinstance(profile, dict) else None)
+        if value is not None:
+            return value, f"profile.{key}"
+
+    raise ValueError(
+        "unable to determine current work offset (WCO/G54). "
+        "Provide a machine profile with work_offset or ensure status includes WCO or MPos/WPos."
+    )
+
+
+def _resolve_start_work_position(status, wco, profile):
+    if isinstance(status, dict):
+        wpos = _parse_xyz_value(status.get("WPos"))
+        if wpos is not None:
+            return wpos
+        mpos = _parse_xyz_value(status.get("MPos"))
+        if mpos is not None:
+            return {
+                "x": mpos["x"] - wco["x"],
+                "y": mpos["y"] - wco["y"],
+                "z": mpos["z"] - wco["z"],
+            }
+
+    for key in ("work_position", "wpos", "position"):
+        value = _parse_xyz_value(profile.get(key) if isinstance(profile, dict) else None)
+        if value is not None:
+            return value
+    return {"x": 0.0, "y": 0.0, "z": 0.0}
+
+
+def _parse_xyz_value(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        x = _to_float(value.get("x", value.get("X")))
+        y = _to_float(value.get("y", value.get("Y")))
+        z = _to_float(value.get("z", value.get("Z")))
+        if x is None or y is None or z is None:
+            return None
+        return {"x": x, "y": y, "z": z}
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        x = _to_float(value[0])
+        y = _to_float(value[1])
+        z = _to_float(value[2])
+        if x is None or y is None or z is None:
+            return None
+        return {"x": x, "y": y, "z": z}
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",")]
+        if len(parts) < 3:
+            return None
+        x = _to_float(parts[0])
+        y = _to_float(parts[1])
+        z = _to_float(parts[2])
+        if x is None or y is None or z is None:
+            return None
+        return {"x": x, "y": y, "z": z}
+    return None
+
+
+def _to_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _unique_angles(angles):
+    unique = []
+    for angle in angles:
+        if any(abs(angle - seen) <= 1e-8 for seen in unique):
+            continue
+        unique.append(angle)
+    return unique
+
+
 _ACTION_HANDLERS = {
     "create_part_box": _action_create_part_box,
     "create_part_cylinder": _action_create_part_cylinder,
@@ -572,10 +1784,15 @@ _ACTION_HANDLERS = {
     "optimize_splines_preview": _action_optimize_splines_preview,
     "generate_gcode": _action_generate_gcode,
     "cam_generate_job": _action_cam_generate_job,
+    "machine_autoconnect": _action_machine_autoconnect,
+    "machine_travel_test": _action_machine_travel_test,
+    "machine_z_speed_test": _action_machine_z_speed_test,
+    "create_document": _action_create_document,
     "machine_connect": _action_machine_connect,
     "machine_disconnect": _action_machine_disconnect,
     "machine_send_line": _action_machine_send_line,
     "machine_stream_file": _action_machine_stream_file,
+    "machine_validate_gcode": _action_machine_validate_gcode,
     "machine_stream_gcode": _action_machine_stream_gcode,
     "machine_feed_hold": _action_machine_feed_hold,
     "machine_resume": _action_machine_resume,
@@ -583,6 +1800,9 @@ _ACTION_HANDLERS = {
     "machine_soft_reset": _action_machine_soft_reset,
     "machine_request_status": _action_machine_request_status,
     "machine_jog": _action_machine_jog,
+    "machine_home": _action_machine_home,
+    "machine_read_settings": _action_machine_read_settings,
+    "machine_identify": _action_machine_identify,
 }
 
 
@@ -849,6 +2069,21 @@ def _require_machine_confirm(action, params, name):
 
 
 def _get_sender():
+    # Primary: use the global singleton (works with and without UI)
+    try:
+        from ..grbl.manager import get_sender as _mgr_get
+    except ImportError:
+        try:
+            from grbl.manager import get_sender as _mgr_get
+        except ImportError:
+            _mgr_get = None
+
+    if _mgr_get is not None:
+        sender = _mgr_get(create=True)
+        if sender is not None:
+            return sender
+
+    # Fallback: try UI dock widget (backwards compatibility)
     try:
         from ..ui import main_dock
     except Exception:
