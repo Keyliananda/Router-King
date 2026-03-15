@@ -19,6 +19,14 @@ except ImportError:  # pragma: no cover - fallback for FreeCAD import path
     from cam.simple_engine import SimpleJobSettings, generate_gcode_from_paths, paths_from_shape
 
 try:
+    from ..grbl.postprocessor import postprocess_gcode as grbl_postprocess_gcode
+except Exception:  # pragma: no cover - fallback for FreeCAD import path
+    try:
+        from grbl.postprocessor import postprocess_gcode as grbl_postprocess_gcode
+    except Exception:  # pragma: no cover - keep CAM export functional without post module
+        grbl_postprocess_gcode = None
+
+try:
     from RouterKing.main_thread import get_dispatcher, run_on_main_thread
 except ImportError:
     try:
@@ -145,7 +153,12 @@ def _generate_cam_gcode_impl(model, operations=None, cam_settings=None):
 
     _ensure_operations(job, model, operations, cam_settings)
     _recompute_document(job, model)
-    gcode = _export_gcode(job, cam_settings.post_processor, cam_settings.output_path)
+    gcode = _export_gcode(
+        job,
+        cam_settings.post_processor,
+        cam_settings.output_path,
+        cam_settings=cam_settings,
+    )
     if not gcode:
         raise RuntimeError("CAM post processor returned empty output.")
     return gcode, job
@@ -601,7 +614,7 @@ def _set_op_property(op, name, value):
     return False
 
 
-def _export_gcode(job, post_processor, output_path):
+def _export_gcode(job, post_processor, output_path, cam_settings=None):
     output_path = output_path or ""
     temp_path = ""
     if not output_path:
@@ -630,6 +643,10 @@ def _export_gcode(job, post_processor, output_path):
             continue
         gcode = _read_gcode_output(result, output_path)
         if gcode:
+            gcode = _postprocess_exported_gcode(gcode, cam_settings=cam_settings)
+            if output_path:
+                with open(output_path, "w", encoding="utf-8") as handle:
+                    handle.write(gcode)
             if temp_path:
                 _safe_remove(temp_path)
             return gcode
@@ -640,6 +657,26 @@ def _export_gcode(job, post_processor, output_path):
     if failures:
         raise RuntimeError("All post exporters failed: " + "; ".join(failures))
     return ""
+
+
+def _postprocess_exported_gcode(gcode, cam_settings=None):
+    if not gcode:
+        return gcode
+    if grbl_postprocess_gcode is None:
+        return gcode
+    try:
+        result = grbl_postprocess_gcode(
+            gcode,
+            feed_rate=float(getattr(cam_settings, "feed_rate", 0.0) or 0.0) if cam_settings is not None else None,
+            plunge_rate=float(getattr(cam_settings, "plunge_rate", 0.0) or 0.0) if cam_settings is not None else None,
+        )
+    except Exception as exc:  # pragma: no cover - postprocess must never block export
+        LOG.warning("G-code postprocessing failed; using raw CAM output: %s", exc)
+        return gcode
+    processed = result.get("gcode") if isinstance(result, dict) else None
+    if isinstance(processed, str) and processed.strip():
+        return processed
+    return gcode
 
 
 def _export_via_job_path_togcode(job, post_processor, output_path):

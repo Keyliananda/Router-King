@@ -12,7 +12,17 @@ from RouterKing.ai.actions import _action_machine_stream_gcode, _action_machine_
 class _FakeSender:
     def __init__(self, *, status=None, settings=None, connected=True, streaming=False):
         self._status = status or {}
-        self._settings = settings or {"$130": "300", "$131": "380", "$132": "50"}
+        self._settings = settings or {
+            "$110": "2000",
+            "$111": "2000",
+            "$112": "500",
+            "$130": "300",
+            "$131": "380",
+            "$132": "50",
+            "$23": "3",
+            "$27": "3",
+            "$32": "0",
+        }
         self._connected = connected
         self._streaming = streaming
         self.started_lines = None
@@ -60,7 +70,7 @@ class TestMachineGcodeValidator(unittest.TestCase):
 
         self.assertIn("validation failed", message)
         self.assertIn("line 2", message)
-        self.assertIn("axis Z", message)
+        self.assertIn("Z=", message)
         self.assertIsNone(sender.started_lines)
 
     def test_stream_starts_when_validation_passes(self):
@@ -71,7 +81,7 @@ class TestMachineGcodeValidator(unittest.TestCase):
                 "WCO": "-297.000,-377.000,-3.000",
             },
         )
-        gcode = "G90 G21\nG0 Z2\nG1 X-1 Y-1 Z-1"
+        gcode = "G90 G21\nG0 Z2\nG1 X-1 Y-1 Z-1 F300"
 
         with patch("RouterKing.ai.actions._get_sender", return_value=sender):
             message = _action_machine_stream_gcode(
@@ -80,18 +90,23 @@ class TestMachineGcodeValidator(unittest.TestCase):
             )
 
         self.assertIn("Streaming started", message)
-        self.assertEqual(sender.started_lines, ["G90 G21", "G0 Z2", "G1 X-1 Y-1 Z-1"])
+        self.assertEqual(sender.started_lines, ["G90 G21", "G0 Z2", "G1 X-1 Y-1 Z-1 F300"])
 
     def test_validate_uses_machine_profile_when_controller_unavailable(self):
         sender = _FakeSender(connected=False)
-        gcode = "G90 G21\nG0 X0 Y0 Z2\nG1 X-1 Y-1 Z-1"
+        gcode = "G90 G21\nG0 X0 Y0 Z2\nG1 X-1 Y-1 Z-1 F300"
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
             json.dump(
                 {
+                    "$110": 2000,
+                    "$111": 2000,
+                    "$112": 500,
                     "$130": 300,
                     "$131": 380,
                     "$132": 50,
+                    "$27": 3,
+                    "$32": 0,
                     "work_offset": {"x": -297, "y": -377, "z": -3},
                     "work_position": {"x": 0, "y": 0, "z": 0},
                 },
@@ -112,7 +127,9 @@ class TestMachineGcodeValidator(unittest.TestCase):
         finally:
             os.unlink(profile_path)
 
-        self.assertIn("G-code validation passed", message)
+        self.assertIsInstance(message, dict)
+        self.assertTrue(message.get("data", {}).get("valid"))
+        self.assertIn("G-code validation passed", message.get("message", ""))
 
 
 if __name__ == "__main__":

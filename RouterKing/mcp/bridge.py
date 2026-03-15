@@ -12,9 +12,9 @@ from mcp.server.safety import log_tool_request, validate_risk
 from mcp.server.schemas import ActionDefinition, coerce_action, get_action_param, make_response, normalize_actions_payload
 
 try:
-    from RouterKing.ai.actions import execute_actions
+    from RouterKing.ai.actions import execute_actions_for_bridge
 except Exception:  # pragma: no cover - fallback for FreeCAD import path
-    from ai.actions import execute_actions
+    from ai.actions import execute_actions_for_bridge
 
 try:
     from RouterKing.main_thread import run_on_main_thread
@@ -131,6 +131,13 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         ),
         risk_class="modify",
     ),
+    "cam_postprocess": ActionDefinition(
+        name="cam_postprocess",
+        description="Postprocess raw CAM G-code for machine-safe streaming.",
+        required_params=("gcode",),
+        optional_params=("machine_profile_path", "feed_rate", "plunge_rate"),
+        risk_class="read",
+    ),
     "machine_autoconnect": ActionDefinition(
         name="machine_autoconnect",
         description="Auto-detect serial ports and connect to GRBL controller.",
@@ -174,7 +181,7 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         name="machine_stream_file",
         description="Stream a G-code file to the controller.",
         required_params=("path",),
-        optional_params=("confirm", "reason"),
+        optional_params=("confirm", "reason", "machine_profile_path"),
         risk_class="machine",
     ),
     "machine_validate_gcode": ActionDefinition(
@@ -190,6 +197,13 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         required_params=("gcode",),
         optional_params=("confirm", "reason", "machine_profile_path"),
         risk_class="machine",
+    ),
+    "machine_calculate_offset": ActionDefinition(
+        name="machine_calculate_offset",
+        description="Calculate optimal G54 offset + G10 command from a toolpath bounding box.",
+        required_params=("bounding_box",),
+        optional_params=("current_machine_position", "desired_workpiece_corner", "safety_margin_mm", "machine_profile_path"),
+        risk_class="read",
     ),
     "machine_feed_hold": ActionDefinition(
         name="machine_feed_hold",
@@ -259,7 +273,7 @@ class RouterKingBridge:
         screenshot_module: Any | None = None,
         transaction_factory: Callable[[], DocumentTransaction] | None = None,
     ) -> None:
-        self._action_executor = action_executor or execute_actions
+        self._action_executor = action_executor or execute_actions_for_bridge
         self._action_registry = dict(action_registry or ACTION_REGISTRY)
         self._context = context_module or context_helpers
         self._screenshots = screenshot_module or screenshot_helpers

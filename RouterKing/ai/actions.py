@@ -30,6 +30,31 @@ except ImportError:
         def run_on_main_thread(fn, timeout=60.0):  # type: ignore[misc]
             return fn()
 
+try:
+    from ..grbl.postprocessor import postprocess_gcode as grbl_postprocess_gcode
+    from ..grbl.validator import (
+        calculate_g54_offset,
+        load_machine_profile as grbl_load_machine_profile,
+        merge_machine_profile as grbl_merge_machine_profile,
+        read_grbl_settings as grbl_read_grbl_settings,
+        read_machine_status as grbl_read_machine_status,
+        resolve_machine_limits as grbl_resolve_machine_limits,
+        save_machine_profile as grbl_save_machine_profile,
+        validate_gcode as grbl_validate_gcode,
+    )
+except Exception:
+    from grbl.postprocessor import postprocess_gcode as grbl_postprocess_gcode
+    from grbl.validator import (
+        calculate_g54_offset,
+        load_machine_profile as grbl_load_machine_profile,
+        merge_machine_profile as grbl_merge_machine_profile,
+        read_grbl_settings as grbl_read_grbl_settings,
+        read_machine_status as grbl_read_machine_status,
+        resolve_machine_limits as grbl_resolve_machine_limits,
+        save_machine_profile as grbl_save_machine_profile,
+        validate_gcode as grbl_validate_gcode,
+    )
+
 
 # Action types that call FreeCAD / Qt APIs and must execute on the main thread.
 _FREECAD_ACTIONS = frozenset({
@@ -64,11 +89,13 @@ _ACTION_HELP: Dict[str, str] = {
     "optimize_splines_preview": "Run spline optimization preview (no params)",
     "generate_gcode": "Generate G-code from selection (output_path?, prefer_cam?)",
     "cam_generate_job": "Create CAM job + operations + post (operations?, output_path?, prefer_cam?)",
+    "cam_postprocess": "Postprocess raw CAM G-code for GRBL safety (gcode, feed_rate?, machine_profile_path?)",
     "machine_connect": "Connect to GRBL controller (port, baudrate?)",
     "machine_disconnect": "Disconnect from GRBL controller (no params)",
     "machine_send_line": "Send single G-code/command line (line, confirm=true)",
     "machine_stream_file": "Stream G-code file (path, confirm=true)",
     "machine_validate_gcode": "Validate G-code against machine limits (gcode, machine_profile_path?)",
+    "machine_calculate_offset": "Calculate optimal G54 offset command for a G-code bounding box (bounding_box, current_machine_position?, desired_workpiece_corner?)",
     "machine_stream_gcode": "Stream G-code text (gcode, confirm=true)",
     "machine_feed_hold": "Pause motion (confirm=true)",
     "machine_resume": "Resume motion (confirm=true)",
@@ -116,14 +143,63 @@ def execute_actions(actions: List[Dict]) -> Tuple[List[str], List[str]]:
             continue
         try:
             if action_type in _FREECAD_ACTIONS:
-                message = run_on_main_thread(lambda h=handler, a=action, p=params: h(a, p))
+                raw_result = run_on_main_thread(lambda h=handler, a=action, p=params: h(a, p))
             else:
-                message = handler(action, params)
+                raw_result = handler(action, params)
+            message, action_errors, _ = _coerce_action_handler_result(raw_result)
             if message:
                 results.append(message)
+            if action_errors:
+                errors.extend(action_errors)
         except Exception as exc:
             errors.append(f"{action_type} failed: {exc}")
     return results, errors
+
+
+def execute_actions_for_bridge(actions: List[Dict]) -> Dict[str, Any]:
+    """Bridge-oriented executor that preserves structured action data."""
+    messages: List[str] = []
+    errors: List[str] = []
+    data: Any = None
+    for action in actions or []:
+        if not isinstance(action, dict):
+            errors.append("Invalid action payload (expected object).")
+            continue
+        action_type = (action.get("type") or action.get("action") or "").strip()
+        params = action.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+
+        handler = _ACTION_HANDLERS.get(action_type)
+        if handler is None:
+            errors.append(f"Unsupported action: {action_type}")
+            continue
+        try:
+            if action_type in _FREECAD_ACTIONS:
+                raw_result = run_on_main_thread(lambda h=handler, a=action, p=params: h(a, p))
+            else:
+                raw_result = handler(action, params)
+            message, action_errors, action_data = _coerce_action_handler_result(raw_result)
+            if message:
+                messages.append(message)
+            if action_errors:
+                errors.extend(action_errors)
+            if action_data is not None:
+                data = action_data
+        except Exception as exc:
+            errors.append(f"{action_type} failed: {exc}")
+    return {"messages": messages, "errors": errors, "data": data}
+
+
+def _coerce_action_handler_result(result: Any) -> tuple[str, List[str], Any]:
+    if isinstance(result, dict):
+        message = str(result.get("message") or "").strip()
+        errors = [str(item) for item in (result.get("errors") or []) if str(item)]
+        data = result.get("data")
+        return message, errors, data
+    if result is None:
+        return "", [], None
+    return str(result), [], None
 
 
 def _action_create_part_box(action, params):
@@ -325,6 +401,13 @@ def _action_generate_gcode(action, params):
     )
 
     gcode = result.gcode or ""
+    if result.engine != "cam":
+        gcode = _postprocess_gcode_for_machine(
+            gcode,
+            profile_path=_get_param(action, merged_params, "machine_profile_path"),
+            feed_rate=_get_param(action, merged_params, "feed_rate", default=cam_settings.feed_rate),
+            plunge_rate=_get_param(action, merged_params, "plunge_rate", default=cam_settings.plunge_rate),
+        )
     output_path = _persist_gcode(output_path, cam_settings.output_path, result.engine, gcode)
     _update_gcode_ui(gcode)
 
@@ -361,6 +444,13 @@ def _action_cam_generate_job(action, params):
     )
 
     gcode = result.gcode or ""
+    if result.engine != "cam":
+        gcode = _postprocess_gcode_for_machine(
+            gcode,
+            profile_path=_get_param(action, merged_params, "machine_profile_path"),
+            feed_rate=_get_param(action, merged_params, "feed_rate", default=cam_settings.feed_rate),
+            plunge_rate=_get_param(action, merged_params, "plunge_rate", default=cam_settings.plunge_rate),
+        )
     output_path = _persist_gcode(output_path, cam_settings.output_path, result.engine, gcode)
     _update_gcode_ui(gcode)
 
@@ -372,6 +462,39 @@ def _action_cam_generate_job(action, params):
     if result.warnings:
         warning_text = " Warnings: " + "; ".join(result.warnings)
     return f"CAM job generated via {result.engine}, saved to {output_path}.{job_note}{warning_text}"
+
+
+def _action_cam_postprocess(action, params):
+    gcode = _get_param(action, params, "gcode")
+    if not gcode:
+        return "cam_postprocess: gcode required."
+    profile_path = _get_param(action, params, "machine_profile_path")
+    feed_rate = _to_float(_get_param(action, params, "feed_rate"))
+    plunge_rate = _to_float(_get_param(action, params, "plunge_rate"))
+    try:
+        result = grbl_postprocess_gcode(
+            str(gcode),
+            machine_profile_path=str(profile_path) if profile_path else None,
+            feed_rate=feed_rate,
+            plunge_rate=plunge_rate,
+        )
+    except Exception as exc:
+        return f"cam_postprocess: {exc}"
+
+    processed = result.get("gcode", "") if isinstance(result, dict) else ""
+    if not processed:
+        return "cam_postprocess: postprocessor produced empty output."
+
+    return {
+        "message": (
+            f"Postprocessed G-code ({result.get('line_count', 0)} lines, "
+            f"safe_z={result.get('safe_z', 0):.3f}, "
+            f"injected_F={result.get('injected_feed_count', 0)}, "
+            f"replaced_F0={result.get('replaced_f0_count', 0)})."
+        ),
+        "errors": [],
+        "data": result,
+    }
 
 
 def _action_machine_autoconnect(action, params):
@@ -418,7 +541,8 @@ def _action_machine_autoconnect(action, params):
             status = sender.get_status() or {}
         state = status.get("state", "?")
         pos = status.get("MPos", status.get("WPos", "?"))
-        return f"Already connected. State: {state} | Pos: {pos}"
+        profile_note = _auto_refresh_machine_profile(sender)
+        return f"Already connected. State: {state} | Pos: {pos}{profile_note}"
 
     ports = list(_list_ports.comports())
     # Filter out Bluetooth
@@ -479,7 +603,8 @@ def _action_machine_autoconnect(action, params):
             state = status.get("state", "?")
 
         pos = status.get("MPos", status.get("WPos", "?"))
-        return f"Auto connected to {device}. State: {state} | Pos: {pos}"
+        profile_note = _auto_refresh_machine_profile(sender)
+        return f"Auto connected to {device}. State: {state} | Pos: {pos}{profile_note}"
 
     return f"machine_autoconnect: no GRBL controller found. Last error: {last_error}"
 
@@ -636,19 +761,9 @@ def _action_machine_read_settings(action, params):
     if sender.is_streaming():
         return "machine_read_settings: sender busy (streaming)."
 
-    lines = sender.send_and_collect("$$", timeout=2.0)
-    if not lines:
-        return "machine_read_settings: no response from GRBL."
-
-    settings = {}
-    for line in lines:
-        line = line.strip()
-        if line.startswith("$") and "=" in line:
-            key, _, value = line.partition("=")
-            settings[key.strip()] = value.strip()
-
+    settings = grbl_read_grbl_settings(sender)
     if not settings:
-        return f"machine_read_settings: no settings parsed. Raw: {'; '.join(lines[:5])}"
+        return "machine_read_settings: no response from GRBL."
 
     # Build human-readable summary of key settings
     SETTING_NAMES = {
@@ -693,8 +808,8 @@ def _action_machine_read_settings(action, params):
         name = SETTING_NAMES.get(key, "")
         label = f"{key}({name})" if name else key
         parts.append(f"{label}={settings[key]}")
-
-    return "GRBL Settings: " + " | ".join(parts)
+    profile_note = _auto_refresh_machine_profile(sender, settings=settings)
+    return "GRBL Settings: " + " | ".join(parts) + profile_note
 
 
 def _action_machine_identify(action, params):
@@ -816,7 +931,8 @@ def _action_machine_connect(action, params):
         return "machine_connect: port required."
     baudrate = _get_param(action, params, "baudrate", default=115200)
     sender.connect(str(port), int(baudrate))
-    return f"Machine connected on {port} (baud {baudrate})."
+    profile_note = _auto_refresh_machine_profile(sender)
+    return f"Machine connected on {port} (baud {baudrate}).{profile_note}"
 
 
 def _action_machine_disconnect(action, params):
@@ -852,14 +968,28 @@ def _action_machine_stream_file(action, params):
     lines = _read_gcode_file(str(path))
     if not lines:
         return "machine_stream_file: no G-code lines found."
+    profile_path = _get_param(action, params, "machine_profile_path")
+    profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
+    status = grbl_read_machine_status(sender)
+    settings = grbl_read_grbl_settings(sender)
+    report = grbl_validate_gcode(
+        lines,
+        machine_profile=profile,
+        grbl_settings=settings,
+        status=status,
+        machine_profile_path=str(profile_path) if profile_path else None,
+    )
+    if not report.get("valid", False):
+        first = (report.get("errors") or [{}])[0]
+        reason = first.get("reason") or "G-code is unsafe."
+        line_no = first.get("line", "?")
+        return f"machine_stream_file: validation failed on line {line_no}: {reason}"
     sender.start_stream(lines)
-    return f"Streaming started: {path} ({len(lines)} lines)."
+    return f"Streaming started: {path} ({len(lines)} lines, est {report.get('estimated_time_seconds', 0)}s)."
 
 
 def _action_machine_validate_gcode(action, params):
     sender = _get_sender()
-    if sender is None:
-        return "machine_validate_gcode: RouterKing UI not available."
     gcode = _get_param(action, params, "gcode")
     if not gcode:
         return "machine_validate_gcode: gcode required."
@@ -870,27 +1000,41 @@ def _action_machine_validate_gcode(action, params):
 
     profile_path = _get_param(action, params, "machine_profile_path")
     try:
-        report = _validate_gcode_lines_for_machine(
+        profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
+        status = grbl_read_machine_status(sender) if sender is not None else {}
+        settings = grbl_read_grbl_settings(sender) if sender is not None else {}
+        report = grbl_validate_gcode(
             lines,
-            sender=sender,
-            profile_path=str(profile_path) if profile_path else None,
+            machine_profile=profile,
+            grbl_settings=settings,
+            status=status,
+            machine_profile_path=str(profile_path) if profile_path else None,
         )
     except Exception as exc:
         return f"machine_validate_gcode: {exc}"
 
-    bbox = report["bbox_work"]
-    limits = report["limits_machine"]
-    return (
-        "G-code validation passed "
-        f"({report['move_count']} move(s)). "
-        f"Work bbox: X[{bbox['x'][0]:.3f}, {bbox['x'][1]:.3f}] "
-        f"Y[{bbox['y'][0]:.3f}, {bbox['y'][1]:.3f}] "
-        f"Z[{bbox['z'][0]:.3f}, {bbox['z'][1]:.3f}] | "
-        f"Machine limits: X[{limits['x'][0]:.3f}, {limits['x'][1]:.3f}] "
-        f"Y[{limits['y'][0]:.3f}, {limits['y'][1]:.3f}] "
-        f"Z[{limits['z'][0]:.3f}, {limits['z'][1]:.3f}] "
-        f"(offset source: {report['offset_source']}, limits source: {report['limits_source']})."
-    )
+    bbox = report.get("bounding_box") or {"x": [0.0, 0.0], "y": [0.0, 0.0], "z": [0.0, 0.0]}
+    if report.get("valid"):
+        message = (
+            "G-code validation passed "
+            f"({report.get('move_count', 0)} move(s), "
+            f"~{report.get('estimated_time_seconds', 0)}s). "
+            f"Work bbox: X[{bbox['x'][0]:.3f}, {bbox['x'][1]:.3f}] "
+            f"Y[{bbox['y'][0]:.3f}, {bbox['y'][1]:.3f}] "
+            f"Z[{bbox['z'][0]:.3f}, {bbox['z'][1]:.3f}]"
+        )
+        errors = []
+    else:
+        first = (report.get("errors") or [{}])[0]
+        reason = first.get("reason") or "Validation failed."
+        message = f"G-code validation failed: {reason}"
+        errors = [f"line {item.get('line', '?')}: {item.get('reason', '')}" for item in (report.get("errors") or [])]
+
+    return {
+        "message": message,
+        "errors": errors,
+        "data": report,
+    }
 
 
 def _action_machine_stream_gcode(action, params):
@@ -907,15 +1051,74 @@ def _action_machine_stream_gcode(action, params):
         return "machine_stream_gcode: no G-code lines found."
     profile_path = _get_param(action, params, "machine_profile_path")
     try:
-        _validate_gcode_lines_for_machine(
+        profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
+        status = grbl_read_machine_status(sender)
+        settings = grbl_read_grbl_settings(sender)
+        report = grbl_validate_gcode(
             lines,
-            sender=sender,
-            profile_path=str(profile_path) if profile_path else None,
+            machine_profile=profile,
+            grbl_settings=settings,
+            status=status,
+            machine_profile_path=str(profile_path) if profile_path else None,
         )
     except Exception as exc:
         return f"machine_stream_gcode: validation failed: {exc}"
+    if not report.get("valid", False):
+        first = (report.get("errors") or [{}])[0]
+        reason = first.get("reason") or "G-code is unsafe."
+        line_no = first.get("line", "?")
+        return f"machine_stream_gcode: validation failed on line {line_no}: {reason}"
     sender.start_stream(lines)
-    return f"Streaming started ({len(lines)} lines)."
+    return f"Streaming started ({len(lines)} lines, est {report.get('estimated_time_seconds', 0)}s)."
+
+
+def _action_machine_calculate_offset(action, params):
+    bounding_box = _get_param(action, params, "bounding_box")
+    if not isinstance(bounding_box, dict):
+        return "machine_calculate_offset: bounding_box required."
+
+    sender = _get_sender()
+    status = grbl_read_machine_status(sender) if sender is not None else {}
+    settings = grbl_read_grbl_settings(sender) if sender is not None else {}
+
+    profile_path = _get_param(action, params, "machine_profile_path")
+    profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
+    try:
+        limits, _ = grbl_resolve_machine_limits(profile, settings)
+    except Exception as exc:
+        return f"machine_calculate_offset: {exc}"
+
+    current_machine_position = _get_param(action, params, "current_machine_position")
+    if current_machine_position is None and isinstance(status, dict):
+        current_machine_position = status.get("MPos")
+    desired_workpiece_corner = _get_param(action, params, "desired_workpiece_corner", default={})
+    safety_margin = float(_get_param(action, params, "safety_margin_mm", default=5.0))
+
+    result = calculate_g54_offset(
+        bounding_box=bounding_box,
+        limits=limits,
+        current_machine_position=current_machine_position,
+        desired_workpiece_corner=desired_workpiece_corner if isinstance(desired_workpiece_corner, dict) else {},
+        safety_margin_mm=safety_margin,
+    )
+    if not result.get("fits", False):
+        warning_text = "; ".join(result.get("warnings") or ["Toolpath does not fit machine limits."])
+        return {
+            "message": f"machine_calculate_offset: {warning_text}",
+            "errors": [warning_text],
+            "data": result,
+        }
+
+    g10 = result.get("g10_command")
+    if g10:
+        message = f"Calculated G54 offset. Apply with: {g10}"
+    else:
+        message = "Calculated G54 offset range, but current machine position is missing so G10 command was not generated."
+    return {
+        "message": message,
+        "errors": [],
+        "data": result,
+    }
 
 
 def _action_machine_feed_hold(action, params):
@@ -1023,6 +1226,38 @@ def _action_machine_jog(action, params):
     command = "$J=G91 " + " ".join(parts) + f" F{feed}"
     sender.send_line(command)
     return f"Jog sent: {command}"
+
+
+def _postprocess_gcode_for_machine(gcode_text, *, profile_path=None, feed_rate=None, plunge_rate=None):
+    if not gcode_text:
+        return gcode_text
+    try:
+        result = grbl_postprocess_gcode(
+            gcode_text,
+            machine_profile_path=str(profile_path) if profile_path else None,
+            feed_rate=_to_float(feed_rate),
+            plunge_rate=_to_float(plunge_rate),
+        )
+    except Exception:
+        return gcode_text
+    processed = result.get("gcode") if isinstance(result, dict) else None
+    return processed if isinstance(processed, str) and processed.strip() else gcode_text
+
+
+def _auto_refresh_machine_profile(sender, settings=None):
+    try:
+        existing_profile, existing_path = grbl_load_machine_profile(None)
+        had_profile = bool(existing_profile)
+        settings_map = dict(settings or {}) or grbl_read_grbl_settings(sender)
+        status = grbl_read_machine_status(sender)
+        merged = grbl_merge_machine_profile(existing_profile, settings=settings_map, status=status)
+        target_path = grbl_save_machine_profile(merged, existing_path or None)
+        note = f" Profile updated: {target_path}."
+        if not had_profile:
+            note += " First-time profile created; run machine_identify for full characterization."
+        return note
+    except Exception as exc:
+        return f" Profile update skipped: {exc}"
 
 
 def _parse_position(value):
@@ -1784,6 +2019,7 @@ _ACTION_HANDLERS = {
     "optimize_splines_preview": _action_optimize_splines_preview,
     "generate_gcode": _action_generate_gcode,
     "cam_generate_job": _action_cam_generate_job,
+    "cam_postprocess": _action_cam_postprocess,
     "machine_autoconnect": _action_machine_autoconnect,
     "machine_travel_test": _action_machine_travel_test,
     "machine_z_speed_test": _action_machine_z_speed_test,
@@ -1794,6 +2030,7 @@ _ACTION_HANDLERS = {
     "machine_stream_file": _action_machine_stream_file,
     "machine_validate_gcode": _action_machine_validate_gcode,
     "machine_stream_gcode": _action_machine_stream_gcode,
+    "machine_calculate_offset": _action_machine_calculate_offset,
     "machine_feed_hold": _action_machine_feed_hold,
     "machine_resume": _action_machine_resume,
     "machine_stop": _action_machine_stop,

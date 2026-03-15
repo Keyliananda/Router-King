@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "routerking": {
+      "command": "python3",
+      "args": ["-m", "mcp.server.stdio_server"],
+      "cwd": "/Users/kilianvolz/Code/Router-King",
+      "env": {
+        "ROUTERKING_MCP_MODE": "embedded"
+      }
+    }
+  }
+}
