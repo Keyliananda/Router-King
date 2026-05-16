@@ -87,6 +87,13 @@ class TestRouterKingMcpSafety(unittest.TestCase):
             output_path="/tmp/routerking.nc",
             prefer_cam=True,
             use_cam_defaults=True,
+            feed_rate=900,
+            plunge_rate=250,
+            final_depth=-4.0,
+            step_down=1.0,
+            profile_side="Inside",
+            spindle_speed=18000,
+            machine_profile_path="/tmp/machine_profile.json",
             connection=connection,
         )
         self.assertTrue(response["success"])
@@ -98,6 +105,13 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         self.assertEqual(action["output_path"], "/tmp/routerking.nc")
         self.assertTrue(action["prefer_cam"])
         self.assertTrue(action["use_cam_defaults"])
+        self.assertEqual(action["feed_rate"], 900)
+        self.assertEqual(action["plunge_rate"], 250)
+        self.assertEqual(action["final_depth"], -4.0)
+        self.assertEqual(action["step_down"], 1.0)
+        self.assertEqual(action["profile_side"], "Inside")
+        self.assertEqual(action["spindle_speed"], 18000)
+        self.assertEqual(action["machine_profile_path"], "/tmp/machine_profile.json")
 
     def test_cam_capabilities_wrapper_invokes_bridge_operation(self):
         connection = StubConnection()
@@ -151,12 +165,24 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         response = routerking_cam_generate_job(
             model="Body",
             operations=[{"type": "pocket", "depth": -2.0}],
+            safe_z=8.0,
+            cut_z=-2.0,
+            pass_depth=0.5,
+            ramp_length=3.0,
+            laser_power=1000,
+            start_spindle=False,
             connection=connection,
         )
         self.assertTrue(response["success"])
         payload = connection.kwargs["payload"]
         self.assertEqual(payload["actions"][0]["type"], "cam_generate_job")
         self.assertEqual(payload["actions"][0]["operations"][0]["type"], "pocket")
+        self.assertEqual(payload["actions"][0]["safe_z"], 8.0)
+        self.assertEqual(payload["actions"][0]["cut_z"], -2.0)
+        self.assertEqual(payload["actions"][0]["pass_depth"], 0.5)
+        self.assertEqual(payload["actions"][0]["ramp_length"], 3.0)
+        self.assertEqual(payload["actions"][0]["laser_power"], 1000)
+        self.assertFalse(payload["actions"][0]["start_spindle"])
         self.assertTrue(connection.kwargs["capture_view"])
 
     def test_cam_postprocess_wrapper_builds_expected_action_payload(self):

@@ -88,6 +88,15 @@ class TestToolsList:
             assert set(schema["properties"]) >= {"model", "operations", "output_path", "prefer_cam", "use_cam_defaults"}
             assert schema["properties"]["prefer_cam"]["type"] == "boolean"
             assert schema["properties"]["use_cam_defaults"]["type"] == "boolean"
+            assert schema["properties"]["post_processor"]["type"] == "string"
+            assert schema["properties"]["feed_rate"]["type"] == "number"
+            assert schema["properties"]["plunge_rate"]["type"] == "number"
+            assert schema["properties"]["final_depth"]["type"] == "number"
+            assert schema["properties"]["step_down"]["type"] == "number"
+            assert schema["properties"]["profile_side"]["enum"] == ["Outside", "Inside", "On"]
+            assert schema["properties"]["spindle_speed"]["type"] == "integer"
+            assert schema["properties"]["laser_power"]["type"] == "integer"
+            assert schema["properties"]["machine_profile_path"]["type"] == "string"
 
     def test_cam_read_only_inspection_schemas_are_filter_only(self):
         setup_schema = _TOOL_SCHEMA_MAP["routerking_cam_list_setups"]["inputSchema"]

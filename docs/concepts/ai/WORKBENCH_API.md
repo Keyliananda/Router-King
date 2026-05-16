@@ -8,9 +8,18 @@ Mapping zwischen MCP-Tools und der internen ACTION_REGISTRY.
 MCP-Tool  -->  routerking_apply_actions()  -->  ACTION_REGISTRY  -->  execute_actions()
 ```
 
-Die Domain-Tools (`routerking_analyze_selection`, etc.) sind Convenience-Wrapper,
-die intern `routerking_apply_actions` mit einem vordefinierten Action-Payload aufrufen.
+Viele Domain-Tools (`routerking_generate_gcode`, `routerking_cam_generate_job`,
+`routerking_cam_postprocess`, etc.) sind Convenience-Wrapper, die intern
+`routerking_apply_actions` mit einem vordefinierten Action-Payload aufrufen.
 Machine-Tools gehen denselben Weg, setzen aber zusaetzlich `include_context=True`.
+
+Einige read-only CAM-MCP-Tools gehen direkt auf Bridge-Methoden, weil sie keine
+Actions ausfuehren und keine Transaktion benoetigen:
+
+- `routerking_cam_capabilities`
+- `routerking_cam_list_setups`
+- `routerking_cam_list_operations`
+- `routerking_cam_inspect_operation`
 
 ## Risikoklassen
 
@@ -69,6 +78,7 @@ Beide Fehler werden als strukturierte Fehlermeldungen zurueckgegeben; die Action
 | `optimize_splines_preview` | Spline-Optimierungs-Vorschau | -- | -- |
 | `generate_gcode` | G-Code generieren | -- | `model`, `operations`, `output_path`, `prefer_cam`, `use_cam_defaults` |
 | `cam_generate_job` | CAM-Job erzeugen und G-Code exportieren | -- | `model`, `operations`, `output_path`, `prefer_cam`, `use_cam_defaults` |
+| `cam_postprocess` | Rohes CAM-G-Code fuer GRBL nachbearbeiten | `gcode` | `machine_profile_path`, `feed_rate`, `plunge_rate` |
 
 ### Machine-Steuerung (machine)
 

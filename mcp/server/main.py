@@ -26,6 +26,7 @@ from .machine_tools import (
     routerking_machine_validate_gcode,
 )
 from .routerking_tools import (
+    CAM_SETTING_KEYS,
     routerking_analyze_selection,
     routerking_apply_actions,
     routerking_cam_capabilities,
@@ -93,6 +94,7 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
             prefer_cam=payload.get("prefer_cam"),
             use_cam_defaults=payload.get("use_cam_defaults"),
             connection=bound_connection,
+            **{key: payload.get(key) for key in CAM_SETTING_KEYS},
         ),
         "routerking_cam_generate_job": lambda **payload: routerking_cam_generate_job(
             model=payload.get("model"),
@@ -101,6 +103,7 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
             prefer_cam=payload.get("prefer_cam"),
             use_cam_defaults=payload.get("use_cam_defaults"),
             connection=bound_connection,
+            **{key: payload.get(key) for key in CAM_SETTING_KEYS},
         ),
         "routerking_cam_postprocess": lambda **payload: routerking_cam_postprocess(
             gcode=payload.get("gcode", ""),

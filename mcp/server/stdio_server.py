@@ -20,6 +20,29 @@ LOG = logging.getLogger("routerking.mcp.stdio")
 # Tool JSON-Schema definitions
 # ---------------------------------------------------------------------------
 
+CAM_SETTING_SCHEMA: Dict[str, Any] = {
+    "post_processor": {"type": "string", "description": "FreeCAD CAM post processor name, e.g. grbl_post."},
+    "feed_rate": {"type": "number", "description": "Horizontal feed rate in mm/min."},
+    "plunge_rate": {"type": "number", "description": "Vertical/plunge feed rate in mm/min."},
+    "start_depth": {"type": "number", "description": "CAM operation start depth."},
+    "final_depth": {"type": "number", "description": "CAM operation final depth."},
+    "step_down": {"type": "number", "description": "CAM step-down / pass depth."},
+    "profile_side": {"type": "string", "enum": ["Outside", "Inside", "On"], "description": "Profile operation side."},
+    "profile_direction": {"type": "string", "enum": ["CCW", "CW"], "description": "Profile cutting direction."},
+    "safe_z": {"type": "number", "description": "Simple fallback safe Z height."},
+    "cut_z": {"type": "number", "description": "Simple fallback cut Z depth."},
+    "start_z": {"type": "number", "description": "Simple fallback start Z height."},
+    "pass_depth": {"type": "number", "description": "Simple fallback pass depth."},
+    "ramp_length": {"type": "number", "description": "Simple fallback ramp length."},
+    "lead_in": {"type": "number", "description": "Simple fallback lead-in length."},
+    "lead_out": {"type": "number", "description": "Simple fallback lead-out length."},
+    "units": {"type": "string", "enum": ["mm", "inch"], "description": "Simple fallback G-code units."},
+    "spindle_speed": {"type": "integer", "description": "Simple fallback M3 spindle speed."},
+    "laser_power": {"type": "integer", "description": "Simple fallback laser power S value."},
+    "start_spindle": {"type": "boolean", "description": "Whether generated fallback G-code should start spindle/laser with M3."},
+    "machine_profile_path": {"type": "string", "description": "Optional machine_profile.json path for GRBL postprocessing."},
+}
+
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     # -- FreeCAD read tools --
     {
@@ -148,6 +171,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "output_path": {"type": "string", "description": "Optional path for the generated G-code file."},
                 "prefer_cam": {"type": "boolean", "default": True},
                 "use_cam_defaults": {"type": "boolean", "default": True},
+                **CAM_SETTING_SCHEMA,
             },
             "additionalProperties": False,
         },
@@ -167,6 +191,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "output_path": {"type": "string", "description": "Optional path for the exported G-code file."},
                 "prefer_cam": {"type": "boolean", "default": True},
                 "use_cam_defaults": {"type": "boolean", "default": True},
+                **CAM_SETTING_SCHEMA,
             },
             "additionalProperties": False,
         },

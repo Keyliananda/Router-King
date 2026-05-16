@@ -38,6 +38,29 @@ erst danach Maschinenvalidierung oder Streaming ausfuehren.
   kein Recompute, kein Postprocess, keine Dokumentveraenderung.
 - [x] Schema, Wrapper/Bridge und Tests ergaenzen.
 
+## Iteration 4 -- Vorhandene Generate-Parameter direkt via MCP
+
+- [x] Bestehende CAM/Path-Settings aus `CamJobSettings` direkt im Schema fuer
+  `routerking_generate_gcode` und `routerking_cam_generate_job` anbieten:
+  Postprocessor, Feed/Plunge, Tiefen, Stepdown, Profile Side/Direction.
+- [x] Bestehende Simple-Fallback-Settings direkt im Schema anbieten:
+  Safe/Start/Cut Z, Pass Depth, Ramp, Lead-in/out, Units, Spindle/Laser.
+- [x] `machine_profile_path` fuer vorhandenes GRBL-Postprocessing in den
+  Generate-Tools direkt erlauben.
+- [x] Wrapper-Tests fuer die Parameterweitergabe ergaenzen.
+
+## Readiness fuer bereits vorhandene CAM-Features
+
+- [x] CAM/Path-Hybrid-Generate per MCP sichtbar.
+- [x] Simple-Fallback-Generate per MCP parametrierbar.
+- [x] CAM-Postprocess per MCP sichtbar.
+- [x] CAM-Projektinspektion per MCP sichtbar.
+- [ ] CAM-G-Code-Analyse als direktes MCP-Tool anbieten.
+- [ ] DXF-to-GCode als direktes MCP-Tool anbieten.
+- [ ] Generate-Ergebnisse strukturierter zurueckgeben (`engine`, `output_path`,
+  `warnings`, optional `job_id`).
+- [ ] CAM-Workbench-Status/Aktivierung als eigene MCP-Diagnose anbieten.
+
 ## Naechste Iterationen
 
 - [ ] `routerking_cam_create_setup`: CAM-Job/Setup ohne sofortigen Postprocess

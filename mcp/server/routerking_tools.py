@@ -11,6 +11,29 @@ from .safety import RISK_DANGEROUS_DEV, log_tool_request, validate_risk
 
 LOG = logging.getLogger("routerking.mcp.tools")
 
+CAM_SETTING_KEYS = (
+    "post_processor",
+    "feed_rate",
+    "plunge_rate",
+    "start_depth",
+    "final_depth",
+    "step_down",
+    "profile_side",
+    "profile_direction",
+    "safe_z",
+    "cut_z",
+    "start_z",
+    "pass_depth",
+    "ramp_length",
+    "lead_in",
+    "lead_out",
+    "units",
+    "spindle_speed",
+    "laser_power",
+    "start_spindle",
+    "machine_profile_path",
+)
+
 
 def _dev_tools_enabled() -> bool:
     return os.getenv("ROUTERKING_MCP_DEV_TOOLS", "").lower() in ("1", "true", "yes")
@@ -120,12 +143,16 @@ def routerking_generate_gcode(
     prefer_cam: Optional[bool] = None,
     use_cam_defaults: Optional[bool] = None,
     connection: Optional[FreeCADConnection] = None,
+    **settings: Any,
 ):
     """Generate G-code from the current model or specified parameters."""
     action: dict[str, Any] = {"type": "generate_gcode"}
     for key, val in [("model", model), ("operations", operations), ("output_path", output_path), ("prefer_cam", prefer_cam), ("use_cam_defaults", use_cam_defaults)]:
         if val is not None:
             action[key] = val
+    for key in CAM_SETTING_KEYS:
+        if key in settings and settings[key] is not None:
+            action[key] = settings[key]
     return routerking_apply_actions(
         {"actions": [action]},
         connection=connection,
@@ -140,12 +167,16 @@ def routerking_cam_generate_job(
     prefer_cam: Optional[bool] = None,
     use_cam_defaults: Optional[bool] = None,
     connection: Optional[FreeCADConnection] = None,
+    **settings: Any,
 ):
     """Generate a CAM job from the current model or specified parameters."""
     action: dict[str, Any] = {"type": "cam_generate_job"}
     for key, val in [("model", model), ("operations", operations), ("output_path", output_path), ("prefer_cam", prefer_cam), ("use_cam_defaults", use_cam_defaults)]:
         if val is not None:
             action[key] = val
+    for key in CAM_SETTING_KEYS:
+        if key in settings and settings[key] is not None:
+            action[key] = settings[key]
     return routerking_apply_actions(
         {"actions": [action]},
         capture_view=True,

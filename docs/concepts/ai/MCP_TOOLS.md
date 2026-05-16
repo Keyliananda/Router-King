@@ -202,6 +202,16 @@ Generiert G-Code aus dem aktiven Modell. Risikoklasse: `modify`.
 
 Alle Parameter sind optional. Ohne Angaben werden Standardwerte verwendet.
 
+Die direkten Generate-Tools unterstuetzen zusaetzlich die bereits vorhandenen
+CAM- und Simple-Fallback-Settings:
+
+- CAM/Path: `post_processor`, `feed_rate`, `plunge_rate`, `start_depth`,
+  `final_depth`, `step_down`, `profile_side`, `profile_direction`
+- Simple-Fallback: `safe_z`, `start_z`, `cut_z`, `pass_depth`, `ramp_length`,
+  `lead_in`, `lead_out`, `units`, `spindle_speed`, `laser_power`,
+  `start_spindle`
+- Postprocessing/Validation: `machine_profile_path`
+
 #### `routerking_cam_generate_job`
 
 Erzeugt einen CAM-Job und exportiert G-Code. Risikoklasse: `modify`. Liefert automatisch einen Screenshot zurueck.
