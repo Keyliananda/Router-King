@@ -10,11 +10,15 @@ from unittest.mock import ANY, patch
 from RouterKing.cam.hybrid import (
     CamJobSettings,
     HybridResult,
+    OperationSpec,
     SimpleJobSettings,
     _collect_job_operations,
+    _create_operation,
     _export_gcode,
     _resolve_operation_base,
     _profile_base_for_model,
+    _prepare_op_property_overrides,
+    _set_op_property,
     _try_create_variants,
     _run_export_variants,
     _assign_job_model,
@@ -169,6 +173,144 @@ class TestProfileBaseSelection(unittest.TestCase):
         model = StubModel("AnyPart")
         base = _resolve_operation_base("pocket", model, None)
         self.assertEqual(base, model)
+
+
+class TestOperationPropertySetting(unittest.TestCase):
+    def test_set_op_property_updates_freecad_quantity_like_value(self):
+        class QuantityLike:
+            def __init__(self, value):
+                self.Value = value
+
+        class QuantityBackedOp:
+            def __init__(self):
+                object.__setattr__(self, "StepDown", QuantityLike(99.0))
+
+            def __setattr__(self, name, value):
+                if name == "StepDown":
+                    raise TypeError("FreeCAD quantity property requires Value assignment")
+                object.__setattr__(self, name, value)
+
+        op = QuantityBackedOp()
+
+        self.assertTrue(_set_op_property(op, "StepDown", 1.0))
+        self.assertEqual(op.StepDown.Value, 1.0)
+
+    def test_prepare_op_property_overrides_clears_expressions(self):
+        class ExpressionBackedOp:
+            def __init__(self):
+                self.cleared = []
+
+            def setExpression(self, name, expression):
+                self.cleared.append((name, expression))
+
+        op = ExpressionBackedOp()
+        _prepare_op_property_overrides(op, {"StartDepth": 0.0, "FinalDepth": -4.0, "StepDown": 1.0})
+
+        self.assertEqual(
+            op.cleared,
+            [("StartDepth", None), ("FinalDepth", None), ("StepDown", None)],
+        )
+
+    def test_create_operation_applies_pocket_depths_stepover_and_feeds(self):
+        class QuantityLike:
+            def __init__(self, value):
+                self.Value = value
+
+        class ToolController:
+            def __init__(self):
+                self.HorizFeed = QuantityLike(0.0)
+                self.VertFeed = QuantityLike(0.0)
+
+        class PocketOp:
+            def __init__(self):
+                self.Name = "PocketShape"
+                self.TypeId = "Path::FeaturePython"
+                self.Base = None
+                self.ToolController = ToolController()
+                self.cleared = []
+                object.__setattr__(self, "StartDepth", QuantityLike(99.0))
+                object.__setattr__(self, "FinalDepth", QuantityLike(99.0))
+                object.__setattr__(self, "StepDown", QuantityLike(99.0))
+                object.__setattr__(self, "StepOver", QuantityLike(99.0))
+
+            def __setattr__(self, name, value):
+                if name in {"StartDepth", "FinalDepth", "StepDown", "StepOver"}:
+                    raise TypeError("FreeCAD quantity property requires Value assignment")
+                object.__setattr__(self, name, value)
+
+            def setExpression(self, name, expression):
+                self.cleared.append((name, expression))
+
+        class PocketModule:
+            __name__ = "Path.Op.PocketShape"
+
+            @staticmethod
+            def Create(name, obj=None, parentJob=None):
+                return PocketOp()
+
+        def import_module(name):
+            if name == "Path.Op.PocketShape":
+                return PocketModule
+            return None
+
+        settings = CamJobSettings(
+            start_depth=0.0,
+            final_depth=-4.0,
+            step_down=1.0,
+            step_over=35.0,
+            feed_rate=500.0,
+            plunge_rate=150.0,
+        )
+        job = StubJob()
+        job.SetupSheet = type("SetupSheet", (), {"StepDownExpression": "OpToolDiameter"})()
+
+        with patch("RouterKing.cam.hybrid._import_module", side_effect=import_module):
+            op = _create_operation(
+                job,
+                StubModel("PocketModel"),
+                OperationSpec(kind="pocket"),
+                settings,
+            )
+
+        self.assertIsNotNone(op)
+        self.assertEqual(op.StartDepth.Value, 0.0)
+        self.assertEqual(op.FinalDepth.Value, -4.0)
+        self.assertEqual(op.StepDown.Value, 1.0)
+        self.assertEqual(op.StepOver.Value, 35.0)
+        self.assertEqual(op.ToolController.HorizFeed.Value, 500.0)
+        self.assertEqual(op.ToolController.VertFeed.Value, 150.0)
+        self.assertIn(("StepDown", None), op.cleared)
+        self.assertEqual(job.SetupSheet.StepDownExpression, "1 mm")
+
+    def test_create_operation_logs_unapplied_expected_properties(self):
+        class RejectingOp:
+            Name = "PocketShape"
+            TypeId = "Path::FeaturePython"
+            Base = None
+            StepDown = 99.0
+
+            def __setattr__(self, name, value):
+                if name == "StepDown":
+                    raise TypeError("rejected")
+                object.__setattr__(self, name, value)
+
+        class PocketModule:
+            __name__ = "Path.Op.PocketShape"
+
+            @staticmethod
+            def Create(name, obj=None, parentJob=None):
+                return RejectingOp()
+
+        with patch("RouterKing.cam.hybrid._import_module", return_value=PocketModule):
+            with self.assertLogs("routerking.cam.hybrid", level="WARNING") as cm:
+                _create_operation(
+                    StubJob(),
+                    StubModel(),
+                    OperationSpec(kind="pocket", properties={"StepDown": 1.0}),
+                    CamJobSettings(step_down=1.0),
+                )
+
+        self.assertTrue(any("StepDown" in message for message in cm.output))
 
 
 class TestExportGcode(unittest.TestCase):

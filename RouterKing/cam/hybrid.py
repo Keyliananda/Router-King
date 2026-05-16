@@ -48,11 +48,12 @@ class CamJobSettings:
     output_path: str = ""
     start_depth: float = 0.0
     final_depth: float = -1.0
-    step_down: float = 1.0
+    step_down: float = 0.5
+    step_over: float = 35.0
     profile_side: str = "Outside"
     profile_direction: str = "CCW"
-    feed_rate: float = 800.0
-    plunge_rate: float = 300.0
+    feed_rate: float = 500.0
+    plunge_rate: float = 150.0
 
 
 @dataclass
@@ -448,8 +449,15 @@ def _create_operation(job, model, op_spec, settings):
 
     properties = _default_op_properties(kind, settings)
     properties.update(op_spec.properties or {})
+    _prepare_op_property_overrides(op, properties, job=job)
     for key, value in properties.items():
-        _set_op_property(op, key, value)
+        if not _set_op_property(op, key, value):
+            LOG.warning(
+                "Could not apply CAM operation property %s=%r to %s",
+                key,
+                value,
+                getattr(op, "Name", op),
+            )
 
     return op
 
@@ -576,6 +584,7 @@ def _default_op_properties(kind, settings):
             "StartDepth": settings.start_depth,
             "FinalDepth": settings.final_depth,
             "StepDown": settings.step_down,
+            "StepOver": settings.step_over,
             "HorizFeed": settings.feed_rate,
             "VertFeed": settings.plunge_rate,
         }
@@ -592,26 +601,77 @@ def _default_op_properties(kind, settings):
 def _set_op_property(op, name, value):
     if value is None:
         return False
-    if hasattr(op, name):
-        try:
-            setattr(op, name, value)
-            return True
-        except Exception:
-            return False
 
     aliases = {
         "HorizFeed": ("FeedRate", "Feed", "HorizontalFeed"),
         "VertFeed": ("PlungeRate", "VerticalFeed", "PlungeFeed"),
         "Feed": ("FeedRate",),
     }
-    for alias in aliases.get(name, ()):
-        if hasattr(op, alias):
-            try:
-                setattr(op, alias, value)
-                return True
-            except Exception:
-                return False
+    for attr in (name,) + aliases.get(name, ()):
+        if hasattr(op, attr):
+            return _set_property_value(op, attr, value)
+
+    if name in ("HorizFeed", "VertFeed", "Feed"):
+        tool_controller = getattr(op, "ToolController", None)
+        if tool_controller is not None:
+            for attr in (name,) + aliases.get(name, ()):
+                if hasattr(tool_controller, attr):
+                    return _set_property_value(tool_controller, attr, value)
     return False
+
+
+def _prepare_op_property_overrides(op, properties, job=None):
+    """Remove FreeCAD CAM default expressions before applying explicit values."""
+    for name in properties:
+        _clear_property_expression(op, name)
+    if "StepDown" in properties:
+        _set_setup_sheet_length_expression(job, "StepDownExpression", properties["StepDown"])
+
+
+def _clear_property_expression(obj, name):
+    setter = getattr(obj, "setExpression", None)
+    if not callable(setter):
+        return False
+    for expr in (None, ""):
+        try:
+            setter(name, expr)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _set_setup_sheet_length_expression(job, name, value):
+    setup_sheet = getattr(job, "SetupSheet", None)
+    if setup_sheet is None or not hasattr(setup_sheet, name):
+        return False
+    try:
+        setattr(setup_sheet, name, _length_expression(value))
+        return True
+    except Exception:
+        return False
+
+
+def _length_expression(value):
+    try:
+        return f"{float(value):g} mm"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _set_property_value(obj, name, value):
+    prop = getattr(obj, name, None)
+    if hasattr(prop, "Value"):
+        try:
+            prop.Value = value
+            return True
+        except Exception:
+            pass
+    try:
+        setattr(obj, name, value)
+        return True
+    except Exception:
+        return False
 
 
 def _export_gcode(job, post_processor, output_path, cam_settings=None):

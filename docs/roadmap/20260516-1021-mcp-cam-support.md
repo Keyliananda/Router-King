@@ -57,6 +57,9 @@ erst danach Maschinenvalidierung oder Streaming ausfuehren.
 - [x] CAM-Projektinspektion per MCP sichtbar.
 - [x] CAM-G-Code-Analyse als direktes MCP-Tool anbieten.
 - [x] DXF-to-GCode als direktes MCP-Tool anbieten.
+- [x] CAM-Operation-Expressions fuer explizite Tiefen/Zustellungen loesen,
+  damit `step_down` nicht vom Werkzeugdurchmesser ueberschrieben wird.
+- [x] Konservatives Bamboo-Pocket-Preset fuer kleine GRBL-Fraese anbieten.
 - [ ] Generate-Ergebnisse strukturierter zurueckgeben (`engine`, `output_path`,
   `warnings`, optional `job_id`).
 - [ ] CAM-Workbench-Status/Aktivierung als eigene MCP-Diagnose anbieten.

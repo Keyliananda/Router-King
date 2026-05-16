@@ -127,6 +127,7 @@ class TestToolsList:
             assert schema["properties"]["plunge_rate"]["type"] == "number"
             assert schema["properties"]["final_depth"]["type"] == "number"
             assert schema["properties"]["step_down"]["type"] == "number"
+            assert schema["properties"]["step_over"]["type"] == "number"
             assert schema["properties"]["profile_side"]["enum"] == ["Outside", "Inside", "On"]
             assert schema["properties"]["spindle_speed"]["type"] == "integer"
             assert schema["properties"]["laser_power"]["type"] == "integer"

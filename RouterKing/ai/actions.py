@@ -2396,7 +2396,7 @@ def _build_cam_settings(params):
         cam_settings.post_processor = str(params["post_processor"])
     if "output_path" in params and params["output_path"]:
         cam_settings.output_path = str(params["output_path"])
-    for key in ("start_depth", "final_depth", "step_down", "feed_rate", "plunge_rate"):
+    for key in ("start_depth", "final_depth", "step_down", "step_over", "feed_rate", "plunge_rate"):
         if key in params:
             setattr(cam_settings, _snake_to_attr(key), float(params[key]))
     if "profile_side" in params:
@@ -2532,6 +2532,7 @@ def _snake_to_attr(name):
         "start_depth": "start_depth",
         "final_depth": "final_depth",
         "step_down": "step_down",
+        "step_over": "step_over",
         "feed_rate": "feed_rate",
         "plunge_rate": "plunge_rate",
     }
@@ -2590,22 +2591,23 @@ def _load_cam_defaults_from_prefs():
         "prefer_cam": params.GetBool("prefer_cam", True),
         "preset_name": params.GetString("preset_name", "Custom"),
         "units": params.GetString("units", "mm"),
-        "feed_rate": params.GetFloat("feed_rate", 800.0),
-        "plunge_rate": params.GetFloat("plunge_rate", 300.0),
+        "feed_rate": params.GetFloat("feed_rate", 500.0),
+        "plunge_rate": params.GetFloat("plunge_rate", 150.0),
         "post_processor": params.GetString("post_processor", "grbl_post"),
         "start_depth": params.GetFloat("start_depth", 0.0),
         "final_depth": params.GetFloat("final_depth", -1.0),
-        "step_down": params.GetFloat("step_down", 1.0),
+        "step_down": params.GetFloat("step_down", 0.5),
+        "step_over": params.GetFloat("step_over", 35.0),
         "profile_side": params.GetString("profile_side", "Outside"),
         "profile_direction": params.GetString("profile_direction", "CCW"),
         "safe_z": params.GetFloat("safe_z", 5.0),
         "start_z": params.GetFloat("start_z", 0.0),
         "cut_z": params.GetFloat("cut_z", -1.0),
-        "pass_depth": params.GetFloat("pass_depth", 0.0),
-        "ramp_length": params.GetFloat("ramp_length", 0.0),
-        "lead_in": params.GetFloat("lead_in", 0.0),
-        "lead_out": params.GetFloat("lead_out", 0.0),
-        "spindle_speed": params.GetInt("spindle_speed", 0),
+        "pass_depth": params.GetFloat("pass_depth", 0.5),
+        "ramp_length": params.GetFloat("ramp_length", 8.0),
+        "lead_in": params.GetFloat("lead_in", 0.5),
+        "lead_out": params.GetFloat("lead_out", 0.5),
+        "spindle_speed": params.GetInt("spindle_speed", 10000),
         "laser_power": params.GetInt("laser_power", 0),
         "start_spindle": params.GetBool("start_spindle", True),
     }

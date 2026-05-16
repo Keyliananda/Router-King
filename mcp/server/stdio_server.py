@@ -27,6 +27,7 @@ CAM_SETTING_SCHEMA: Dict[str, Any] = {
     "start_depth": {"type": "number", "description": "CAM operation start depth."},
     "final_depth": {"type": "number", "description": "CAM operation final depth."},
     "step_down": {"type": "number", "description": "CAM step-down / pass depth."},
+    "step_over": {"type": "number", "description": "CAM pocket stepover percentage."},
     "profile_side": {"type": "string", "enum": ["Outside", "Inside", "On"], "description": "Profile operation side."},
     "profile_direction": {"type": "string", "enum": ["CCW", "CW"], "description": "Profile cutting direction."},
     "safe_z": {"type": "number", "description": "Simple fallback safe Z height."},

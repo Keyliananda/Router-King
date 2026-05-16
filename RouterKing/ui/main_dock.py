@@ -105,6 +105,30 @@ _AI_SETTINGS_HELP_TEXT = "Stored in FreeCAD preferences (plain text). ENV overri
 _CAM_PRESETS = [
     ("Custom", {}),
     (
+        "Bamboo Pocket 4mm (3.175mm endmill)",
+        {
+            "prefer_cam": True,
+            "units": "mm",
+            "feed_rate": 500.0,
+            "plunge_rate": 150.0,
+            "spindle_speed": 10000,
+            "safe_z": 5.0,
+            "start_z": 0.0,
+            "cut_z": -4.0,
+            "pass_depth": 0.5,
+            "ramp_length": 8.0,
+            "lead_in": 0.5,
+            "lead_out": 0.5,
+            "start_depth": 0.0,
+            "final_depth": -4.0,
+            "step_down": 0.5,
+            "step_over": 35.0,
+            "profile_side": "Outside",
+            "profile_direction": "CCW",
+            "start_spindle": True,
+        },
+    ),
+    (
         "CNC Plywood 10mm (6mm endmill)",
         {
             "prefer_cam": True,
@@ -813,22 +837,23 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             "prefer_cam": params.GetBool("prefer_cam", True),
             "preset_name": params.GetString("preset_name", "Custom"),
             "units": params.GetString("units", "mm"),
-            "feed_rate": params.GetFloat("feed_rate", 800.0),
-            "plunge_rate": params.GetFloat("plunge_rate", 300.0),
+            "feed_rate": params.GetFloat("feed_rate", 500.0),
+            "plunge_rate": params.GetFloat("plunge_rate", 150.0),
             "post_processor": params.GetString("post_processor", "grbl_post"),
             "start_depth": params.GetFloat("start_depth", 0.0),
             "final_depth": params.GetFloat("final_depth", -1.0),
-            "step_down": params.GetFloat("step_down", 1.0),
+            "step_down": params.GetFloat("step_down", 0.5),
+            "step_over": params.GetFloat("step_over", 35.0),
             "profile_side": params.GetString("profile_side", "Outside"),
             "profile_direction": params.GetString("profile_direction", "CCW"),
             "safe_z": params.GetFloat("safe_z", 5.0),
             "start_z": params.GetFloat("start_z", 0.0),
             "cut_z": params.GetFloat("cut_z", -1.0),
-            "pass_depth": params.GetFloat("pass_depth", 0.0),
-            "ramp_length": params.GetFloat("ramp_length", 0.0),
-            "lead_in": params.GetFloat("lead_in", 0.0),
-            "lead_out": params.GetFloat("lead_out", 0.0),
-            "spindle_speed": params.GetInt("spindle_speed", 0),
+            "pass_depth": params.GetFloat("pass_depth", 0.5),
+            "ramp_length": params.GetFloat("ramp_length", 8.0),
+            "lead_in": params.GetFloat("lead_in", 0.5),
+            "lead_out": params.GetFloat("lead_out", 0.5),
+            "spindle_speed": params.GetInt("spindle_speed", 10000),
             "laser_power": params.GetInt("laser_power", 0),
             "start_spindle": params.GetBool("start_spindle", True),
         }
@@ -842,22 +867,23 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         params.SetBool("prefer_cam", bool(defaults.get("prefer_cam", True)))
         params.SetString("preset_name", str(defaults.get("preset_name", "Custom")))
         params.SetString("units", str(defaults.get("units", "mm")))
-        params.SetFloat("feed_rate", float(defaults.get("feed_rate", 800.0)))
-        params.SetFloat("plunge_rate", float(defaults.get("plunge_rate", 300.0)))
+        params.SetFloat("feed_rate", float(defaults.get("feed_rate", 500.0)))
+        params.SetFloat("plunge_rate", float(defaults.get("plunge_rate", 150.0)))
         params.SetString("post_processor", str(defaults.get("post_processor", "grbl_post")))
         params.SetFloat("start_depth", float(defaults.get("start_depth", 0.0)))
         params.SetFloat("final_depth", float(defaults.get("final_depth", -1.0)))
-        params.SetFloat("step_down", float(defaults.get("step_down", 1.0)))
+        params.SetFloat("step_down", float(defaults.get("step_down", 0.5)))
+        params.SetFloat("step_over", float(defaults.get("step_over", 35.0)))
         params.SetString("profile_side", str(defaults.get("profile_side", "Outside")))
         params.SetString("profile_direction", str(defaults.get("profile_direction", "CCW")))
         params.SetFloat("safe_z", float(defaults.get("safe_z", 5.0)))
         params.SetFloat("start_z", float(defaults.get("start_z", 0.0)))
         params.SetFloat("cut_z", float(defaults.get("cut_z", -1.0)))
-        params.SetFloat("pass_depth", float(defaults.get("pass_depth", 0.0)))
-        params.SetFloat("ramp_length", float(defaults.get("ramp_length", 0.0)))
-        params.SetFloat("lead_in", float(defaults.get("lead_in", 0.0)))
-        params.SetFloat("lead_out", float(defaults.get("lead_out", 0.0)))
-        params.SetInt("spindle_speed", int(defaults.get("spindle_speed", 0)))
+        params.SetFloat("pass_depth", float(defaults.get("pass_depth", 0.5)))
+        params.SetFloat("ramp_length", float(defaults.get("ramp_length", 8.0)))
+        params.SetFloat("lead_in", float(defaults.get("lead_in", 0.5)))
+        params.SetFloat("lead_out", float(defaults.get("lead_out", 0.5)))
+        params.SetInt("spindle_speed", int(defaults.get("spindle_speed", 10000)))
         params.SetInt("laser_power", int(defaults.get("laser_power", 0)))
         params.SetBool("start_spindle", bool(defaults.get("start_spindle", True)))
 

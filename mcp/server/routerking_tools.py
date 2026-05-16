@@ -20,6 +20,7 @@ CAM_SETTING_KEYS = (
     "start_depth",
     "final_depth",
     "step_down",
+    "step_over",
     "profile_side",
     "profile_direction",
     "safe_z",

@@ -8,14 +8,14 @@ class SimpleJobSettings:
     safe_z: float = 5.0
     cut_z: float = -1.0
     start_z: float = 0.0
-    pass_depth: float = 0.0
-    ramp_length: float = 0.0
-    lead_in: float = 0.0
-    lead_out: float = 0.0
-    feed_rate: float = 800.0
-    plunge_rate: float = 300.0
+    pass_depth: float = 0.5
+    ramp_length: float = 8.0
+    lead_in: float = 0.5
+    lead_out: float = 0.5
+    feed_rate: float = 500.0
+    plunge_rate: float = 150.0
     units: str = "mm"
-    spindle_speed: int = 0
+    spindle_speed: int = 10000
     laser_power: int = 0
     start_spindle: bool = True
 

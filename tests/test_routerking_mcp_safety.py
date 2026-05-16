@@ -93,6 +93,7 @@ class TestRouterKingMcpSafety(unittest.TestCase):
             plunge_rate=250,
             final_depth=-4.0,
             step_down=1.0,
+            step_over=35.0,
             profile_side="Inside",
             spindle_speed=18000,
             machine_profile_path="/tmp/machine_profile.json",
@@ -111,6 +112,7 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         self.assertEqual(action["plunge_rate"], 250)
         self.assertEqual(action["final_depth"], -4.0)
         self.assertEqual(action["step_down"], 1.0)
+        self.assertEqual(action["step_over"], 35.0)
         self.assertEqual(action["profile_side"], "Inside")
         self.assertEqual(action["spindle_speed"], 18000)
         self.assertEqual(action["machine_profile_path"], "/tmp/machine_profile.json")

@@ -206,7 +206,8 @@ Die direkten Generate-Tools unterstuetzen zusaetzlich die bereits vorhandenen
 CAM- und Simple-Fallback-Settings:
 
 - CAM/Path: `post_processor`, `feed_rate`, `plunge_rate`, `start_depth`,
-  `final_depth`, `step_down`, `profile_side`, `profile_direction`
+  `final_depth`, `step_down`, `step_over`, `profile_side`,
+  `profile_direction`
 - Simple-Fallback: `safe_z`, `start_z`, `cut_z`, `pass_depth`, `ramp_length`,
   `lead_in`, `lead_out`, `units`, `spindle_speed`, `laser_power`,
   `start_spindle`
@@ -248,7 +249,7 @@ werden kann. Dieses Tool steuert keine Maschine.
   "safe_z": 5.0,
   "cut_z": -1.0,
   "pass_depth": 0.5,
-  "feed_rate": 800,
+  "feed_rate": 500,
   "use_freecad": false,
   "prefer_ezdxf": false
 }
@@ -286,8 +287,8 @@ oder `routerking_machine_stream_gcode` aufgerufen wird.
 {
   "gcode": "G21\nG90\nG1 X10 F500",
   "machine_profile_path": "/tmp/machine_profile.json",
-  "feed_rate": 800,
-  "plunge_rate": 300
+  "feed_rate": 500,
+  "plunge_rate": 150
 }
 ```
 
