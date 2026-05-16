@@ -117,6 +117,76 @@ def read_grbl_settings(sender: Any) -> dict:
     return parse_grbl_settings_lines(lines or [])
 
 
+def parse_grbl_coordinate_parameters_lines(lines: Sequence[str]) -> dict:
+    """Parse GRBL `$#` coordinate parameter output.
+
+    GRBL reports coordinate systems as bracketed lines, for example
+    `[G54:-150.000,-190.000,-25.238]`, plus optional `[G92:...]` and
+    `[TLO:...]` values. The active RouterKing validator currently supports G54;
+    this helper returns both the raw coordinate systems and the effective G54 WCO
+    including G92 and TLO when reported.
+    """
+    coordinate_systems: dict[str, dict[str, float]] = {}
+    g92 = {"x": 0.0, "y": 0.0, "z": 0.0}
+    tlo_z = 0.0
+    probe = None
+
+    for line in lines or []:
+        text = str(line or "").strip()
+        if not (text.startswith("[") and text.endswith("]")):
+            continue
+        body = text[1:-1]
+        if ":" not in body:
+            continue
+        key, _, value = body.partition(":")
+        key = key.strip().upper()
+        if key in {"G54", "G55", "G56", "G57", "G58", "G59", "G28", "G30", "G92", "PRB"}:
+            parsed = parse_xyz_value(value)
+            if parsed is None:
+                continue
+            if key == "G92":
+                g92 = parsed
+            elif key == "PRB":
+                probe = parsed
+            else:
+                coordinate_systems[key] = parsed
+        elif key == "TLO":
+            z = _to_float(value)
+            if z is not None:
+                tlo_z = z
+
+    g54 = coordinate_systems.get("G54")
+    work_offset = None
+    if g54 is not None:
+        work_offset = {
+            "x": g54["x"] + g92["x"],
+            "y": g54["y"] + g92["y"],
+            "z": g54["z"] + g92["z"] + tlo_z,
+        }
+
+    return {
+        "coordinate_systems": coordinate_systems,
+        "g92": g92,
+        "tlo": {"z": tlo_z},
+        "probe": probe,
+        "work_offset": work_offset,
+    }
+
+
+def read_grbl_coordinate_parameters(sender: Any) -> dict:
+    if sender is None:
+        return {}
+    if not bool(getattr(sender, "is_connected", lambda: False)()):
+        return {}
+    if bool(getattr(sender, "is_streaming", lambda: False)()):
+        return {}
+    try:
+        lines = sender.send_and_collect("$#", timeout=2.0)
+    except Exception:
+        return {}
+    return parse_grbl_coordinate_parameters_lines(lines or [])
+
+
 def merge_machine_profile(
     existing_profile: Optional[Mapping[str, Any]],
     *,

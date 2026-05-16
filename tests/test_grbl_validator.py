@@ -2,6 +2,7 @@ import unittest
 
 from RouterKing.grbl.validator import (
     calculate_g54_offset,
+    parse_grbl_coordinate_parameters_lines,
     resolve_machine_limits,
     validate_gcode,
 )
@@ -57,6 +58,39 @@ class TestGrblValidator(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertEqual(report["errors"][0]["line"], 2)
         self.assertIn("Z=", report["errors"][0]["reason"])
+
+    def test_status_wco_overrides_stale_profile_offset(self):
+        stale_profile = dict(PROFILE)
+        stale_profile["work_offset"] = {"x": -297.0, "y": -347.0, "z": -3.0}
+        status = {
+            "MPos": "-297.000,-377.000,-3.000",
+            "WCO": "-150.000,-190.000,-25.238",
+        }
+        gcode = "G90 G21\nG54\nG0 Z9\nG0 X112.5 Y-67\nG1 Z-2 F300"
+        report = validate_gcode(
+            gcode,
+            machine_profile=stale_profile,
+            grbl_settings=PROFILE["settings"],
+            status=status,
+        )
+
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["offset_source"], "status.WCO")
+        self.assertEqual(report["work_offset"], {"x": -150.0, "y": -190.0, "z": -25.238})
+
+    def test_parse_coordinate_parameters_reports_effective_g54_wco(self):
+        parsed = parse_grbl_coordinate_parameters_lines(
+            [
+                "[G54:-150.000,-190.000,-25.000]",
+                "[G92:1.000,2.000,3.000]",
+                "[TLO:0.250]",
+                "[PRB:-1.000,-2.000,-3.000:1]",
+                "ok",
+            ]
+        )
+
+        self.assertEqual(parsed["coordinate_systems"]["G54"], {"x": -150.0, "y": -190.0, "z": -25.0})
+        self.assertEqual(parsed["work_offset"], {"x": -149.0, "y": -188.0, "z": -21.75})
 
     def test_rejects_missing_or_zero_feed(self):
         gcode = "G90 G21\nG1 X1\nG1 X2 F0"

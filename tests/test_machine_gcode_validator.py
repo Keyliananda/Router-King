@@ -10,7 +10,7 @@ from RouterKing.ai.actions import _action_machine_stream_gcode, _action_machine_
 
 
 class _FakeSender:
-    def __init__(self, *, status=None, settings=None, connected=True, streaming=False):
+    def __init__(self, *, status=None, settings=None, coordinate_lines=None, connected=True, streaming=False):
         self._status = status or {}
         self._settings = settings or {
             "$110": "2000",
@@ -23,6 +23,7 @@ class _FakeSender:
             "$27": "3",
             "$32": "0",
         }
+        self._coordinate_lines = coordinate_lines or []
         self._connected = connected
         self._streaming = streaming
         self.started_lines = None
@@ -43,6 +44,8 @@ class _FakeSender:
         return dict(self._status)
 
     def send_and_collect(self, command, timeout=2.0):
+        if command == "$#":
+            return list(self._coordinate_lines)
         if command != "$$":
             return []
         return [f"{key}={value}" for key, value in self._settings.items()]
@@ -91,6 +94,95 @@ class TestMachineGcodeValidator(unittest.TestCase):
 
         self.assertIn("Streaming started", message)
         self.assertEqual(sender.started_lines, ["G90 G21", "G0 Z2", "G1 X-1 Y-1 Z-1 F300"])
+
+    def test_stream_uses_live_g54_from_coordinate_parameters_over_stale_profile(self):
+        sender = _FakeSender(
+            status={
+                "state": "Idle",
+                "MPos": "-297.000,-377.000,-3.000",
+            },
+            coordinate_lines=[
+                "[G54:-150.000,-190.000,-25.238]",
+                "[G92:0.000,0.000,0.000]",
+                "[TLO:0.000]",
+            ],
+        )
+        gcode = "\n".join(
+            [
+                "G90 G21",
+                "G54",
+                "G0 Z9",
+                "G0 X112.5 Y-67",
+                "G1 Z-2 F300",
+            ]
+        )
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(
+                {
+                    "settings": sender._settings,
+                    "work_offset": {"x": -297, "y": -347, "z": -3},
+                    "work_position": {"x": 0, "y": 0, "z": 0},
+                },
+                handle,
+            )
+            profile_path = handle.name
+
+        try:
+            with patch("RouterKing.ai.actions._get_sender", return_value=sender):
+                message = _action_machine_stream_gcode(
+                    {
+                        "type": "machine_stream_gcode",
+                        "gcode": gcode,
+                        "machine_profile_path": profile_path,
+                        "confirm": True,
+                    },
+                    {},
+                )
+        finally:
+            os.unlink(profile_path)
+
+        self.assertIn("Streaming started", message)
+        self.assertEqual(sender.started_lines, gcode.splitlines())
+
+    def test_validate_reports_live_coordinate_parameter_offset_source(self):
+        sender = _FakeSender(
+            status={
+                "state": "Idle",
+                "MPos": "-297.000,-377.000,-3.000",
+            },
+            coordinate_lines=["[G54:-150.000,-190.000,-25.238]", "[G92:0.000,0.000,0.000]"],
+        )
+        gcode = "G90 G21\nG54\nG0 Z9\nG0 X112.5 Y-67\nG1 Z-2 F300"
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(
+                {
+                    "settings": sender._settings,
+                    "work_offset": {"x": -297, "y": -347, "z": -3},
+                    "work_position": {"x": 0, "y": 0, "z": 0},
+                },
+                handle,
+            )
+            profile_path = handle.name
+
+        try:
+            with patch("RouterKing.ai.actions._get_sender", return_value=sender):
+                message = _action_machine_validate_gcode(
+                    {
+                        "type": "machine_validate_gcode",
+                        "gcode": gcode,
+                        "machine_profile_path": profile_path,
+                    },
+                    {},
+                )
+        finally:
+            os.unlink(profile_path)
+
+        self.assertIsInstance(message, dict)
+        self.assertTrue(message["data"]["valid"])
+        self.assertEqual(message["data"]["offset_source"], "status.WCO")
+        self.assertEqual(message["data"]["work_offset"], {"x": -150.0, "y": -190.0, "z": -25.238})
 
     def test_validate_uses_machine_profile_when_controller_unavailable(self):
         sender = _FakeSender(connected=False)

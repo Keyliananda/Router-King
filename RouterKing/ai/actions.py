@@ -37,6 +37,7 @@ try:
         calculate_g54_offset,
         load_machine_profile as grbl_load_machine_profile,
         merge_machine_profile as grbl_merge_machine_profile,
+        read_grbl_coordinate_parameters as grbl_read_coordinate_parameters,
         read_grbl_settings as grbl_read_grbl_settings,
         read_machine_status as grbl_read_machine_status,
         resolve_machine_limits as grbl_resolve_machine_limits,
@@ -49,6 +50,7 @@ except Exception:
         calculate_g54_offset,
         load_machine_profile as grbl_load_machine_profile,
         merge_machine_profile as grbl_merge_machine_profile,
+        read_grbl_coordinate_parameters as grbl_read_coordinate_parameters,
         read_grbl_settings as grbl_read_grbl_settings,
         read_machine_status as grbl_read_machine_status,
         resolve_machine_limits as grbl_resolve_machine_limits,
@@ -1200,7 +1202,10 @@ def _action_machine_stream_file(action, params):
     profile_path = _get_param(action, params, "machine_profile_path")
     profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
     status = grbl_read_machine_status(sender)
+    status = _enrich_status_with_live_wco(sender, status)
     settings = grbl_read_grbl_settings(sender)
+    if settings or status:
+        profile = grbl_merge_machine_profile(profile, settings=settings, status=status)
     report = grbl_validate_gcode(
         lines,
         machine_profile=profile,
@@ -1231,7 +1236,10 @@ def _action_machine_validate_gcode(action, params):
     try:
         profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
         status = grbl_read_machine_status(sender) if sender is not None else {}
+        status = _enrich_status_with_live_wco(sender, status)
         settings = grbl_read_grbl_settings(sender) if sender is not None else {}
+        if settings or status:
+            profile = grbl_merge_machine_profile(profile, settings=settings, status=status)
         report = grbl_validate_gcode(
             lines,
             machine_profile=profile,
@@ -1282,7 +1290,10 @@ def _action_machine_stream_gcode(action, params):
     try:
         profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
         status = grbl_read_machine_status(sender)
+        status = _enrich_status_with_live_wco(sender, status)
         settings = grbl_read_grbl_settings(sender)
+        if settings or status:
+            profile = grbl_merge_machine_profile(profile, settings=settings, status=status)
         report = grbl_validate_gcode(
             lines,
             machine_profile=profile,
@@ -1479,6 +1490,7 @@ def _auto_refresh_machine_profile(sender, settings=None):
         had_profile = bool(existing_profile)
         settings_map = dict(settings or {}) or grbl_read_grbl_settings(sender)
         status = grbl_read_machine_status(sender)
+        status = _enrich_status_with_live_wco(sender, status)
         merged = grbl_merge_machine_profile(existing_profile, settings=settings_map, status=status)
         target_path = grbl_save_machine_profile(merged, existing_path or None)
         note = f" Profile updated: {target_path}."
@@ -1487,6 +1499,24 @@ def _auto_refresh_machine_profile(sender, settings=None):
         return note
     except Exception as exc:
         return f" Profile update skipped: {exc}"
+
+
+def _enrich_status_with_live_wco(sender, status):
+    status_map = dict(status or {})
+    if sender is None or not bool(getattr(sender, "is_connected", lambda: False)()):
+        return status_map
+    if status_map.get("WCO"):
+        return status_map
+    coordinate_params = grbl_read_coordinate_parameters(sender)
+    work_offset = coordinate_params.get("work_offset") if isinstance(coordinate_params, dict) else None
+    if isinstance(work_offset, dict):
+        status_map["WCO"] = (
+            f"{float(work_offset['x']):.3f},"
+            f"{float(work_offset['y']):.3f},"
+            f"{float(work_offset['z']):.3f}"
+        )
+        status_map["WCOSource"] = "$#.G54"
+    return status_map
 
 
 def _parse_position(value):

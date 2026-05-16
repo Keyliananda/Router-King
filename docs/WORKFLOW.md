@@ -17,6 +17,16 @@
   fallback only. It must not be the default agent behavior for normal jobs.
 - Never stream while the machine is not confirmed ready by RouterKing after
   Auto Connect and status validation.
+- Before validation or streaming, live GRBL state from the connected controller
+  is authoritative. The active WCO/G54 offset must come from the latest status
+  report or GRBL coordinate parameters; `machine_profile.json` is only a
+  cache/fallback for disconnected validation or missing live data.
+- Before a real milling run, home all axes through RouterKing and then verify or
+  restore the intended work coordinate zero. Do not treat machine home as the
+  workpiece zero for CAM jobs.
+- Persisted Z probe defaults for this router are: touch plate height 15 mm,
+  probe feed 50 mm/min, retract 3 mm. Use these defaults unless the setup
+  explicitly changes.
 
 ## Laser
 1. CAD or vector import (DXF/SVG) into FreeCAD.
