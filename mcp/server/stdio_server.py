@@ -76,6 +76,75 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    # -- RouterKing CAM/domain convenience tools --
+    {
+        "name": "routerking_cam_capabilities",
+        "description": "Report RouterKing CAM support, operation kinds, defaults, postprocessors, and recommended MCP pipeline.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "routerking_analyze_selection",
+        "description": "Analyze the current FreeCAD selection using RouterKing geometry checks.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "routerking_optimize_splines_preview",
+        "description": "Create a spline optimization preview for the current selection and return a view capture when available.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "routerking_generate_gcode",
+        "description": "Generate G-code from the active model or a named model, preferring FreeCAD CAM/Path when available.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "model": {"type": "string", "description": "Optional FreeCAD object name to use as the model."},
+                "operations": {
+                    "type": "array",
+                    "description": "Optional operation specs such as profile or pocket operations.",
+                    "items": {"type": "object"},
+                },
+                "output_path": {"type": "string", "description": "Optional path for the generated G-code file."},
+                "prefer_cam": {"type": "boolean", "default": True},
+                "use_cam_defaults": {"type": "boolean", "default": True},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_cam_generate_job",
+        "description": "Create a FreeCAD CAM/Path job, generate toolpaths, and export G-code when CAM is available.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "model": {"type": "string", "description": "Optional FreeCAD object name to use as the model."},
+                "operations": {
+                    "type": "array",
+                    "description": "Optional operation specs such as profile or pocket operations.",
+                    "items": {"type": "object"},
+                },
+                "output_path": {"type": "string", "description": "Optional path for the exported G-code file."},
+                "prefer_cam": {"type": "boolean", "default": True},
+                "use_cam_defaults": {"type": "boolean", "default": True},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_cam_postprocess",
+        "description": "Postprocess raw CAM G-code for GRBL-safe streaming without controlling the machine.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "gcode": {"type": "string", "description": "Raw CAM G-code to postprocess."},
+                "machine_profile_path": {"type": "string", "description": "Optional path to machine_profile.json."},
+                "feed_rate": {"type": "number", "description": "Fallback feed rate in mm/min."},
+                "plunge_rate": {"type": "number", "description": "Fallback plunge rate in mm/min."},
+            },
+            "required": ["gcode"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "routerking_run_script",
         "description": "[UNSAFE / DEV ONLY] Execute Python code in FreeCAD and return stdout/stderr.",

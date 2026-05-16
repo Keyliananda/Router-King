@@ -7,7 +7,13 @@ from mcp.server.machine_tools import (
     routerking_machine_probe_z,
     routerking_machine_validate_gcode,
 )
-from mcp.server.routerking_tools import routerking_console_exec
+from mcp.server.routerking_tools import (
+    routerking_cam_capabilities,
+    routerking_cam_generate_job,
+    routerking_cam_postprocess,
+    routerking_console_exec,
+    routerking_generate_gcode,
+)
 from mcp.server.safety import validate_machine_confirmation
 
 
@@ -69,6 +75,64 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         self.assertEqual(payload["actions"][0]["type"], "machine_probe_config")
         self.assertEqual(payload["actions"][0]["probe_feed"], 35.0)
         self.assertEqual(payload["actions"][0]["retract"], 2.0)
+
+    def test_generate_gcode_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_generate_gcode(
+            model="Body",
+            operations=[{"type": "profile", "depth": -3.0}],
+            output_path="/tmp/routerking.nc",
+            prefer_cam=True,
+            use_cam_defaults=True,
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        payload = connection.kwargs["payload"]
+        action = payload["actions"][0]
+        self.assertEqual(action["type"], "generate_gcode")
+        self.assertEqual(action["model"], "Body")
+        self.assertEqual(action["operations"][0]["type"], "profile")
+        self.assertEqual(action["output_path"], "/tmp/routerking.nc")
+        self.assertTrue(action["prefer_cam"])
+        self.assertTrue(action["use_cam_defaults"])
+
+    def test_cam_capabilities_wrapper_invokes_bridge_operation(self):
+        connection = StubConnection()
+        response = routerking_cam_capabilities(connection=connection)
+        self.assertTrue(response["success"])
+        self.assertEqual(connection.operation, "cam_capabilities")
+
+    def test_cam_generate_job_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_cam_generate_job(
+            model="Body",
+            operations=[{"type": "pocket", "depth": -2.0}],
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        payload = connection.kwargs["payload"]
+        self.assertEqual(payload["actions"][0]["type"], "cam_generate_job")
+        self.assertEqual(payload["actions"][0]["operations"][0]["type"], "pocket")
+        self.assertTrue(connection.kwargs["capture_view"])
+
+    def test_cam_postprocess_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_cam_postprocess(
+            gcode="G21\nG1 X1",
+            machine_profile_path="/tmp/machine_profile.json",
+            feed_rate=800,
+            plunge_rate=300,
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        self.assertFalse(connection.kwargs["include_context"])
+        payload = connection.kwargs["payload"]
+        action = payload["actions"][0]
+        self.assertEqual(action["type"], "cam_postprocess")
+        self.assertEqual(action["gcode"], "G21\nG1 X1")
+        self.assertEqual(action["machine_profile_path"], "/tmp/machine_profile.json")
+        self.assertEqual(action["feed_rate"], 800)
+        self.assertEqual(action["plunge_rate"], 300)
 
     def test_bridge_rejects_machine_jog_without_confirm(self):
         bridge = RouterKingBridge(

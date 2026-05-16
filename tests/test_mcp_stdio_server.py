@@ -12,6 +12,7 @@ from mcp.server.stdio_server import (
     handle_tools_call,
     handle_tools_list,
 )
+from mcp.server.main import build_tool_registry
 
 
 class TestInitialize:
@@ -53,6 +54,37 @@ class TestToolsList:
         assert "routerking_machine_probe_config" in names
         assert "list_documents" in names
         assert "capture_view" in names
+        assert "routerking_cam_capabilities" in names
+        assert "routerking_generate_gcode" in names
+        assert "routerking_cam_generate_job" in names
+        assert "routerking_cam_postprocess" in names
+
+    def test_all_schema_tools_have_registry_handlers(self):
+        registry = build_tool_registry()
+        missing = [tool["name"] for tool in TOOL_SCHEMAS if tool["name"] not in registry]
+        assert missing == []
+
+    def test_tool_schema_map_matches_tool_schemas(self):
+        assert set(_TOOL_SCHEMA_MAP) == {tool["name"] for tool in TOOL_SCHEMAS}
+        for tool in TOOL_SCHEMAS:
+            assert _TOOL_SCHEMA_MAP[tool["name"]] is tool
+
+    def test_registry_tools_are_advertised_by_schemas(self):
+        schema_names = {tool["name"] for tool in TOOL_SCHEMAS}
+        registry_names = set(build_tool_registry())
+        assert registry_names - schema_names == set()
+
+    def test_cam_postprocess_schema_requires_gcode(self):
+        schema = _TOOL_SCHEMA_MAP["routerking_cam_postprocess"]["inputSchema"]
+        assert schema["required"] == ["gcode"]
+        assert schema["properties"]["feed_rate"]["type"] == "number"
+
+    def test_cam_generation_schemas_expose_operations(self):
+        for name in ("routerking_generate_gcode", "routerking_cam_generate_job"):
+            schema = _TOOL_SCHEMA_MAP[name]["inputSchema"]
+            assert set(schema["properties"]) >= {"model", "operations", "output_path", "prefer_cam", "use_cam_defaults"}
+            assert schema["properties"]["prefer_cam"]["type"] == "boolean"
+            assert schema["properties"]["use_cam_defaults"]["type"] == "boolean"
 
 
 class TestToolsCall:

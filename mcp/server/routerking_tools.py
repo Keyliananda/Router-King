@@ -29,6 +29,10 @@ def routerking_list_actions(connection: Optional[FreeCADConnection] = None):
     return (connection or FreeCADConnection()).invoke("list_actions")
 
 
+def routerking_cam_capabilities(connection: Optional[FreeCADConnection] = None):
+    return (connection or FreeCADConnection()).invoke("cam_capabilities")
+
+
 def routerking_apply_actions(
     payload: Any,
     *,
@@ -101,6 +105,30 @@ def routerking_cam_generate_job(
     return routerking_apply_actions(
         {"actions": [action]},
         capture_view=True,
+        connection=connection,
+    )
+
+
+def routerking_cam_postprocess(
+    *,
+    gcode: str,
+    machine_profile_path: Optional[str] = None,
+    feed_rate: Optional[float] = None,
+    plunge_rate: Optional[float] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """Postprocess CAM G-code for GRBL-safe machine streaming."""
+    action: dict[str, Any] = {"type": "cam_postprocess", "gcode": gcode}
+    for key, val in [
+        ("machine_profile_path", machine_profile_path),
+        ("feed_rate", feed_rate),
+        ("plunge_rate", plunge_rate),
+    ]:
+        if val is not None:
+            action[key] = val
+    return routerking_apply_actions(
+        {"actions": [action]},
+        include_context=False,
         connection=connection,
     )
 

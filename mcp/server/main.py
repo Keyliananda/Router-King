@@ -26,11 +26,17 @@ from .machine_tools import (
     routerking_machine_validate_gcode,
 )
 from .routerking_tools import (
+    routerking_analyze_selection,
     routerking_apply_actions,
+    routerking_cam_capabilities,
+    routerking_cam_generate_job,
+    routerking_cam_postprocess,
     routerking_console_exec,
     routerking_console_read,
     routerking_console_reset,
+    routerking_generate_gcode,
     routerking_list_actions,
+    routerking_optimize_splines_preview,
     routerking_run_script,
 )
 
@@ -51,8 +57,34 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
             screenshot_path=kwargs.get("screenshot_path"),
             connection=bound_connection,
         ),
+        "routerking_cam_capabilities": lambda **_: routerking_cam_capabilities(connection=bound_connection),
         "routerking_run_script": lambda **payload: routerking_run_script(
             code=payload.get("code", ""),
+            connection=bound_connection,
+        ),
+        "routerking_analyze_selection": lambda **_: routerking_analyze_selection(connection=bound_connection),
+        "routerking_optimize_splines_preview": lambda **_: routerking_optimize_splines_preview(connection=bound_connection),
+        "routerking_generate_gcode": lambda **payload: routerking_generate_gcode(
+            model=payload.get("model"),
+            operations=payload.get("operations"),
+            output_path=payload.get("output_path"),
+            prefer_cam=payload.get("prefer_cam"),
+            use_cam_defaults=payload.get("use_cam_defaults"),
+            connection=bound_connection,
+        ),
+        "routerking_cam_generate_job": lambda **payload: routerking_cam_generate_job(
+            model=payload.get("model"),
+            operations=payload.get("operations"),
+            output_path=payload.get("output_path"),
+            prefer_cam=payload.get("prefer_cam"),
+            use_cam_defaults=payload.get("use_cam_defaults"),
+            connection=bound_connection,
+        ),
+        "routerking_cam_postprocess": lambda **payload: routerking_cam_postprocess(
+            gcode=payload.get("gcode", ""),
+            machine_profile_path=payload.get("machine_profile_path"),
+            feed_rate=payload.get("feed_rate"),
+            plunge_rate=payload.get("plunge_rate"),
             connection=bound_connection,
         ),
         "routerking_console_exec": lambda **payload: routerking_console_exec(

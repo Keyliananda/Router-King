@@ -74,6 +74,19 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         self.assertTrue(response["success"])
         self.assertEqual(len(response["data"]["actions"]), len(ACTION_REGISTRY))
 
+    def test_cam_capabilities_returns_supported_operation_kinds(self):
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.cam_capabilities()
+        self.assertTrue(response["success"])
+        kinds = {item["type"] for item in response["data"]["operation_kinds"]}
+        self.assertEqual(kinds, {"profile", "pocket", "drilling"})
+        self.assertIn("routerking_cam_postprocess", response["data"]["mcp_pipeline"])
+
     def test_apply_actions_rejects_unknown_action(self):
         bridge = RouterKingBridge(
             action_executor=lambda actions: (["ok"], []),
@@ -189,6 +202,35 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         )
         self.assertTrue(response["success"])
         self.assertIn("screenshot", response["data"])
+
+    def test_cam_postprocess_action_requires_gcode(self):
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.apply_actions({"actions": [{"type": "cam_postprocess"}]}, include_context=False)
+        self.assertFalse(response["success"])
+        self.assertIn("cam_postprocess: missing required fields: gcode", response["errors"])
+
+    def test_cam_postprocess_action_is_read_only(self):
+        captured = {}
+
+        def executor(actions):
+            captured["actions"] = actions
+            return {"messages": ["Postprocessed."], "errors": [], "data": {"gcode": "G21"}}
+
+        bridge = RouterKingBridge(
+            action_executor=executor,
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.apply_actions({"actions": [{"type": "cam_postprocess", "gcode": "G21"}]}, include_context=False)
+        self.assertTrue(response["success"])
+        self.assertEqual(captured["actions"][0]["type"], "cam_postprocess")
+        self.assertFalse(response["data"]["transaction"]["used"])
 
     def test_run_script_executes_code(self):
         bridge = RouterKingBridge(

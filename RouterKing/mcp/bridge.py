@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import contextlib
 import io
+import importlib
 import traceback
+from dataclasses import asdict
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from mcp.server.safety import log_tool_request, validate_risk
@@ -350,6 +352,17 @@ class RouterKingBridge:
             errors=[] if payload.get("available") else [payload.get("message") or "Screenshot unavailable."],
         )
 
+    def cam_capabilities(self) -> Dict[str, Any]:
+        """Return read-only CAM capabilities visible to MCP clients."""
+        payload = run_on_main_thread(_collect_cam_capabilities)
+        warnings = payload.get("warnings") or []
+        return make_response(
+            True,
+            "CAM capabilities collected.",
+            data=payload,
+            errors=warnings,
+        )
+
     def run_script(self, code: str) -> Dict[str, Any]:
         """Execute arbitrary Python code in the FreeCAD context.
 
@@ -640,3 +653,85 @@ def _exec_with_optional_last_expr(code: str, namespace: Dict[str, Any]) -> Any:
 
     exec(compile(tree, "<routerking-console>", "exec"), namespace, namespace)  # noqa: S102
     return None
+
+
+def _collect_cam_capabilities() -> Dict[str, Any]:
+    warnings: List[str] = []
+    freecad_available = _module_available("FreeCAD")
+    gui_available = _module_available("FreeCADGui")
+    cam_modules = {
+        "CAM": _module_available("CAM"),
+        "Path": _module_available("Path"),
+    }
+    cam_available = any(cam_modules.values())
+
+    if not freecad_available:
+        warnings.append("FreeCAD is not available.")
+    if not cam_available:
+        warnings.append("FreeCAD CAM/Path module is not available.")
+
+    try:
+        from RouterKing.cam.hybrid import CamJobSettings, SimpleJobSettings
+    except Exception:  # pragma: no cover - FreeCAD import path fallback
+        try:
+            from cam.hybrid import CamJobSettings, SimpleJobSettings
+        except Exception:
+            CamJobSettings = None  # type: ignore[assignment]
+            SimpleJobSettings = None  # type: ignore[assignment]
+
+    cam_defaults = asdict(CamJobSettings()) if CamJobSettings is not None else {}
+    simple_defaults = asdict(SimpleJobSettings()) if SimpleJobSettings is not None else {}
+
+    return {
+        "freecad_available": freecad_available,
+        "freecad_gui_available": gui_available,
+        "cam_available": cam_available,
+        "cam_modules": cam_modules,
+        "operation_kinds": [
+            {
+                "type": "profile",
+                "base": "model or selected vertical faces for box-like solids",
+                "properties": ["Side", "Direction", "StartDepth", "FinalDepth", "StepDown", "HorizFeed", "VertFeed"],
+            },
+            {
+                "type": "pocket",
+                "base": "model or explicit base object",
+                "properties": ["StartDepth", "FinalDepth", "StepDown", "HorizFeed", "VertFeed"],
+            },
+            {
+                "type": "drilling",
+                "base": "model or explicit base object",
+                "properties": ["StartDepth", "FinalDepth", "PeckDepth", "Feed"],
+            },
+        ],
+        "operation_schema": {
+            "type": "profile|pocket|drilling",
+            "base": "Optional FreeCAD object name.",
+            "properties": "Optional FreeCAD CAM operation property overrides.",
+        },
+        "default_cam_settings": cam_defaults,
+        "default_simple_settings": simple_defaults,
+        "postprocessors": ["grbl_post"],
+        "fallback_engine": {
+            "name": "simple",
+            "available": bool(simple_defaults),
+            "notes": "Used when FreeCAD CAM/Path is unavailable or CAM generation fails.",
+        },
+        "mcp_pipeline": [
+            "routerking_cam_capabilities",
+            "routerking_cam_generate_job",
+            "routerking_generate_gcode",
+            "routerking_cam_postprocess",
+            "routerking_machine_validate_gcode",
+            "routerking_machine_stream_gcode",
+        ],
+        "warnings": warnings,
+    }
+
+
+def _module_available(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+        return True
+    except Exception:
+        return False

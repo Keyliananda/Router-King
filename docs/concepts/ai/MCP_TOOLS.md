@@ -60,6 +60,21 @@ python -m mcp.server.main
 
 Diese Tools kapseln haeufige Workflows als einzelnen Aufruf.
 
+#### `routerking_cam_capabilities`
+
+Liefert lesend, welche CAM-Unterstuetzung der aktuelle RouterKing-/FreeCAD-Kontext anbietet:
+
+- FreeCAD/CAM/Path-Verfuegbarkeit
+- unterstuetzte Operationen: `profile`, `pocket`, `drilling`
+- erwartetes Operation-Schema
+- Default-CAM- und Simple-Engine-Settings
+- Postprocessor-Liste
+- empfohlene MCP-Pipeline fuer CAM bis Maschinenvalidierung
+
+```json
+{}
+```
+
 #### `routerking_analyze_selection`
 
 Analysiert die aktuelle FreeCAD-Selektion. Risikoklasse: `read`.
@@ -85,7 +100,16 @@ Generiert G-Code aus dem aktiven Modell. Risikoklasse: `modify`.
 ```json
 {
   "model": "Body",
-  "operations": [{"type": "profile", "depth": -5.0}],
+  "operations": [
+    {
+      "type": "profile",
+      "base": "Body",
+      "properties": {
+        "FinalDepth": -5.0,
+        "StepDown": 1.0
+      }
+    }
+  ],
   "output_path": "/tmp/part.gcode",
   "prefer_cam": true,
   "use_cam_defaults": true
@@ -101,12 +125,35 @@ Erzeugt einen CAM-Job und exportiert G-Code. Risikoklasse: `modify`. Liefert aut
 ```json
 {
   "model": "Body",
-  "operations": [{"type": "pocket", "depth": -3.0}],
+  "operations": [
+    {
+      "type": "pocket",
+      "properties": {
+        "FinalDepth": -3.0,
+        "StepDown": 1.0
+      }
+    }
+  ],
   "output_path": "/tmp/job.gcode"
 }
 ```
 
 Alle Parameter sind optional.
+
+#### `routerking_cam_postprocess`
+
+Postprocessed rohen CAM-G-Code fuer GRBL-sicheres Streaming. Risikoklasse: `read`.
+Dieses Tool steuert keine Maschine und kann genutzt werden, bevor `routerking_machine_validate_gcode`
+oder `routerking_machine_stream_gcode` aufgerufen wird.
+
+```json
+{
+  "gcode": "G21\nG90\nG1 X10 F500",
+  "machine_profile_path": "/tmp/machine_profile.json",
+  "feed_rate": 800,
+  "plunge_rate": 300
+}
+```
 
 ### Dev-Tool
 
