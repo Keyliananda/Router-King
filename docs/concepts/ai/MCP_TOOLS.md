@@ -310,6 +310,13 @@ Fuehrt beliebigen Python-Code im FreeCAD-Kontext aus. Risikoklasse: `dangerous_d
 
 Alle Machine-Tools verlangen `confirm=true` und `reason` (Freitext). Sie nutzen `include_context=True`, sodass die Antwort immer den aktuellen Szene-Kontext enthaelt.
 
+**Verbindungsregel fuer reale Jobs:** Fuer normale CNC-Laeufe ist RouterKing
+Addon **Auto Connect** der kanonische erste Schritt. Ein Agent darf nicht
+standardmaessig serielle Ports raten und `routerking_machine_connect` direkt
+mit einem konkreten `/dev/...`-Port aufrufen. Direkte Port-Verbindung ist nur
+ein expliziter Recovery-/Debug-Fallback, wenn der Nutzer das verlangt oder Auto
+Connect nachweislich nicht verfuegbar ist.
+
 | Tool | Pflicht-Param | Optionale Params |
 |---|---|---|
 | `routerking_machine_connect` | `port` | `baudrate` (Default: 115200) |

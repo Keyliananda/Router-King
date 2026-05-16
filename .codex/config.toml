@@ -1,0 +1,6 @@
+[mcp_servers.routerking]
+args = [
+    "-m",
+    "mcp.server.stdio_server",
+]
+command = "python3"
