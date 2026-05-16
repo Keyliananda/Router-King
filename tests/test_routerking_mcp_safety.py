@@ -10,6 +10,7 @@ from mcp.server.machine_tools import (
 from mcp.server.routerking_tools import (
     routerking_cam_capabilities,
     routerking_cam_generate_job,
+    routerking_cam_inspect_operation,
     routerking_cam_list_operations,
     routerking_cam_list_setups,
     routerking_cam_postprocess,
@@ -124,6 +125,26 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         self.assertEqual(connection.kwargs["setup_id"], "Job001")
         self.assertTrue(connection.kwargs["include_paths"])
         self.assertFalse(connection.kwargs["include_properties"])
+
+    def test_cam_inspect_operation_wrapper_invokes_bridge_operation(self):
+        connection = StubConnection()
+        response = routerking_cam_inspect_operation(
+            operation_id="Profile001",
+            setup_id="Job001",
+            include_gcode=True,
+            gcode_lines=10,
+            include_properties=False,
+            include_warnings=False,
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        self.assertEqual(connection.operation, "cam_inspect_operation")
+        self.assertEqual(connection.kwargs["operation_id"], "Profile001")
+        self.assertEqual(connection.kwargs["setup_id"], "Job001")
+        self.assertTrue(connection.kwargs["include_gcode"])
+        self.assertEqual(connection.kwargs["gcode_lines"], 10)
+        self.assertFalse(connection.kwargs["include_properties"])
+        self.assertFalse(connection.kwargs["include_warnings"])
 
     def test_cam_generate_job_wrapper_builds_expected_action_payload(self):
         connection = StubConnection()

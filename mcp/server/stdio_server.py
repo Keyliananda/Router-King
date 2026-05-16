@@ -107,6 +107,23 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "routerking_cam_inspect_operation",
+        "description": "Inspect one CAM operation in detail without recomputing, postprocessing, or modifying the document.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "description": "Operation object name or label to inspect."},
+                "setup_id": {"type": "string", "description": "Optional setup/job name or label to disambiguate duplicate operation ids."},
+                "include_gcode": {"type": "boolean", "default": False, "description": "Include a bounded G-code excerpt from Path.toGCode."},
+                "gcode_lines": {"type": "integer", "default": 30, "description": "Maximum lines for the G-code excerpt."},
+                "include_properties": {"type": "boolean", "default": True, "description": "Include known CAM operation properties."},
+                "include_warnings": {"type": "boolean", "default": True, "description": "Include operation diagnostics and warnings."},
+            },
+            "required": ["operation_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "routerking_analyze_selection",
         "description": "Analyze the current FreeCAD selection using RouterKing geometry checks.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},

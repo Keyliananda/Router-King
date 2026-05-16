@@ -127,6 +127,38 @@ Die Antwort enthaelt `operations[]` mit Feldern wie:
 - `properties`
 - optional `gcode_preview`
 
+#### `routerking_cam_inspect_operation`
+
+Inspiziert eine einzelne CAM-Operation detailliert. Risikoklasse: `read`.
+Das Tool erzeugt keine Operationen, recomputet keine Toolpaths, postprocessed
+keinen G-Code und veraendert kein FreeCAD-Dokument.
+
+```json
+{
+  "operation_id": "Profile001",
+  "setup_id": "Job001",
+  "include_gcode": true,
+  "gcode_lines": 30,
+  "include_properties": true,
+  "include_warnings": true
+}
+```
+
+`operation_id` ist Pflicht. `setup_id` ist optional und hilft bei mehrfachen
+Operation-Namen. `include_gcode=true` liefert nur einen begrenzten Auszug aus
+`Path.toGCode`, keinen vollstaendigen Postprocess-Export.
+
+Die Antwort enthaelt:
+
+- `document`
+- `setup_id`
+- `operation` mit `id`, `name`, `label`, `operation_type`, `enabled`, `base`
+- `setup`-Kontext mit Postprocessor, Output-Pfad, Modell und Operation Count
+- `base_detail` mit Objekt-/Subelement-Hinweisen
+- `properties` und `property_status`
+- `path` mit `source`, `gcode_line_count`, `preview`, `preview_truncated`
+- `diagnostics` und `warnings`
+
 #### `routerking_analyze_selection`
 
 Analysiert die aktuelle FreeCAD-Selektion. Risikoklasse: `read`.

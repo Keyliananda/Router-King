@@ -191,6 +191,52 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         self.assertEqual(response["data"]["operations"], [])
         self.assertIn("CAM setup not found: Missing", response["errors"])
 
+    def test_cam_inspect_operation_returns_path_excerpt_and_properties(self):
+        called = []
+        job = StubCamJob()
+        app = SimpleNamespace(ActiveDocument=SimpleNamespace(Name="Doc", Objects=[job]))
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: called.append(actions),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        with unittest.mock.patch.dict("sys.modules", {"FreeCAD": app}):
+            response = bridge.cam_inspect_operation(
+                operation_id="Profile001",
+                setup_id="Job001",
+                include_gcode=True,
+                gcode_lines=10,
+            )
+        self.assertTrue(response["success"])
+        self.assertEqual(called, [])
+        self.assertEqual(response["data"]["setup_id"], "Job001")
+        operation = response["data"]["operation"]
+        self.assertEqual(operation["id"], "Profile001")
+        self.assertEqual(operation["operation_type"], "profile")
+        self.assertEqual(operation["gcode_line_count"], 2)
+        self.assertEqual(operation["gcode_excerpt"], "G1 X1\nG1 Y1")
+        self.assertEqual(operation["path"]["source"], "Path.toGCode")
+        self.assertFalse(operation["path"]["preview_truncated"])
+        self.assertEqual(operation["properties"]["FinalDepth"], -1.0)
+        self.assertEqual(operation["setup"]["id"], "Job001")
+        self.assertEqual(response["errors"], [])
+
+    def test_cam_inspect_operation_unknown_operation_returns_error(self):
+        job = StubCamJob()
+        app = SimpleNamespace(ActiveDocument=SimpleNamespace(Name="Doc", Objects=[job]))
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        with unittest.mock.patch.dict("sys.modules", {"FreeCAD": app}):
+            response = bridge.cam_inspect_operation(operation_id="MissingOp")
+        self.assertFalse(response["success"])
+        self.assertIsNone(response["data"]["operation"])
+        self.assertIn("CAM operation not found: MissingOp", response["errors"])
+
     def test_apply_actions_rejects_unknown_action(self):
         bridge = RouterKingBridge(
             action_executor=lambda actions: (["ok"], []),

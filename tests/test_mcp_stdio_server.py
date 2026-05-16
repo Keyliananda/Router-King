@@ -57,6 +57,7 @@ class TestToolsList:
         assert "routerking_cam_capabilities" in names
         assert "routerking_cam_list_setups" in names
         assert "routerking_cam_list_operations" in names
+        assert "routerking_cam_inspect_operation" in names
         assert "routerking_generate_gcode" in names
         assert "routerking_cam_generate_job" in names
         assert "routerking_cam_postprocess" in names
@@ -103,6 +104,27 @@ class TestToolsList:
         assert operation_schema["additionalProperties"] is False
         assert "confirm" not in operation_schema["properties"]
         assert "reason" not in operation_schema["properties"]
+
+    def test_cam_inspect_operation_schema_requires_operation_id_and_is_read_only(self):
+        schema = _TOOL_SCHEMA_MAP["routerking_cam_inspect_operation"]["inputSchema"]
+        assert schema["required"] == ["operation_id"]
+        assert set(schema["properties"]) == {
+            "operation_id",
+            "setup_id",
+            "include_gcode",
+            "gcode_lines",
+            "include_properties",
+            "include_warnings",
+        }
+        assert schema["properties"]["operation_id"]["type"] == "string"
+        assert schema["properties"]["setup_id"]["type"] == "string"
+        assert schema["properties"]["include_gcode"]["type"] == "boolean"
+        assert schema["properties"]["gcode_lines"]["type"] == "integer"
+        assert schema["properties"]["include_properties"]["type"] == "boolean"
+        assert schema["properties"]["include_warnings"]["type"] == "boolean"
+        assert schema["additionalProperties"] is False
+        assert "confirm" not in schema["properties"]
+        assert "reason" not in schema["properties"]
 
 
 class TestToolsCall:

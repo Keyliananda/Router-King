@@ -56,6 +56,27 @@ def routerking_cam_list_operations(
     )
 
 
+def routerking_cam_inspect_operation(
+    *,
+    operation_id: str,
+    setup_id: Optional[str] = None,
+    include_gcode: bool = False,
+    gcode_lines: int = 30,
+    include_properties: bool = True,
+    include_warnings: bool = True,
+    connection: Optional[FreeCADConnection] = None,
+):
+    return (connection or FreeCADConnection()).invoke(
+        "cam_inspect_operation",
+        operation_id=operation_id,
+        setup_id=setup_id,
+        include_gcode=bool(include_gcode),
+        gcode_lines=int(gcode_lines),
+        include_properties=bool(include_properties),
+        include_warnings=bool(include_warnings),
+    )
+
+
 def routerking_apply_actions(
     payload: Any,
     *,

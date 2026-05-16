@@ -30,6 +30,7 @@ from .routerking_tools import (
     routerking_apply_actions,
     routerking_cam_capabilities,
     routerking_cam_generate_job,
+    routerking_cam_inspect_operation,
     routerking_cam_list_operations,
     routerking_cam_list_setups,
     routerking_cam_postprocess,
@@ -68,6 +69,15 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
             setup_id=payload.get("setup_id"),
             include_paths=payload.get("include_paths", False),
             include_properties=payload.get("include_properties", True),
+            connection=bound_connection,
+        ),
+        "routerking_cam_inspect_operation": lambda **payload: routerking_cam_inspect_operation(
+            operation_id=payload.get("operation_id", ""),
+            setup_id=payload.get("setup_id"),
+            include_gcode=payload.get("include_gcode", False),
+            gcode_lines=payload.get("gcode_lines", 30),
+            include_properties=payload.get("include_properties", True),
+            include_warnings=payload.get("include_warnings", True),
             connection=bound_connection,
         ),
         "routerking_run_script": lambda **payload: routerking_run_script(

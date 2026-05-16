@@ -396,6 +396,38 @@ class RouterKingBridge:
             errors=warnings,
         )
 
+    def cam_inspect_operation(
+        self,
+        operation_id: str,
+        setup_id: str | None = None,
+        include_gcode: bool = False,
+        gcode_lines: int = 30,
+        include_properties: bool = True,
+        include_warnings: bool = True,
+    ) -> Dict[str, Any]:
+        """Inspect one CAM operation without modifying the document."""
+        payload = run_on_main_thread(
+            lambda: _inspect_cam_operation(
+                operation_id=operation_id,
+                setup_id=setup_id,
+                include_gcode=bool(include_gcode),
+                gcode_lines=int(gcode_lines),
+                include_properties=bool(include_properties),
+                include_warnings=bool(include_warnings),
+            )
+        )
+        warnings = payload.get("warnings") or []
+        operation = payload.get("operation")
+        if operation is None:
+            message = payload.get("message") or f"CAM operation not found: {operation_id}"
+            return make_response(False, message, data=payload, errors=warnings or [message])
+        return make_response(
+            True,
+            f"CAM operation inspected: {operation.get('id') or operation_id}.",
+            data=payload,
+            errors=warnings,
+        )
+
     def run_script(self, code: str) -> Dict[str, Any]:
         """Execute arbitrary Python code in the FreeCAD context.
 
@@ -754,6 +786,7 @@ def _collect_cam_capabilities() -> Dict[str, Any]:
             "routerking_cam_capabilities",
             "routerking_cam_list_setups",
             "routerking_cam_list_operations",
+            "routerking_cam_inspect_operation",
             "routerking_cam_generate_job",
             "routerking_generate_gcode",
             "routerking_cam_postprocess",
@@ -825,6 +858,96 @@ def _collect_cam_operations(
         "setup_id": setup_id,
         "operations": operations,
         "warnings": warnings,
+    }
+
+
+def _inspect_cam_operation(
+    *,
+    operation_id: str,
+    setup_id: str | None = None,
+    include_gcode: bool = False,
+    gcode_lines: int = 30,
+    include_properties: bool = True,
+    include_warnings: bool = True,
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    if not str(operation_id or "").strip():
+        message = "operation_id is required."
+        return {"document": None, "setup_id": setup_id, "operation": None, "warnings": [message], "message": message}
+
+    doc = _resolve_document(None, warnings)
+    if doc is None:
+        message = warnings[0] if warnings else "No active document."
+        return {"document": None, "setup_id": setup_id, "operation": None, "warnings": warnings, "message": message}
+
+    setups = [obj for obj in _iter_document_objects(doc) if _looks_like_cam_setup(obj)]
+    if setup_id:
+        setups = [obj for obj in setups if _object_matches_id(obj, setup_id)]
+        if not setups:
+            warnings.append(f"CAM setup not found: {setup_id}")
+
+    matches = []
+    for setup in setups:
+        for op in _collect_operations_for_setup(setup):
+            if _object_matches_id(op, operation_id):
+                matches.append((setup, op))
+
+    if len(matches) > 1 and not setup_id:
+        message = f"CAM operation id is ambiguous: {operation_id}"
+        warnings.append(message)
+        return {
+            "document": _document_name(doc),
+            "setup_id": setup_id,
+            "operation": None,
+            "matches": [
+                {
+                    "setup_id": _object_id(setup),
+                    "operation_id": _object_id(op),
+                    "label": getattr(op, "Label", None) or getattr(op, "Name", None),
+                }
+                for setup, op in matches
+            ],
+            "warnings": warnings,
+            "message": message,
+        }
+
+    if matches:
+        setup, op = matches[0]
+        operation_warnings: List[str] = []
+        operation = _serialize_cam_operation(
+            op,
+            setup=setup,
+            include_paths=include_gcode,
+            include_properties=include_properties,
+            warnings=operation_warnings,
+        )
+        gcode = _path_to_gcode(getattr(op, "Path", None), operation_warnings)
+        line_limit = max(1, int(gcode_lines))
+        operation["setup"] = _serialize_cam_setup(setup)
+        operation["base_detail"] = _base_detail(op)
+        operation["property_status"] = _operation_property_status(operation)
+        operation["path"] = _path_summary(gcode, path_obj=getattr(op, "Path", None), line_limit=line_limit)
+        operation["diagnostics"] = _diagnose_cam_operation(operation, operation_warnings)
+        if include_gcode:
+            operation["gcode_excerpt"] = operation["path"]["preview"]
+        if include_warnings:
+            warnings.extend(operation_warnings)
+            warnings.extend(operation["diagnostics"]["warnings"])
+        return {
+            "document": _document_name(doc),
+            "setup_id": _object_id(setup),
+            "operation": operation,
+            "warnings": _dedupe_warnings(warnings),
+        }
+
+    message = f"CAM operation not found: {operation_id}"
+    warnings.append(message)
+    return {
+        "document": _document_name(doc),
+        "setup_id": setup_id,
+        "operation": None,
+        "warnings": warnings,
+        "message": message,
     }
 
 
@@ -941,9 +1064,10 @@ def _serialize_cam_operation(
     setup: Any,
     include_paths: bool,
     include_properties: bool,
+    warnings: List[str] | None = None,
 ) -> Dict[str, Any]:
     path_obj = getattr(op, "Path", None)
-    gcode = _path_to_gcode(path_obj)
+    gcode = _path_to_gcode(path_obj, warnings)
     payload: Dict[str, Any] = {
         "id": _object_id(op),
         "name": getattr(op, "Name", None),
@@ -961,6 +1085,107 @@ def _serialize_cam_operation(
     if include_paths:
         payload["gcode_preview"] = "\n".join(gcode.splitlines()[:30])
     return payload
+
+
+def _diagnose_cam_operation(operation: Mapping[str, Any], warnings: List[str]) -> Dict[str, Any]:
+    diagnostics: Dict[str, Any] = {
+        "ready_for_postprocess": True,
+        "warnings": list(warnings),
+    }
+    if operation.get("enabled") is False:
+        diagnostics["ready_for_postprocess"] = False
+        diagnostics["warnings"].append("Operation is disabled.")
+    if not operation.get("path_available"):
+        diagnostics["ready_for_postprocess"] = False
+        diagnostics["warnings"].append("Operation has no Path object.")
+    if int(operation.get("gcode_line_count") or 0) <= 0:
+        diagnostics["ready_for_postprocess"] = False
+        diagnostics["warnings"].append("Operation path has no G-code lines.")
+    if operation.get("operation_type") == "unknown":
+        diagnostics["warnings"].append("Operation type could not be inferred.")
+    if operation.get("base") is None:
+        diagnostics["warnings"].append("Operation has no base geometry reference.")
+    diagnostics["warnings"] = _dedupe_warnings(diagnostics["warnings"])
+    return diagnostics
+
+
+def _base_detail(op: Any) -> Dict[str, Any]:
+    raw = {
+        "Base": _jsonable(getattr(op, "Base", None)) if hasattr(op, "Base") else None,
+        "BaseGeometry": _jsonable(getattr(op, "BaseGeometry", None)) if hasattr(op, "BaseGeometry") else None,
+        "BaseObject": _jsonable(getattr(op, "BaseObject", None)) if hasattr(op, "BaseObject") else None,
+    }
+    objects: List[str] = []
+    subelements: List[str] = []
+    for value in raw.values():
+        _collect_base_parts(value, objects, subelements)
+    return {
+        "raw": raw,
+        "objects": _dedupe_warnings(objects),
+        "subelements": _dedupe_warnings(subelements),
+        "missing": not any(value not in (None, "", [], {}, ()) for value in raw.values()),
+    }
+
+
+def _collect_base_parts(value: Any, objects: List[str], subelements: List[str]) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        if value:
+            if "." in value:
+                obj, _, sub = value.partition(".")
+                objects.append(obj)
+                subelements.append(sub)
+            else:
+                objects.append(value)
+        return
+    if isinstance(value, Mapping):
+        name = value.get("name") or value.get("label")
+        if name:
+            objects.append(str(name))
+        return
+    if isinstance(value, (list, tuple)):
+        if value and isinstance(value[0], Mapping):
+            name = value[0].get("name") or value[0].get("label")
+            if name:
+                objects.append(str(name))
+            for item in value[1:]:
+                _collect_base_parts(item, objects, subelements)
+            return
+        for item in value:
+            _collect_base_parts(item, objects, subelements)
+
+
+def _operation_property_status(operation: Mapping[str, Any]) -> Dict[str, Any]:
+    properties = dict(operation.get("properties") or {})
+    expected_by_kind = {
+        "profile": ["Side", "Direction", "StartDepth", "FinalDepth", "StepDown", "HorizFeed", "VertFeed"],
+        "pocket": ["StartDepth", "FinalDepth", "StepDown", "HorizFeed", "VertFeed"],
+        "drilling": ["StartDepth", "FinalDepth", "PeckDepth", "Feed"],
+    }
+    expected = expected_by_kind.get(str(operation.get("operation_type") or ""), [])
+    return {
+        "expected": expected,
+        "serialized": list(properties.keys()),
+        "missing_expected": [name for name in expected if name not in properties],
+    }
+
+
+def _path_summary(gcode: str, *, path_obj: Any, line_limit: int) -> Dict[str, Any]:
+    lines = [line for line in str(gcode or "").splitlines() if line.strip()]
+    preview_lines = lines[: max(1, int(line_limit))]
+    motion_lines = [line for line in lines if str(line).strip().upper().startswith(("G0", "G1", "G2", "G3"))]
+    return {
+        "available": bool(path_obj is not None),
+        "source": "Path.toGCode" if path_obj is not None else "",
+        "gcode_line_count": len(lines),
+        "preview": "\n".join(preview_lines),
+        "preview_line_count": len(preview_lines),
+        "preview_truncated": len(lines) > len(preview_lines),
+        "line_limit": max(1, int(line_limit)),
+        "first_motion_line": motion_lines[0] if motion_lines else "",
+        "last_motion_line": motion_lines[-1] if motion_lines else "",
+    }
 
 
 def _serialize_operation_properties(op: Any) -> Dict[str, Any]:
@@ -1002,13 +1227,19 @@ def _infer_operation_type(op: Any) -> str:
     return "unknown"
 
 
-def _path_to_gcode(path_obj: Any) -> str:
+def _path_to_gcode(path_obj: Any, warnings: List[str] | None = None) -> str:
     to_gcode = getattr(path_obj, "toGCode", None) if path_obj is not None else None
     if not callable(to_gcode):
+        if path_obj is None and warnings is not None:
+            warnings.append("Path object is missing.")
+        elif warnings is not None:
+            warnings.append("Path.toGCode is unavailable.")
         return ""
     try:
         result = to_gcode()
-    except Exception:
+    except Exception as exc:
+        if warnings is not None:
+            warnings.append(f"Path.toGCode failed: {exc}")
         return ""
     if isinstance(result, bytes):
         return result.decode("utf-8", errors="replace")
@@ -1084,3 +1315,15 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return bool(value)
+
+
+def _dedupe_warnings(values: Iterable[str]) -> List[str]:
+    seen = set()
+    result = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result

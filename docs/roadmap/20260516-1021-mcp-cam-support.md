@@ -29,8 +29,17 @@ erst danach Maschinenvalidierung oder Streaming ausfuehren.
 
 ## Naechste Iterationen
 
-- [ ] `routerking_cam_inspect_operation`: eine Operation mit Pfad-/G-Code-Auszug
-  und Warnungen inspizieren.
+## Iteration 3 -- Einzelne CAM-Operation inspizieren
+
+- [x] `routerking_cam_inspect_operation`: eine Operation mit Setup-Kontext,
+  Base-Details, Properties, Path-/G-Code-Auszug und Warnungen read-only
+  inspizieren.
+- [x] Das Tool als side-effect-frei dokumentieren: keine Operationserzeugung,
+  kein Recompute, kein Postprocess, keine Dokumentveraenderung.
+- [x] Schema, Wrapper/Bridge und Tests ergaenzen.
+
+## Naechste Iterationen
+
 - [ ] `routerking_cam_create_setup`: CAM-Job/Setup ohne sofortigen Postprocess
   erzeugen.
 - [ ] `routerking_cam_create_operation`: Profile/Pocket/Drilling-Operation an ein
@@ -53,6 +62,11 @@ unterstuetzt und welche Default-Werte fuer CAM und Simple-Fallback gelten.
 Planung um Projektinspektion. Agenten koennen damit vorhandene Jobs, Operationen,
 Base-Geometrie, Enabled-Status, relevante Properties und Path/G-Code-Status
 erkennen, bevor sie Setups oder Operationen veraendern.
+
+`routerking_cam_inspect_operation` vertieft diese Inspektion fuer eine einzelne
+Operation. Es liefert Setup-Kontext, Base-Details, Property-Abdeckung,
+begrenzte Path.toGCode-Auszugdaten und Diagnosewarnungen, ohne Toolpaths zu
+recomputen oder G-Code zu posten.
 
 Grenze: Das Tool erzeugt noch keine Setups oder Operationen. Es beschreibt den
 aktuellen Support und die empfohlene Pipeline. Explizite Setup-/Operation-CRUD-
