@@ -2,8 +2,9 @@ import os
 import tempfile
 import unittest
 
-from RouterKing.cam.dxf_import import load_dxf_paths
+from RouterKing.cam.dxf_import import generate_gcode_from_dxf, load_dxf_paths
 from RouterKing.cam.simple_engine import SimpleJobSettings, generate_gcode_from_paths
+from RouterKing.ai.actions import execute_actions_for_bridge
 
 
 class TestDxfImport(unittest.TestCase):
@@ -29,6 +30,48 @@ class TestDxfImport(unittest.TestCase):
         gcode = generate_gcode_from_paths(paths, settings)
         self.assertIn("Z-1", gcode)
         self.assertIn("Z-2", gcode)
+
+    def test_generate_gcode_from_dxf(self):
+        here = os.path.dirname(__file__)
+        dxf_path = os.path.join(here, "test-square.dxf")
+        settings = SimpleJobSettings(cut_z=-1.0, safe_z=5.0, feed_rate=700.0)
+        gcode = generate_gcode_from_dxf(dxf_path, settings)
+        self.assertIn("RouterKing simple CAM", gcode)
+        self.assertIn("G21", gcode)
+        self.assertIn("F700", gcode)
+
+    def test_dxf_generate_gcode_action_returns_structured_data(self):
+        here = os.path.dirname(__file__)
+        dxf_path = os.path.join(here, "test-square.dxf")
+        handle = tempfile.NamedTemporaryFile("w", suffix=".nc", delete=False)
+        output_path = handle.name
+        handle.close()
+        try:
+            response = execute_actions_for_bridge(
+                [
+                    {
+                        "type": "dxf_generate_gcode",
+                        "dxf_path": dxf_path,
+                        "output_path": output_path,
+                        "use_freecad": False,
+                        "prefer_ezdxf": False,
+                        "feed_rate": 700,
+                    }
+                ]
+            )
+            self.assertEqual(response["errors"], [])
+            self.assertIn("DXF G-code generated", response["messages"][0])
+            data = response["data"]
+            self.assertEqual(data["engine"], "simple")
+            self.assertEqual(data["output_path"], output_path)
+            self.assertIn("RouterKing simple CAM", data["gcode"])
+            self.assertGreater(data["line_count"], 0)
+            self.assertTrue(os.path.exists(output_path))
+        finally:
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
     def test_bulge_arc_lwpolyline(self):
         dxf = "\n".join(

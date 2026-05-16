@@ -55,8 +55,8 @@ erst danach Maschinenvalidierung oder Streaming ausfuehren.
 - [x] Simple-Fallback-Generate per MCP parametrierbar.
 - [x] CAM-Postprocess per MCP sichtbar.
 - [x] CAM-Projektinspektion per MCP sichtbar.
-- [ ] CAM-G-Code-Analyse als direktes MCP-Tool anbieten.
-- [ ] DXF-to-GCode als direktes MCP-Tool anbieten.
+- [x] CAM-G-Code-Analyse als direktes MCP-Tool anbieten.
+- [x] DXF-to-GCode als direktes MCP-Tool anbieten.
 - [ ] Generate-Ergebnisse strukturierter zurueckgeben (`engine`, `output_path`,
   `warnings`, optional `job_id`).
 - [ ] CAM-Workbench-Status/Aktivierung als eigene MCP-Diagnose anbieten.

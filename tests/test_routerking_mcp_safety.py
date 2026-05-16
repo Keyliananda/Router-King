@@ -8,6 +8,7 @@ from mcp.server.machine_tools import (
     routerking_machine_validate_gcode,
 )
 from mcp.server.routerking_tools import (
+    routerking_cam_analyze_gcode,
     routerking_cam_capabilities,
     routerking_cam_generate_job,
     routerking_cam_inspect_operation,
@@ -15,6 +16,7 @@ from mcp.server.routerking_tools import (
     routerking_cam_list_setups,
     routerking_cam_postprocess,
     routerking_console_exec,
+    routerking_dxf_generate_gcode,
     routerking_generate_gcode,
 )
 from mcp.server.safety import validate_machine_confirmation
@@ -203,6 +205,50 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         self.assertEqual(action["machine_profile_path"], "/tmp/machine_profile.json")
         self.assertEqual(action["feed_rate"], 800)
         self.assertEqual(action["plunge_rate"], 300)
+
+    def test_cam_analyze_gcode_returns_structured_analysis(self):
+        response = routerking_cam_analyze_gcode(gcode="G21\nG0 X0 Y0 Z1\nG0 X10 Y0")
+        self.assertTrue(response["success"])
+        self.assertIn("summary", response["data"])
+        self.assertIn("stats", response["data"])
+        self.assertIn("issues", response["data"])
+        self.assertEqual(response["errors"], [])
+
+    def test_dxf_generate_gcode_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_dxf_generate_gcode(
+            dxf_path="/tmp/input.dxf",
+            output_path="/tmp/output.nc",
+            update_ui=True,
+            use_cam_defaults=True,
+            safe_z=6.0,
+            cut_z=-1.5,
+            pass_depth=0.5,
+            feed_rate=700,
+            deflection=0.2,
+            arc_segment_angle=5.0,
+            prefer_ezdxf=False,
+            use_freecad=False,
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        self.assertFalse(connection.kwargs["include_context"])
+        action = connection.kwargs["payload"]["actions"][0]
+        self.assertEqual(action["type"], "dxf_generate_gcode")
+        self.assertEqual(action["dxf_path"], "/tmp/input.dxf")
+        self.assertEqual(action["output_path"], "/tmp/output.nc")
+        self.assertTrue(action["update_ui"])
+        self.assertTrue(action["use_cam_defaults"])
+        self.assertEqual(action["safe_z"], 6.0)
+        self.assertEqual(action["cut_z"], -1.5)
+        self.assertEqual(action["pass_depth"], 0.5)
+        self.assertEqual(action["feed_rate"], 700)
+        self.assertEqual(action["deflection"], 0.2)
+        self.assertEqual(action["arc_segment_angle"], 5.0)
+        self.assertFalse(action["prefer_ezdxf"])
+        self.assertFalse(action["use_freecad"])
+        self.assertNotIn("confirm", action)
+        self.assertNotIn("reason", action)
 
     def test_bridge_rejects_machine_jog_without_confirm(self):
         bridge = RouterKingBridge(

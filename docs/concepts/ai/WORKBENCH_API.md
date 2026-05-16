@@ -78,6 +78,7 @@ Beide Fehler werden als strukturierte Fehlermeldungen zurueckgegeben; die Action
 | `optimize_splines_preview` | Spline-Optimierungs-Vorschau | -- | -- |
 | `generate_gcode` | G-Code generieren | -- | `model`, `operations`, `output_path`, `prefer_cam`, `use_cam_defaults` |
 | `cam_generate_job` | CAM-Job erzeugen und G-Code exportieren | -- | `model`, `operations`, `output_path`, `prefer_cam`, `use_cam_defaults` |
+| `dxf_generate_gcode` | Simple-CAM-G-Code aus DXF erzeugen | `dxf_path` | `output_path`, `update_ui`, Simple-CAM-Settings, DXF-Import-Settings |
 | `cam_postprocess` | Rohes CAM-G-Code fuer GRBL nachbearbeiten | `gcode` | `machine_profile_path`, `feed_rate`, `plunge_rate` |
 
 ### Machine-Steuerung (machine)

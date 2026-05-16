@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 import logging
 import os
 from typing import Any, Optional
 
 from .freecad_connection import FreeCADConnection
 from .safety import RISK_DANGEROUS_DEV, log_tool_request, validate_risk
+from .schemas import make_response
 
 LOG = logging.getLogger("routerking.mcp.tools")
 
@@ -32,6 +34,30 @@ CAM_SETTING_KEYS = (
     "laser_power",
     "start_spindle",
     "machine_profile_path",
+)
+
+SIMPLE_CAM_SETTING_KEYS = (
+    "safe_z",
+    "cut_z",
+    "start_z",
+    "pass_depth",
+    "ramp_length",
+    "lead_in",
+    "lead_out",
+    "feed_rate",
+    "plunge_rate",
+    "units",
+    "spindle_speed",
+    "laser_power",
+    "start_spindle",
+)
+
+DXF_IMPORT_SETTING_KEYS = (
+    "deflection",
+    "arc_segment_angle",
+    "merge_tolerance",
+    "prefer_ezdxf",
+    "use_freecad",
 )
 
 
@@ -206,6 +232,74 @@ def routerking_cam_postprocess(
         include_context=False,
         connection=connection,
     )
+
+
+def routerking_cam_analyze_gcode(
+    *,
+    gcode: str,
+    cam_settings: Optional[dict[str, Any]] = None,
+):
+    """Analyze CAM G-code for toolpath risks without touching FreeCAD."""
+    try:
+        from RouterKing.ai.cam_analysis import analyze_gcode
+    except ImportError:  # pragma: no cover - FreeCAD module path fallback
+        from ai.cam_analysis import analyze_gcode
+
+    config = {"cam": dict(cam_settings)} if isinstance(cam_settings, dict) else None
+    result = analyze_gcode(gcode or "", config=config)
+    issues = [_serialize_issue(issue) for issue in getattr(result, "issues", [])]
+    data = {
+        "summary": getattr(result, "summary", ""),
+        "stats": dict(getattr(result, "stats", {}) or {}),
+        "issues": issues,
+    }
+    return make_response(True, data["summary"], data=data)
+
+
+def routerking_dxf_generate_gcode(
+    *,
+    dxf_path: str,
+    output_path: Optional[str] = None,
+    update_ui: bool = False,
+    use_cam_defaults: Optional[bool] = None,
+    connection: Optional[FreeCADConnection] = None,
+    **settings: Any,
+):
+    """Generate simple CAM G-code from a DXF file through RouterKing actions."""
+    action: dict[str, Any] = {
+        "type": "dxf_generate_gcode",
+        "dxf_path": dxf_path,
+        "update_ui": bool(update_ui),
+    }
+    for key, val in [
+        ("output_path", output_path),
+        ("use_cam_defaults", use_cam_defaults),
+    ]:
+        if val is not None:
+            action[key] = val
+    for key in SIMPLE_CAM_SETTING_KEYS + DXF_IMPORT_SETTING_KEYS:
+        if key in settings and settings[key] is not None:
+            action[key] = settings[key]
+    return routerking_apply_actions(
+        {"actions": [action]},
+        include_context=False,
+        connection=connection,
+    )
+
+
+def _serialize_issue(issue: Any) -> dict[str, Any]:
+    if is_dataclass(issue):
+        return asdict(issue)
+    if isinstance(issue, dict):
+        return dict(issue)
+    return {
+        "severity": getattr(issue, "severity", ""),
+        "message": getattr(issue, "message", str(issue)),
+        "suggestion": getattr(issue, "suggestion", ""),
+        "object_label": getattr(issue, "object_label", ""),
+        "feedback_key": getattr(issue, "feedback_key", ""),
+        "weight": getattr(issue, "weight", 1.0),
+    }
 
 
 def routerking_run_script(

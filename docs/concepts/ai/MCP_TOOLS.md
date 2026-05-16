@@ -234,6 +234,48 @@ Erzeugt einen CAM-Job und exportiert G-Code. Risikoklasse: `modify`. Liefert aut
 
 Alle Parameter sind optional.
 
+#### `routerking_dxf_generate_gcode`
+
+Generiert Simple-CAM-G-Code aus einer DXF-Datei. Risikoklasse: `modify`, weil
+optional eine G-Code-Datei geschrieben und die RouterKing-G-Code-UI aktualisiert
+werden kann. Dieses Tool steuert keine Maschine.
+
+```json
+{
+  "dxf_path": "/tmp/input.dxf",
+  "output_path": "/tmp/output.nc",
+  "use_cam_defaults": true,
+  "safe_z": 5.0,
+  "cut_z": -1.0,
+  "pass_depth": 0.5,
+  "feed_rate": 800,
+  "use_freecad": false,
+  "prefer_ezdxf": false
+}
+```
+
+Unterstuetzt werden die Simple-Fallback-Settings sowie DXF-Import-Settings:
+`deflection`, `arc_segment_angle`, `merge_tolerance`, `prefer_ezdxf`,
+`use_freecad`.
+
+#### `routerking_cam_analyze_gcode`
+
+Analysiert G-Code auf CAM-Risiken wie niedrige Rapid-Moves, kleine Arc-Radien,
+Overcut-Risiken und zu grosse Plunge-Schritte. Risikoklasse: `read`. Dieses Tool
+arbeitet direkt auf G-Code-Text und benoetigt keine FreeCAD-Verbindung.
+
+```json
+{
+  "gcode": "G21\nG90\nG0 Z1\nG0 X10 Y0",
+  "cam_settings": {
+    "safe_z_height": 3.0,
+    "min_arc_radius": 0.5,
+    "tool_radius": 1.0,
+    "max_plunge_step": 2.0
+  }
+}
+```
+
 #### `routerking_cam_postprocess`
 
 Postprocessed rohen CAM-G-Code fuer GRBL-sicheres Streaming. Risikoklasse: `read`.

@@ -382,6 +382,44 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         self.assertEqual(captured["actions"][0]["type"], "cam_postprocess")
         self.assertFalse(response["data"]["transaction"]["used"])
 
+    def test_dxf_generate_gcode_action_requires_dxf_path(self):
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.apply_actions({"actions": [{"type": "dxf_generate_gcode"}]}, include_context=False)
+        self.assertFalse(response["success"])
+        self.assertIn("dxf_generate_gcode: missing required fields: dxf_path", response["errors"])
+
+    def test_dxf_generate_gcode_action_uses_modify_transaction(self):
+        captured = {}
+
+        def executor(actions):
+            captured["actions"] = actions
+            return {
+                "messages": ["DXF generated."],
+                "errors": [],
+                "data": {"engine": "simple", "output_path": "/tmp/out.nc"},
+            }
+
+        bridge = RouterKingBridge(
+            action_executor=executor,
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        response = bridge.apply_actions(
+            {"actions": [{"type": "dxf_generate_gcode", "dxf_path": "/tmp/in.dxf"}]},
+            include_context=False,
+        )
+        self.assertTrue(response["success"])
+        self.assertEqual(captured["actions"][0]["type"], "dxf_generate_gcode")
+        self.assertEqual(captured["actions"][0]["dxf_path"], "/tmp/in.dxf")
+        self.assertTrue(response["data"]["transaction"]["used"])
+        self.assertEqual(response["data"]["results"][0]["data"]["engine"], "simple")
+
     def test_run_script_executes_code(self):
         bridge = RouterKingBridge(
             action_executor=lambda actions: (["ok"], []),

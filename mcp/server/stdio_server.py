@@ -43,6 +43,33 @@ CAM_SETTING_SCHEMA: Dict[str, Any] = {
     "machine_profile_path": {"type": "string", "description": "Optional machine_profile.json path for GRBL postprocessing."},
 }
 
+SIMPLE_CAM_SETTING_SCHEMA: Dict[str, Any] = {
+    key: CAM_SETTING_SCHEMA[key]
+    for key in (
+        "safe_z",
+        "cut_z",
+        "start_z",
+        "pass_depth",
+        "ramp_length",
+        "lead_in",
+        "lead_out",
+        "feed_rate",
+        "plunge_rate",
+        "units",
+        "spindle_speed",
+        "laser_power",
+        "start_spindle",
+    )
+}
+
+DXF_IMPORT_SETTING_SCHEMA: Dict[str, Any] = {
+    "deflection": {"type": "number", "description": "FreeCAD shape discretization deflection."},
+    "arc_segment_angle": {"type": "number", "description": "Maximum segment angle when approximating DXF arcs."},
+    "merge_tolerance": {"type": "number", "description": "Tolerance for merging adjacent DXF path endpoints."},
+    "prefer_ezdxf": {"type": "boolean", "default": True, "description": "Use ezdxf before the basic parser when available."},
+    "use_freecad": {"type": "boolean", "default": True, "description": "Allow FreeCAD import before ezdxf/basic parser."},
+}
+
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     # -- FreeCAD read tools --
     {
@@ -208,6 +235,40 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "plunge_rate": {"type": "number", "description": "Fallback plunge rate in mm/min."},
             },
             "required": ["gcode"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_cam_analyze_gcode",
+        "description": "Analyze CAM G-code for toolpath risks without modifying FreeCAD or controlling the machine.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "gcode": {"type": "string", "description": "G-code text to analyze."},
+                "cam_settings": {
+                    "type": "object",
+                    "description": "Optional CAM analysis threshold overrides using existing cam config keys.",
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["gcode"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_dxf_generate_gcode",
+        "description": "Generate simple CAM G-code from a DXF file without controlling the machine.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dxf_path": {"type": "string", "description": "DXF input file path."},
+                "output_path": {"type": "string", "description": "Optional path for the generated G-code file."},
+                "update_ui": {"type": "boolean", "default": False, "description": "Update the RouterKing G-code editor/preview when available."},
+                "use_cam_defaults": {"type": "boolean", "default": True},
+                **SIMPLE_CAM_SETTING_SCHEMA,
+                **DXF_IMPORT_SETTING_SCHEMA,
+            },
+            "required": ["dxf_path"],
             "additionalProperties": False,
         },
     },

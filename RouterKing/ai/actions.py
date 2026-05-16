@@ -1,5 +1,6 @@
 """Action execution helpers for RouterKing AI chat."""
 
+from dataclasses import asdict
 import json
 import math
 import os
@@ -72,6 +73,7 @@ _FREECAD_ACTIONS = frozenset({
     "optimize_splines_preview",
     "generate_gcode",
     "cam_generate_job",
+    "dxf_generate_gcode",
 })
 
 
@@ -89,6 +91,7 @@ _ACTION_HELP: Dict[str, str] = {
     "optimize_splines_preview": "Run spline optimization preview (no params)",
     "generate_gcode": "Generate G-code from selection (output_path?, prefer_cam?)",
     "cam_generate_job": "Create CAM job + operations + post (operations?, output_path?, prefer_cam?)",
+    "dxf_generate_gcode": "Generate simple CAM G-code from a DXF file (dxf_path, output_path?)",
     "cam_postprocess": "Postprocess raw CAM G-code for GRBL safety (gcode, feed_rate?, machine_profile_path?)",
     "machine_connect": "Connect to GRBL controller (port, baudrate?)",
     "machine_disconnect": "Disconnect from GRBL controller (no params)",
@@ -464,6 +467,44 @@ def _action_cam_generate_job(action, params):
     if result.warnings:
         warning_text = " Warnings: " + "; ".join(result.warnings)
     return f"CAM job generated via {result.engine}, saved to {output_path}.{job_note}{warning_text}"
+
+
+def _action_dxf_generate_gcode(action, params):
+    try:
+        from ..cam.dxf_import import generate_gcode_from_dxf
+    except Exception:
+        from cam.dxf_import import generate_gcode_from_dxf
+
+    dxf_path = _get_param(action, params, "dxf_path") or _get_param(action, params, "path")
+    if not dxf_path:
+        return "dxf_generate_gcode: dxf_path required."
+
+    defaults = _load_cam_defaults(params)
+    merged_params = _merge_params(defaults, params)
+    output_path = _get_param(action, params, "output_path")
+    update_ui = bool(_get_param(action, params, "update_ui", default=False))
+
+    import_settings = _build_dxf_import_settings(merged_params)
+    simple_settings = _build_simple_settings(merged_params)
+    gcode = generate_gcode_from_dxf(str(dxf_path), simple_settings, import_settings)
+    output_path = _persist_gcode(output_path, "", "simple", gcode)
+    if update_ui:
+        _update_gcode_ui(gcode)
+
+    data = {
+        "gcode": gcode,
+        "output_path": output_path,
+        "line_count": len([line for line in gcode.splitlines() if line.strip()]),
+        "source_path": str(dxf_path),
+        "engine": "simple",
+        "import_settings": asdict(import_settings),
+        "simple_settings": asdict(simple_settings),
+    }
+    return {
+        "message": f"DXF G-code generated via simple engine, saved to {output_path}.",
+        "errors": [],
+        "data": data,
+    }
 
 
 def _action_cam_postprocess(action, params):
@@ -2269,6 +2310,7 @@ _ACTION_HANDLERS = {
     "optimize_splines_preview": _action_optimize_splines_preview,
     "generate_gcode": _action_generate_gcode,
     "cam_generate_job": _action_cam_generate_job,
+    "dxf_generate_gcode": _action_dxf_generate_gcode,
     "cam_postprocess": _action_cam_postprocess,
     "machine_autoconnect": _action_machine_autoconnect,
     "machine_travel_test": _action_machine_travel_test,
@@ -2399,6 +2441,23 @@ def _build_simple_settings(params):
     if "start_spindle" in params:
         simple_settings.start_spindle = bool(params["start_spindle"])
     return simple_settings
+
+
+def _build_dxf_import_settings(params):
+    try:
+        from ..cam.dxf_import import DxfImportSettings
+    except Exception:
+        from cam.dxf_import import DxfImportSettings
+
+    settings = DxfImportSettings()
+    for key in ("deflection", "arc_segment_angle", "merge_tolerance"):
+        if key in params:
+            setattr(settings, key, float(params[key]))
+    if "prefer_ezdxf" in params:
+        settings.prefer_ezdxf = bool(params["prefer_ezdxf"])
+    if "use_freecad" in params:
+        settings.use_freecad = bool(params["use_freecad"])
+    return settings
 
 
 def _parse_operations(params):

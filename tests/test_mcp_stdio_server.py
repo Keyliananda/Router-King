@@ -61,6 +61,8 @@ class TestToolsList:
         assert "routerking_generate_gcode" in names
         assert "routerking_cam_generate_job" in names
         assert "routerking_cam_postprocess" in names
+        assert "routerking_cam_analyze_gcode" in names
+        assert "routerking_dxf_generate_gcode" in names
 
     def test_all_schema_tools_have_registry_handlers(self):
         registry = build_tool_registry()
@@ -81,6 +83,38 @@ class TestToolsList:
         schema = _TOOL_SCHEMA_MAP["routerking_cam_postprocess"]["inputSchema"]
         assert schema["required"] == ["gcode"]
         assert schema["properties"]["feed_rate"]["type"] == "number"
+
+    def test_cam_analyze_gcode_schema_requires_gcode_and_is_read_only(self):
+        schema = _TOOL_SCHEMA_MAP["routerking_cam_analyze_gcode"]["inputSchema"]
+        assert schema["required"] == ["gcode"]
+        assert schema["properties"]["gcode"]["type"] == "string"
+        assert schema["properties"]["cam_settings"]["type"] == "object"
+        assert "confirm" not in schema["properties"]
+        assert "reason" not in schema["properties"]
+        assert schema["additionalProperties"] is False
+
+    def test_dxf_generate_gcode_schema_exposes_import_and_generation_settings(self):
+        schema = _TOOL_SCHEMA_MAP["routerking_dxf_generate_gcode"]["inputSchema"]
+        assert schema["required"] == ["dxf_path"]
+        for key in (
+            "output_path",
+            "update_ui",
+            "use_cam_defaults",
+            "deflection",
+            "arc_segment_angle",
+            "merge_tolerance",
+            "prefer_ezdxf",
+            "use_freecad",
+            "feed_rate",
+            "plunge_rate",
+            "safe_z",
+            "cut_z",
+            "pass_depth",
+        ):
+            assert key in schema["properties"]
+        assert "confirm" not in schema["properties"]
+        assert "reason" not in schema["properties"]
+        assert schema["additionalProperties"] is False
 
     def test_cam_generation_schemas_expose_operations(self):
         for name in ("routerking_generate_gcode", "routerking_cam_generate_job"):
