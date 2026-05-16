@@ -312,6 +312,12 @@ ACTION_REGISTRY: Dict[str, ActionDefinition] = {
         optional_params=("max_depth", "feed", "retract", "confirm", "reason"),
         risk_class="machine",
     ),
+    "machine_prepare_manual_xy": ActionDefinition(
+        name="machine_prepare_manual_xy",
+        description="After Z probing, lower Z to a manual XY setup clearance without changing X/Y.",
+        optional_params=("block_height", "descent_percent", "target_clearance", "confirm", "reason"),
+        risk_class="machine",
+    ),
     "machine_probe_config": ActionDefinition(
         name="machine_probe_config",
         description="Read/update persisted probe defaults in machine_profile.json.",

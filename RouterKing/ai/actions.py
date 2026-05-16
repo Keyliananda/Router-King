@@ -112,6 +112,7 @@ _ACTION_HELP: Dict[str, str] = {
     "machine_read_settings": "Read GRBL $$ settings (no params)",
     "machine_identify": "Identify machine: work area, spindle, limits, capabilities (no params)",
     "machine_probe_z": "Probe Z with touch plate and set Z0 (block_height, max_depth?, feed?, retract?, confirm=true)",
+    "machine_prepare_manual_xy": "After Z probe, lower to a manual XY setup clearance without changing X/Y (descent_percent?, target_clearance?, confirm=true)",
     "machine_probe_config": "Read/update persisted probe defaults (block_height?, probe_feed?, retract?)",
 }
 
@@ -947,6 +948,18 @@ def _action_machine_probe_z(action, params):
         _unlock_after_probe_fail(sender)
         return "machine_probe_z: probing failed (probe status != 1). Machine unlocked with $X."
 
+    set_zero_command = f"G10 L20 P1 Z{block_height:.3f}"
+    try:
+        set_zero_lines = sender.send_and_collect(set_zero_command, timeout=2.0)
+    except Exception as exc:
+        return f"machine_probe_z: failed to set Z zero: {exc}"
+    set_zero_error = next(
+        (str(line).strip() for line in set_zero_lines if str(line).strip().lower().startswith(("error", "alarm"))),
+        "",
+    )
+    if set_zero_error:
+        return f"machine_probe_z: failed to set Z zero: {set_zero_error}"
+
     if retract > 0.0:
         try:
             retract_timeout = max(2.0, (retract / max(feed, 1.0)) * 60.0 + 2.0)
@@ -965,18 +978,6 @@ def _action_machine_probe_z(action, params):
         if retract_error:
             return f"machine_probe_z: retract failed: {retract_error}"
 
-    set_zero_command = f"G10 L20 P1 Z{block_height:.3f}"
-    try:
-        set_zero_lines = sender.send_and_collect(set_zero_command, timeout=2.0)
-    except Exception as exc:
-        return f"machine_probe_z: failed to set Z zero: {exc}"
-    set_zero_error = next(
-        (str(line).strip() for line in set_zero_lines if str(line).strip().lower().startswith(("error", "alarm"))),
-        "",
-    )
-    if set_zero_error:
-        return f"machine_probe_z: failed to set Z zero: {set_zero_error}"
-
     status_after = _read_machine_status(sender)
     work_pos = _parse_position((status_after or {}).get("WPos"))
 
@@ -992,6 +993,73 @@ def _action_machine_probe_z(action, params):
             "block_height": float(block_height),
             "new_z_zero": "Z0 is now at workpiece surface",
             "work_position": work_pos,
+        },
+    }
+
+
+def _action_machine_prepare_manual_xy(action, params):
+    sender = _get_sender()
+    if sender is None:
+        return "machine_prepare_manual_xy: no sender available."
+    if not sender.is_connected():
+        return "machine_prepare_manual_xy: not connected."
+    if sender.is_streaming():
+        return "machine_prepare_manual_xy: sender busy (streaming)."
+    if not _require_machine_confirm(action, params, "machine_prepare_manual_xy"):
+        return "machine_prepare_manual_xy: confirm=true required."
+
+    profile, _ = grbl_load_machine_profile(None)
+    probe_config = _extract_probe_config(profile)
+    block_height = _to_float(_get_param(action, params, "block_height"))
+    if block_height is None:
+        block_height = _to_float(probe_config.get("block_height"))
+    if block_height is None or block_height <= 0.0:
+        return "machine_prepare_manual_xy: block_height must be > 0."
+
+    target_clearance = _to_float(_get_param(action, params, "target_clearance"))
+    descent_percent = _to_float(_get_param(action, params, "descent_percent", default=90.0))
+    if target_clearance is None:
+        if descent_percent is None:
+            descent_percent = 90.0
+        if descent_percent <= 0.0 or descent_percent >= 100.0:
+            return "machine_prepare_manual_xy: descent_percent must be > 0 and < 100."
+        target_clearance = block_height * (1.0 - (descent_percent / 100.0))
+    if target_clearance < 0.0:
+        return "machine_prepare_manual_xy: target_clearance must be >= 0."
+
+    status_before = _read_machine_status(sender)
+    state = str((status_before or {}).get("state", "")).strip().lower()
+    if state != "idle":
+        return f"machine_prepare_manual_xy: machine must be Idle, got '{state or '?'}'."
+
+    commands = [
+        "G90 G21",
+        f"G0 Z{target_clearance:.3f}",
+    ]
+    for command in commands:
+        try:
+            lines = sender.send_and_collect(command, timeout=5.0)
+        except Exception as exc:
+            return f"machine_prepare_manual_xy: failed to send {command}: {exc}"
+        error = next(
+            (str(line).strip() for line in lines if str(line).strip().lower().startswith(("error", "alarm"))),
+            "",
+        )
+        if error:
+            return f"machine_prepare_manual_xy: {command} failed: {error}"
+
+    status_after = _read_machine_status(sender)
+    return {
+        "message": (
+            f"Manual XY setup height reached: Z{target_clearance:.3f} "
+            f"({block_height - target_clearance:.3f}mm below touch-plate top). X/Y unchanged."
+        ),
+        "errors": [],
+        "data": {
+            "block_height": float(block_height),
+            "target_clearance": float(target_clearance),
+            "descent_percent": float(100.0 * (1.0 - target_clearance / block_height)),
+            "work_position": _parse_position((status_after or {}).get("WPos")),
         },
     }
 
@@ -2362,6 +2430,7 @@ _ACTION_HANDLERS = {
     "machine_home": _action_machine_home,
     "machine_read_settings": _action_machine_read_settings,
     "machine_probe_z": _action_machine_probe_z,
+    "machine_prepare_manual_xy": _action_machine_prepare_manual_xy,
     "machine_probe_config": _action_machine_probe_config,
     "machine_identify": _action_machine_identify,
 }

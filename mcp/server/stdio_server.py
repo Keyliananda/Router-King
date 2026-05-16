@@ -439,6 +439,22 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "routerking_machine_prepare_manual_xy",
+        "description": "After Z probing, lower Z to a manual XY setup clearance without changing X/Y. Requires confirm=true and reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "block_height": {"type": "number", "description": "Touch plate height in mm. Defaults to persisted probe config."},
+                "descent_percent": {"type": "number", "default": 90.0},
+                "target_clearance": {"type": "number", "description": "Explicit final work Z clearance in mm."},
+                "confirm": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["confirm", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "routerking_machine_probe_config",
         "description": "Read or update persisted probe defaults in machine_profile.json.",
         "inputSchema": {

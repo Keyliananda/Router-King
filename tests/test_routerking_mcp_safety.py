@@ -3,6 +3,7 @@ import unittest
 from RouterKing.mcp.bridge import RouterKingBridge
 from mcp.server.machine_tools import (
     routerking_machine_jog,
+    routerking_machine_prepare_manual_xy,
     routerking_machine_probe_config,
     routerking_machine_probe_z,
     routerking_machine_validate_gcode,
@@ -67,6 +68,22 @@ class TestRouterKingMcpSafety(unittest.TestCase):
         payload = connection.kwargs["payload"]
         self.assertEqual(payload["actions"][0]["type"], "machine_probe_z")
         self.assertEqual(payload["actions"][0]["block_height"], 15.0)
+
+    def test_machine_prepare_manual_xy_wrapper_builds_expected_action_payload(self):
+        connection = StubConnection()
+        response = routerking_machine_prepare_manual_xy(
+            block_height=15.0,
+            descent_percent=90.0,
+            confirm=True,
+            reason="manual xy setup",
+            connection=connection,
+        )
+        self.assertTrue(response["success"])
+        payload = connection.kwargs["payload"]
+        self.assertEqual(payload["actions"][0]["type"], "machine_prepare_manual_xy")
+        self.assertEqual(payload["actions"][0]["block_height"], 15.0)
+        self.assertEqual(payload["actions"][0]["descent_percent"], 90.0)
+        self.assertEqual(payload["actions"][0]["reason"], "manual xy setup")
 
     def test_machine_probe_config_wrapper_builds_expected_action_payload(self):
         connection = StubConnection()

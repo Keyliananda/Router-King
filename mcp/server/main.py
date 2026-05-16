@@ -18,6 +18,7 @@ from .machine_tools import (
     routerking_machine_connect,
     routerking_machine_disconnect,
     routerking_machine_jog,
+    routerking_machine_prepare_manual_xy,
     routerking_machine_probe_config,
     routerking_machine_probe_z,
     routerking_machine_request_status,
@@ -169,6 +170,7 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
         "routerking_machine_validate_gcode": lambda **payload: routerking_machine_validate_gcode(connection=bound_connection, **payload),
         "routerking_machine_stream_gcode": lambda **payload: routerking_machine_stream_gcode(connection=bound_connection, **payload),
         "routerking_machine_probe_z": lambda **payload: routerking_machine_probe_z(connection=bound_connection, **payload),
+        "routerking_machine_prepare_manual_xy": lambda **payload: routerking_machine_prepare_manual_xy(connection=bound_connection, **payload),
         "routerking_machine_probe_config": lambda **payload: routerking_machine_probe_config(connection=bound_connection, **payload),
         "routerking_machine_stop": lambda **payload: routerking_machine_stop(connection=bound_connection, **payload),
     }

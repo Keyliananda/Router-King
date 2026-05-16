@@ -27,6 +27,9 @@
 - Persisted Z probe defaults for this router are: touch plate height 15 mm,
   probe feed 50 mm/min, retract 3 mm. Use these defaults unless the setup
   explicitly changes.
+- For manual XY setup after Z probing, use `machine_prepare_manual_xy`. It
+  lowers only Z to the configured manual clearance, defaulting to 10% of the
+  touch plate height above work Z0, and never changes X/Y.
 
 ## Laser
 1. CAD or vector import (DXF/SVG) into FreeCAD.

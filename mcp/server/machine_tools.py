@@ -139,6 +139,32 @@ def routerking_machine_probe_z(
     )
 
 
+def routerking_machine_prepare_manual_xy(
+    *,
+    block_height: Optional[float] = None,
+    descent_percent: float = 90.0,
+    target_clearance: Optional[float] = None,
+    confirm: bool = False,
+    reason: str = "",
+    connection: Optional[FreeCADConnection] = None,
+):
+    action = {
+        "type": "machine_prepare_manual_xy",
+        "descent_percent": descent_percent,
+        "confirm": confirm,
+        "reason": reason,
+    }
+    if block_height is not None:
+        action["block_height"] = block_height
+    if target_clearance is not None:
+        action["target_clearance"] = target_clearance
+    return routerking_apply_actions(
+        {"actions": [action]},
+        include_context=True,
+        connection=connection,
+    )
+
+
 def routerking_machine_probe_config(
     *,
     block_height: Optional[float] = None,

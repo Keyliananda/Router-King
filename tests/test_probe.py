@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from RouterKing.ai.actions import (
+    _action_machine_prepare_manual_xy,
     _action_machine_probe_config,
     _action_machine_probe_z,
     _parse_probe_response_line,
@@ -90,6 +91,7 @@ class TestProbeAction(unittest.TestCase):
         sent_commands = [item[0] for item in sender.commands]
         self.assertTrue(any(cmd.startswith("G91 G38.2") for cmd in sent_commands))
         self.assertIn("G10 L20 P1 Z15.000", sent_commands)
+        self.assertLess(sent_commands.index("G10 L20 P1 Z15.000"), sent_commands.index("G91 G0 Z3.000"))
 
     def test_probe_z_alarm4_unlocks(self):
         sender = _ProbeSender(probe_lines=["[PRB:0.000,0.000,-30.000:0]", "ALARM:4"])
@@ -125,6 +127,50 @@ class TestProbeAction(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertIn("ALARM:5", result)
         self.assertFalse(any(command.startswith("G91 G38.2") for command, _ in sender.commands))
+
+    def test_prepare_manual_xy_lowers_to_ten_percent_touch_plate_height(self):
+        sender = _ProbeSender(
+            initial_status={"state": "Idle", "WPos": "0.000,0.000,15.000"},
+            final_status={"state": "Idle", "WPos": "0.000,0.000,1.500"},
+        )
+        profile = {"probe": {"block_height": 15.0, "probe_feed": 50.0, "retract_height": 3.0}}
+
+        with patch("RouterKing.ai.actions._get_sender", return_value=sender):
+            with patch("RouterKing.ai.actions.grbl_load_machine_profile", return_value=(profile, "/tmp/machine_profile.json")):
+                result = _action_machine_prepare_manual_xy(
+                    {
+                        "type": "machine_prepare_manual_xy",
+                        "confirm": True,
+                    },
+                    {},
+                )
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["data"]["block_height"], 15.0)
+        self.assertAlmostEqual(result["data"]["target_clearance"], 1.5)
+        self.assertAlmostEqual(result["data"]["descent_percent"], 90.0)
+        sent_commands = [item[0] for item in sender.commands]
+        self.assertIn("G90 G21", sent_commands)
+        self.assertIn("G0 Z1.500", sent_commands)
+
+    def test_prepare_manual_xy_does_not_move_x_or_y(self):
+        sender = _ProbeSender(initial_status={"state": "Idle", "WPos": "4.000,5.000,15.000"})
+        profile = {"probe": {"block_height": 20.0}}
+
+        with patch("RouterKing.ai.actions._get_sender", return_value=sender):
+            with patch("RouterKing.ai.actions.grbl_load_machine_profile", return_value=(profile, "/tmp/machine_profile.json")):
+                _action_machine_prepare_manual_xy(
+                    {
+                        "type": "machine_prepare_manual_xy",
+                        "target_clearance": 2.0,
+                        "confirm": True,
+                    },
+                    {},
+                )
+
+        sent_commands = [item[0] for item in sender.commands]
+        self.assertIn("G0 Z2.000", sent_commands)
+        self.assertFalse(any(" X" in command or " Y" in command for command in sent_commands))
 
 
 class TestProbeConfigAction(unittest.TestCase):
