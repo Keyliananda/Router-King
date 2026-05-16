@@ -83,6 +83,30 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "routerking_cam_list_setups",
+        "description": "Read CAM jobs/setups in the active or named FreeCAD document without modifying them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "document": {"type": "string", "description": "Optional FreeCAD document name. Defaults to the active document."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_cam_list_operations",
+        "description": "Read CAM operations for all setups or one setup without generating toolpaths or modifying the document.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "setup_id": {"type": "string", "description": "Optional setup/job name or label to filter operations."},
+                "include_paths": {"type": "boolean", "default": False, "description": "Include a short G-code preview from operation paths."},
+                "include_properties": {"type": "boolean", "default": True, "description": "Include known CAM operation properties."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "routerking_analyze_selection",
         "description": "Analyze the current FreeCAD selection using RouterKing geometry checks.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},

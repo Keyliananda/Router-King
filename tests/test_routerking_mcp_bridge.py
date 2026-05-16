@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from RouterKing.mcp.bridge import ACTION_REGISTRY, RouterKingBridge
 
@@ -62,6 +63,53 @@ class StubTransaction:
         return True
 
 
+class StubPath:
+    def __init__(self, gcode):
+        self._gcode = gcode
+
+    def toGCode(self):
+        return self._gcode
+
+
+class StubCamOperation:
+    def __init__(self, name, label, gcode):
+        self.Name = name
+        self.Label = label
+        self.TypeId = "Path::FeaturePython"
+        self.Path = StubPath(gcode)
+        self.Base = "Body.Face1"
+        self.Active = True
+        self.StartDepth = 0.0
+        self.FinalDepth = -1.0
+        self.StepDown = 1.0
+        self.HorizFeed = 800.0
+        self.VertFeed = 300.0
+
+
+class StubCamGroup:
+    def __init__(self, children):
+        self.Name = "Operations"
+        self.Label = "Operations"
+        self.TypeId = "App::DocumentObjectGroup"
+        self.Group = children
+        self.OutList = children
+
+
+class StubCamJob:
+    def __init__(self):
+        self.Name = "Job001"
+        self.Label = "Setup 1"
+        self.TypeId = "Path::Job"
+        self.Path = StubPath("G21\nG0 X0")
+        self.Model = "Body"
+        self.PostProcessor = "grbl_post"
+        self.OutputFile = "/tmp/job001.nc"
+        self._profile = StubCamOperation("Profile001", "Outside Profile", "G1 X1\nG1 Y1")
+        self._pocket = StubCamOperation("Pocket001", "Pocket", "G1 X2\nG1 Y2")
+        self.Operations = StubCamGroup([self._profile, self._pocket])
+        self.OutList = [self.Operations]
+
+
 class TestRouterKingMcpBridge(unittest.TestCase):
     def test_list_actions_returns_registry(self):
         bridge = RouterKingBridge(
@@ -86,6 +134,62 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         kinds = {item["type"] for item in response["data"]["operation_kinds"]}
         self.assertEqual(kinds, {"profile", "pocket", "drilling"})
         self.assertIn("routerking_cam_postprocess", response["data"]["mcp_pipeline"])
+
+    def test_cam_list_setups_returns_read_only_setup_summary(self):
+        called = []
+        job = StubCamJob()
+        app = SimpleNamespace(ActiveDocument=SimpleNamespace(Name="Doc", Objects=[job]))
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: called.append(actions),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        with unittest.mock.patch.dict("sys.modules", {"FreeCAD": app}):
+            response = bridge.cam_list_setups()
+        self.assertTrue(response["success"])
+        self.assertEqual(called, [])
+        self.assertEqual(len(response["data"]["setups"]), 1)
+        setup = response["data"]["setups"][0]
+        self.assertEqual(setup["name"], "Job001")
+        self.assertEqual(setup["label"], "Setup 1")
+        self.assertEqual(setup["operation_count"], 2)
+        self.assertEqual(setup["post_processor"], "grbl_post")
+
+    def test_cam_list_operations_returns_operations_for_setup(self):
+        job = StubCamJob()
+        app = SimpleNamespace(ActiveDocument=SimpleNamespace(Name="Doc", Objects=[job]))
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        with unittest.mock.patch.dict("sys.modules", {"FreeCAD": app}):
+            response = bridge.cam_list_operations(setup_id="Job001", include_paths=True)
+        self.assertTrue(response["success"])
+        operations = response["data"]["operations"]
+        self.assertEqual(len(operations), 2)
+        self.assertEqual(operations[0]["setup_id"], "Job001")
+        self.assertEqual(operations[0]["operation_type"], "profile")
+        self.assertEqual(operations[0]["gcode_line_count"], 2)
+        self.assertIn("gcode_preview", operations[0])
+        self.assertEqual(operations[0]["properties"]["FinalDepth"], -1.0)
+
+    def test_cam_list_operations_unknown_setup_returns_warning(self):
+        job = StubCamJob()
+        app = SimpleNamespace(ActiveDocument=SimpleNamespace(Name="Doc", Objects=[job]))
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+        with unittest.mock.patch.dict("sys.modules", {"FreeCAD": app}):
+            response = bridge.cam_list_operations(setup_id="Missing")
+        self.assertTrue(response["success"])
+        self.assertEqual(response["data"]["operations"], [])
+        self.assertIn("CAM setup not found: Missing", response["errors"])
 
     def test_apply_actions_rejects_unknown_action(self):
         bridge = RouterKingBridge(

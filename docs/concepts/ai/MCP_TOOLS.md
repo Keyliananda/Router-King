@@ -69,11 +69,63 @@ Liefert lesend, welche CAM-Unterstuetzung der aktuelle RouterKing-/FreeCAD-Konte
 - erwartetes Operation-Schema
 - Default-CAM- und Simple-Engine-Settings
 - Postprocessor-Liste
-- empfohlene MCP-Pipeline fuer CAM bis Maschinenvalidierung
+- empfohlene MCP-Pipeline fuer CAM bis Maschinenvalidierung:
+  erst `routerking_cam_list_setups`, dann `routerking_cam_list_operations`,
+  danach mutierende CAM-Tools oder Postprocessing
 
 ```json
 {}
 ```
+
+#### `routerking_cam_list_setups`
+
+Listet vorhandene CAM-Jobs/Setups im aktiven oder benannten FreeCAD-Dokument.
+Risikoklasse: `read`. Das Tool erzeugt keine Jobs, Operationen oder Toolpaths.
+
+```json
+{
+  "document": "Unnamed"
+}
+```
+
+`document` ist optional. Ohne Angabe wird das aktive Dokument verwendet.
+
+Die Antwort enthaelt `setups[]` mit Feldern wie:
+
+- `id`, `name`, `label`, `type`
+- `operation_count`
+- `operations` (Operation-IDs)
+- `path_available`, `gcode_line_count`
+- `post_processor`, `output_path`
+- `model`
+
+#### `routerking_cam_list_operations`
+
+Listet vorhandene CAM-Operationen fuer alle Setups oder fuer ein einzelnes
+Setup. Risikoklasse: `read`. Das Tool recomputet nichts, erzeugt keine
+Toolpaths und postprocessed keinen G-Code.
+
+```json
+{
+  "setup_id": "Job001",
+  "include_paths": false,
+  "include_properties": true
+}
+```
+
+Alle Parameter sind optional. `include_paths=true` liefert nur eine kurze
+G-Code-Vorschau je Operation, keinen vollstaendigen Export.
+
+Die Antwort enthaelt `operations[]` mit Feldern wie:
+
+- `id`, `name`, `label`, `type`
+- `operation_type`
+- `setup_id`
+- `enabled`
+- `base`
+- `path_available`, `gcode_line_count`
+- `properties`
+- optional `gcode_preview`
 
 #### `routerking_analyze_selection`
 

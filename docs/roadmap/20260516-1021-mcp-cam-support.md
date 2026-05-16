@@ -16,12 +16,19 @@ erst danach Maschinenvalidierung oder Streaming ausfuehren.
 - [x] Operation-Payload in der Doku auf `type/base/properties` klarziehen.
 - [x] Tests fuer Tool-Schema/Registry-Konsistenz und CAM-Wrapper ergaenzen.
 
+## Iteration 2 -- CAM-Projektinspektion
+
+- [x] `routerking_cam_list_setups`: vorhandene CAM-Jobs/Setups im aktiven oder
+  benannten Dokument read-only auflisten.
+- [x] `routerking_cam_list_operations`: Operationen pro Setup inklusive Typ,
+  Enabled-Status, Base-Geometrie, Path-Status und wichtigen Properties read-only
+  ausgeben.
+- [x] Beide Tools als side-effect-freie Inspektionsschritte vor mutierenden
+  CAM-Aktionen dokumentieren.
+- [x] Tests fuer Bridge-Serializer, Wrapper und stdio-Schemas ergaenzen.
+
 ## Naechste Iterationen
 
-- [ ] `routerking_cam_list_setups`: vorhandene CAM-Jobs/Setups im aktiven Dokument
-  auflisten.
-- [ ] `routerking_cam_list_operations`: Operationen pro Job inklusive Typ,
-  Enabled-Status, Base-Geometrie und wichtigsten Properties ausgeben.
 - [ ] `routerking_cam_inspect_operation`: eine Operation mit Pfad-/G-Code-Auszug
   und Warnungen inspizieren.
 - [ ] `routerking_cam_create_setup`: CAM-Job/Setup ohne sofortigen Postprocess
@@ -41,6 +48,11 @@ erst danach Maschinenvalidierung oder Streaming ausfuehren.
 Agenten. Vor CAM-Arbeit kann der Agent damit pruefen, ob FreeCAD, GUI und CAM/Path
 im aktuellen Kontext verfuegbar sind, welche Operationstypen RouterKing aktuell
 unterstuetzt und welche Default-Werte fuer CAM und Simple-Fallback gelten.
+
+`routerking_cam_list_setups` und `routerking_cam_list_operations` ergaenzen diese
+Planung um Projektinspektion. Agenten koennen damit vorhandene Jobs, Operationen,
+Base-Geometrie, Enabled-Status, relevante Properties und Path/G-Code-Status
+erkennen, bevor sie Setups oder Operationen veraendern.
 
 Grenze: Das Tool erzeugt noch keine Setups oder Operationen. Es beschreibt den
 aktuellen Support und die empfohlene Pipeline. Explizite Setup-/Operation-CRUD-

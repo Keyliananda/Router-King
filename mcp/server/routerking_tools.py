@@ -33,6 +33,29 @@ def routerking_cam_capabilities(connection: Optional[FreeCADConnection] = None):
     return (connection or FreeCADConnection()).invoke("cam_capabilities")
 
 
+def routerking_cam_list_setups(
+    *,
+    document: Optional[str] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    return (connection or FreeCADConnection()).invoke("cam_list_setups", document=document)
+
+
+def routerking_cam_list_operations(
+    *,
+    setup_id: Optional[str] = None,
+    include_paths: bool = False,
+    include_properties: bool = True,
+    connection: Optional[FreeCADConnection] = None,
+):
+    return (connection or FreeCADConnection()).invoke(
+        "cam_list_operations",
+        setup_id=setup_id,
+        include_paths=bool(include_paths),
+        include_properties=bool(include_properties),
+    )
+
+
 def routerking_apply_actions(
     payload: Any,
     *,

@@ -30,6 +30,8 @@ from .routerking_tools import (
     routerking_apply_actions,
     routerking_cam_capabilities,
     routerking_cam_generate_job,
+    routerking_cam_list_operations,
+    routerking_cam_list_setups,
     routerking_cam_postprocess,
     routerking_console_exec,
     routerking_console_read,
@@ -58,6 +60,16 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
             connection=bound_connection,
         ),
         "routerking_cam_capabilities": lambda **_: routerking_cam_capabilities(connection=bound_connection),
+        "routerking_cam_list_setups": lambda **payload: routerking_cam_list_setups(
+            document=payload.get("document"),
+            connection=bound_connection,
+        ),
+        "routerking_cam_list_operations": lambda **payload: routerking_cam_list_operations(
+            setup_id=payload.get("setup_id"),
+            include_paths=payload.get("include_paths", False),
+            include_properties=payload.get("include_properties", True),
+            connection=bound_connection,
+        ),
         "routerking_run_script": lambda **payload: routerking_run_script(
             code=payload.get("code", ""),
             connection=bound_connection,

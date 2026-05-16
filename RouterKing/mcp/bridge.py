@@ -363,6 +363,39 @@ class RouterKingBridge:
             errors=warnings,
         )
 
+    def cam_list_setups(self, document: str | None = None) -> Dict[str, Any]:
+        """List CAM jobs/setups in the active or named FreeCAD document."""
+        payload = run_on_main_thread(lambda: _collect_cam_setups(document=document))
+        warnings = payload.get("warnings") or []
+        return make_response(
+            True,
+            f"Found {len(payload.get('setups') or [])} CAM setup(s).",
+            data=payload,
+            errors=warnings,
+        )
+
+    def cam_list_operations(
+        self,
+        setup_id: str | None = None,
+        include_paths: bool = False,
+        include_properties: bool = True,
+    ) -> Dict[str, Any]:
+        """List CAM operations, optionally scoped to a setup/job."""
+        payload = run_on_main_thread(
+            lambda: _collect_cam_operations(
+                setup_id=setup_id,
+                include_paths=bool(include_paths),
+                include_properties=bool(include_properties),
+            )
+        )
+        warnings = payload.get("warnings") or []
+        return make_response(
+            True,
+            f"Found {len(payload.get('operations') or [])} CAM operation(s).",
+            data=payload,
+            errors=warnings,
+        )
+
     def run_script(self, code: str) -> Dict[str, Any]:
         """Execute arbitrary Python code in the FreeCAD context.
 
@@ -719,6 +752,8 @@ def _collect_cam_capabilities() -> Dict[str, Any]:
         },
         "mcp_pipeline": [
             "routerking_cam_capabilities",
+            "routerking_cam_list_setups",
+            "routerking_cam_list_operations",
             "routerking_cam_generate_job",
             "routerking_generate_gcode",
             "routerking_cam_postprocess",
@@ -735,3 +770,317 @@ def _module_available(name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _collect_cam_setups(document: str | None = None) -> Dict[str, Any]:
+    warnings: List[str] = []
+    doc = _resolve_document(document, warnings)
+    if doc is None:
+        return {"document": None, "setups": [], "warnings": warnings}
+
+    setups = [_serialize_cam_setup(obj) for obj in _iter_document_objects(doc) if _looks_like_cam_setup(obj)]
+    return {
+        "document": _document_name(doc),
+        "setups": setups,
+        "warnings": warnings,
+    }
+
+
+def _collect_cam_operations(
+    *,
+    setup_id: str | None = None,
+    include_paths: bool = False,
+    include_properties: bool = True,
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    doc = _resolve_document(None, warnings)
+    if doc is None:
+        return {
+            "document": None,
+            "setup_id": setup_id,
+            "operations": [],
+            "warnings": warnings,
+        }
+
+    setups = [obj for obj in _iter_document_objects(doc) if _looks_like_cam_setup(obj)]
+    if setup_id:
+        setups = [obj for obj in setups if _object_matches_id(obj, setup_id)]
+        if not setups:
+            warnings.append(f"CAM setup not found: {setup_id}")
+
+    operations = []
+    for setup in setups:
+        for op in _collect_operations_for_setup(setup):
+            operations.append(
+                _serialize_cam_operation(
+                    op,
+                    setup=setup,
+                    include_paths=include_paths,
+                    include_properties=include_properties,
+                )
+            )
+
+    return {
+        "document": _document_name(doc),
+        "setup_id": setup_id,
+        "operations": operations,
+        "warnings": warnings,
+    }
+
+
+def _resolve_document(document: str | None, warnings: List[str]) -> Any | None:
+    app = _get_freecad_app()
+    if app is None:
+        warnings.append("FreeCAD is not available.")
+        return None
+
+    if document:
+        list_docs = getattr(app, "listDocuments", None)
+        documents = list_docs() if callable(list_docs) else {}
+        if isinstance(documents, Mapping):
+            doc = documents.get(document)
+            if doc is not None:
+                return doc
+        warnings.append(f"Document not found: {document}")
+        return None
+
+    doc = getattr(app, "ActiveDocument", None)
+    if doc is None:
+        warnings.append("No active document.")
+    return doc
+
+
+def _get_freecad_app() -> Any | None:
+    try:
+        return importlib.import_module("FreeCAD")
+    except Exception:
+        return None
+
+
+def _iter_document_objects(doc: Any) -> List[Any]:
+    return list(getattr(doc, "Objects", []) or [])
+
+
+def _document_name(doc: Any) -> str | None:
+    return getattr(doc, "Name", None) or getattr(doc, "Label", None)
+
+
+def _looks_like_cam_setup(obj: Any) -> bool:
+    if obj is None:
+        return False
+    type_id = str(getattr(obj, "TypeId", "") or "")
+    name = str(getattr(obj, "Name", "") or "").lower()
+    if "Path::Job" in type_id or "PathJob" in type_id:
+        return True
+    if hasattr(obj, "Operations") and ("job" in type_id.lower() or "job" in name):
+        return True
+    return hasattr(obj, "Operations") and hasattr(obj, "Path")
+
+
+def _serialize_cam_setup(job: Any) -> Dict[str, Any]:
+    operations = _collect_operations_for_setup(job)
+    path_obj = getattr(job, "Path", None)
+    gcode = _path_to_gcode(path_obj)
+    return {
+        "id": _object_id(job),
+        "name": getattr(job, "Name", None),
+        "label": getattr(job, "Label", None) or getattr(job, "Name", None),
+        "type": getattr(job, "TypeId", job.__class__.__name__),
+        "operation_count": len(operations),
+        "operations": [_object_id(op) for op in operations],
+        "path_available": bool(path_obj is not None),
+        "gcode_line_count": _line_count(gcode),
+        "post_processor": _first_attr(job, ("PostProcessor", "PostProcessorName", "Postprocessor", "OutputPost")),
+        "output_path": _first_attr(job, ("OutputFile", "OutputPath", "PathOutput", "FileName")),
+        "model": _serialize_ref(_first_attr(job, ("Model", "Base", "BaseObject"))),
+    }
+
+
+def _collect_operations_for_setup(job: Any) -> List[Any]:
+    roots = []
+    operations = getattr(job, "Operations", None)
+    if operations is not None:
+        roots.append(operations)
+    roots.extend(list(getattr(job, "OutList", []) or []))
+
+    seen = set()
+    queue = list(roots)
+    ordered = []
+    while queue:
+        obj = queue.pop(0)
+        oid = id(obj)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        ordered.append(obj)
+        for children_attr in ("Group", "OutList"):
+            for child in list(getattr(obj, children_attr, []) or []):
+                if id(child) not in seen:
+                    queue.append(child)
+
+    return [obj for obj in ordered if _looks_like_cam_operation(job, obj)]
+
+
+def _looks_like_cam_operation(job: Any, obj: Any) -> bool:
+    if obj is None or obj is job:
+        return False
+    type_id = str(getattr(obj, "TypeId", "") or "")
+    name = str(getattr(obj, "Name", "") or "").lower()
+    if "Path::Tool" in type_id or "tool" in name and not hasattr(obj, "Path"):
+        return False
+    if "Path::Feature" in type_id and hasattr(obj, "Path"):
+        return True
+    if hasattr(obj, "Path") and name.startswith(("profile", "pocket", "drilling", "adaptive", "contour")):
+        return True
+    return any(_has_non_empty_attr(obj, attr) for attr in ("Base", "BaseGeometry", "BaseObject")) and hasattr(obj, "Path")
+
+
+def _serialize_cam_operation(
+    op: Any,
+    *,
+    setup: Any,
+    include_paths: bool,
+    include_properties: bool,
+) -> Dict[str, Any]:
+    path_obj = getattr(op, "Path", None)
+    gcode = _path_to_gcode(path_obj)
+    payload: Dict[str, Any] = {
+        "id": _object_id(op),
+        "name": getattr(op, "Name", None),
+        "label": getattr(op, "Label", None) or getattr(op, "Name", None),
+        "type": getattr(op, "TypeId", op.__class__.__name__),
+        "operation_type": _infer_operation_type(op),
+        "setup_id": _object_id(setup),
+        "enabled": _coerce_bool(_first_attr(op, ("Active", "Enabled", "Visibility")), default=True),
+        "base": _serialize_ref(_first_attr(op, ("Base", "BaseGeometry", "BaseObject"))),
+        "path_available": bool(path_obj is not None),
+        "gcode_line_count": _line_count(gcode),
+    }
+    if include_properties:
+        payload["properties"] = _serialize_operation_properties(op)
+    if include_paths:
+        payload["gcode_preview"] = "\n".join(gcode.splitlines()[:30])
+    return payload
+
+
+def _serialize_operation_properties(op: Any) -> Dict[str, Any]:
+    names = (
+        "Side",
+        "Direction",
+        "StartDepth",
+        "FinalDepth",
+        "StepDown",
+        "PeckDepth",
+        "HorizFeed",
+        "VertFeed",
+        "Feed",
+        "FeedRate",
+        "ToolController",
+        "Comment",
+    )
+    data = {}
+    for name in names:
+        if hasattr(op, name):
+            data[name] = _jsonable(getattr(op, name))
+    return data
+
+
+def _infer_operation_type(op: Any) -> str:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            getattr(op, "Name", ""),
+            getattr(op, "Label", ""),
+            getattr(op, "TypeId", ""),
+            op.__class__.__name__,
+            getattr(getattr(op, "Proxy", None), "__class__", type("", (), {})).__name__,
+        )
+    ).lower()
+    for kind in ("profile", "pocket", "drilling", "adaptive", "contour"):
+        if kind in text:
+            return kind
+    return "unknown"
+
+
+def _path_to_gcode(path_obj: Any) -> str:
+    to_gcode = getattr(path_obj, "toGCode", None) if path_obj is not None else None
+    if not callable(to_gcode):
+        return ""
+    try:
+        result = to_gcode()
+    except Exception:
+        return ""
+    if isinstance(result, bytes):
+        return result.decode("utf-8", errors="replace")
+    if isinstance(result, str):
+        return result
+    if isinstance(result, (list, tuple)):
+        return "\n".join(str(line) for line in result)
+    if result is None:
+        return ""
+    return str(result)
+
+
+def _object_id(obj: Any) -> str:
+    return str(getattr(obj, "Name", None) or getattr(obj, "Label", None) or id(obj))
+
+
+def _object_matches_id(obj: Any, value: str) -> bool:
+    needle = str(value)
+    return needle in {
+        str(getattr(obj, "Name", "")),
+        str(getattr(obj, "Label", "")),
+        _object_id(obj),
+    }
+
+
+def _first_attr(obj: Any, names: Iterable[str]) -> Any:
+    for name in names:
+        if hasattr(obj, name):
+            value = getattr(obj, name)
+            if value not in (None, "", (), [], {}):
+                return value
+    return None
+
+
+def _has_non_empty_attr(obj: Any, name: str) -> bool:
+    return _first_attr(obj, (name,)) is not None
+
+
+def _serialize_ref(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_serialize_ref(item) for item in value]
+    return {
+        "name": getattr(value, "Name", None),
+        "label": getattr(value, "Label", None) or getattr(value, "Name", None),
+        "type": getattr(value, "TypeId", value.__class__.__name__),
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(val) for key, val in value.items()}
+    for attr in ("Value", "Name", "Label"):
+        if hasattr(value, attr):
+            return _jsonable(getattr(value, attr))
+    return str(value)
+
+
+def _line_count(text: str) -> int:
+    return len([line for line in str(text or "").splitlines() if line.strip()])
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return bool(value)
