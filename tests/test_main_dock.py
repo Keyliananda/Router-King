@@ -682,6 +682,54 @@ class TestMainDock(unittest.TestCase):
         self.assertIn("; cut start target: X12 Y-3", widget._gcode_edit.toPlainText())
         widget._disable_template_snap.assert_called_once_with()
 
+    def test_read_template_controls_keeps_cut_start_and_records_source(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._last_template_spec = main_dock.TemplateSpec(
+            width=20.0,
+            height=10.0,
+            depth=2.0,
+            tool_diameter=2.0,
+            step_down=1.0,
+            step_over=1.0,
+            feed_rate=400.0,
+            plunge_rate=100.0,
+            safe_z=5.0,
+            cut_start_x=4.0,
+            cut_start_y=5.0,
+        )
+        widget._template_controls = {
+            "name": _DummyLineEdit("CAD Pocket"),
+            "width": _DummySpin(230.0),
+            "height": _DummySpin(160.0),
+            "depth": _DummySpin(4.0),
+            "tool_diameter": _DummySpin(3.0),
+            "step_down": _DummySpin(1.0),
+            "step_over": _DummySpin(1.05),
+            "feed_rate": _DummySpin(800.0),
+            "plunge_rate": _DummySpin(300.0),
+            "safe_z": _DummySpin(6.0),
+            "start_z": _DummySpin(0.0),
+            "start_x": _DummySpin(1.0),
+            "start_y": _DummySpin(2.0),
+            "origin": _DummyCombo("center"),
+            "swap_xy": _DummyCheckBox(True),
+        }
+        widget._selected_template_source = mock.Mock(
+            return_value={"document": "tee-tablett", "object": "Body", "feature": "Pocket002"}
+        )
+
+        spec = widget._read_rectangle_template_controls()
+
+        self.assertEqual(spec.name, "CAD Pocket")
+        self.assertEqual(spec.width, 230.0)
+        self.assertTrue(spec.swap_xy)
+        self.assertEqual(spec.cut_start_x, 4.0)
+        self.assertEqual(spec.cut_start_y, 5.0)
+        self.assertEqual(spec.source_document, "tee-tablett")
+        self.assertEqual(spec.source_object, "Body")
+        self.assertEqual(spec.source_feature, "Pocket002")
+
     def test_template_cut_start_candidates_ignore_safe_z_points(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)

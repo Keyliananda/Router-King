@@ -95,6 +95,16 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIn("G0 X18.5 Y18.5", program.lines[:16])
         self.assertEqual(program.lines[-2:], ["G0 X0 Y0", "M2"])
 
+    def test_rectangle_pocket_records_cad_source_in_header(self):
+        spec = self._forty_mm_spec()
+        spec.source_document = "tee-tablett"
+        spec.source_object = "Body"
+        spec.source_feature = "Pocket002"
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; source: document=tee-tablett, object=Body, feature=Pocket002", program.lines)
+
     def test_square_pocket_accepts_size_keyword(self):
         program = square_pocket(
             size=40.0,
@@ -200,6 +210,9 @@ class TestPocketTemplates(unittest.TestCase):
             {"cut_start_x": "left", "cut_start_y": 1.0},
             {"cut_start_x": 1.0},
             {"cut_start_y": 1.0},
+            {"source_document": 1},
+            {"source_object": 1},
+            {"source_feature": 1},
         ]
 
         for overrides in cases:

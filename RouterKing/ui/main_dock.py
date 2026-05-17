@@ -862,6 +862,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._preview_refresh_timer = None
         self._preview_dialog = None
         self._last_template_spec = None
+        self._template_controls = {}
+        self._template_group = None
+        self._template_source_combo = None
+        self._template_source_summary = None
         self._template_snap_active = False
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
@@ -1286,6 +1290,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         preview_row.addStretch(1)
         layout.addLayout(preview_row)
 
+        self._template_group = self._build_template_parameters_group()
+        layout.addWidget(self._template_group)
+
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self._gcode_edit = QtWidgets.QPlainTextEdit()
         self._gcode_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
@@ -1330,6 +1337,82 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._update_job_controls()
         self._update_machine_controls()
         self._refresh_cam_status()
+
+    def _build_template_parameters_group(self):
+        group = QtWidgets.QGroupBox("Rectangle Pocket Parameters")
+        layout = QtWidgets.QVBoxLayout(group)
+        layout.setSpacing(4)
+
+        source_row = QtWidgets.QHBoxLayout()
+        source_row.addWidget(QtWidgets.QLabel("CAD source"))
+        self._template_source_combo = QtWidgets.QComboBox()
+        self._template_source_combo.setMinimumWidth(240)
+        self._template_source_summary = QtWidgets.QLabel("No CAD source selected")
+        self._template_source_summary.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        refresh_source_btn = QtWidgets.QPushButton("Refresh CAD Sources")
+        source_row.addWidget(self._template_source_combo, 1)
+        source_row.addWidget(refresh_source_btn)
+        source_row.addWidget(self._template_source_summary, 2)
+        layout.addLayout(source_row)
+
+        form = QtWidgets.QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(4)
+        default = self._default_rectangle_template_spec()
+        controls = {
+            "name": QtWidgets.QLineEdit(default.name or ""),
+            "width": self._template_spin(default.width, 0.001, 10000.0),
+            "height": self._template_spin(default.height, 0.001, 10000.0),
+            "depth": self._template_spin(default.depth, 0.001, 1000.0),
+            "tool_diameter": self._template_spin(default.tool_diameter, 0.001, 1000.0),
+            "step_down": self._template_spin(default.step_down, 0.001, 1000.0),
+            "step_over": self._template_spin(default.step_over, 0.001, 1000.0),
+            "feed_rate": self._template_spin(default.feed_rate, 0.001, 50000.0, decimals=1),
+            "plunge_rate": self._template_spin(default.plunge_rate, 0.001, 50000.0, decimals=1),
+            "safe_z": self._template_spin(default.safe_z, -1000.0, 1000.0),
+            "start_z": self._template_spin(default.start_z, -1000.0, 1000.0),
+            "start_x": self._template_spin(default.start_x, -10000.0, 10000.0),
+            "start_y": self._template_spin(default.start_y, -10000.0, 10000.0),
+            "origin": QtWidgets.QComboBox(),
+            "swap_xy": QtWidgets.QCheckBox("Swap X/Y machining direction"),
+        }
+        controls["origin"].addItems(["center", "lower_left"])
+        controls["origin"].setCurrentText(default.origin)
+        controls["swap_xy"].setChecked(bool(default.swap_xy))
+        self._template_controls = controls
+
+        rows = [
+            ("Name", "name", "Width (mm)", "width", "Length (mm)", "height"),
+            ("Depth (mm)", "depth", "Cutter diameter (mm)", "tool_diameter", "Step down (mm)", "step_down"),
+            ("Step over (mm)", "step_over", "Feed (mm/min)", "feed_rate", "Plunge (mm/min)", "plunge_rate"),
+            ("Safe Z (mm)", "safe_z", "Start Z (mm)", "start_z", "Origin", "origin"),
+            ("Start X (mm)", "start_x", "Start Y (mm)", "start_y", "", "swap_xy"),
+        ]
+        for row_index, row in enumerate(rows):
+            for col_index in range(0, len(row), 2):
+                label = row[col_index]
+                key = row[col_index + 1]
+                if label:
+                    form.addWidget(QtWidgets.QLabel(label), row_index, col_index)
+                form.addWidget(controls[key], row_index, col_index + 1)
+        layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self._template_apply_btn = QtWidgets.QPushButton("Apply Template")
+        self._template_reset_btn = QtWidgets.QPushButton("Reset Tee-Tablett")
+        button_row.addWidget(self._template_apply_btn)
+        button_row.addWidget(self._template_reset_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        refresh_source_btn.clicked.connect(self._refresh_template_cad_sources)
+        self._template_source_combo.currentIndexChanged.connect(self._update_template_source_summary)
+        self._template_apply_btn.clicked.connect(self._on_insert_gcode_template)
+        self._template_reset_btn.clicked.connect(self._on_reset_rectangle_template_controls)
+        self._populate_rectangle_template_controls(default)
+        self._refresh_template_cad_sources()
+        _make_collapsible(group, collapsed=True)
+        return group
 
     def _refresh_cam_status(self):
         try:
@@ -4576,7 +4659,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _on_insert_gcode_template(self):
         if self._gcode_edit.toPlainText().strip() and not self._confirm_replace_gcode():
             return
-        spec = self._show_rectangle_template_dialog()
+        spec = self._read_rectangle_template_controls()
+        if spec is None:
+            spec = self._show_rectangle_template_dialog()
         if spec is None:
             return
         try:
@@ -4592,8 +4677,78 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             f"{spec.width:g} x {spec.height:g} x {spec.depth:g} mm.",
             force=True,
         )
+        self._populate_rectangle_template_controls(spec)
         self._update_preview()
         self._update_job_controls()
+
+    def _read_rectangle_template_controls(self):
+        controls = getattr(self, "_template_controls", None)
+        if not controls:
+            return None
+        source = self._selected_template_source()
+        previous = getattr(self, "_last_template_spec", None)
+        cut_start_x = previous.cut_start_x if previous is not None else None
+        cut_start_y = previous.cut_start_y if previous is not None else None
+        return TemplateSpec(
+            name=controls["name"].text().strip() or None,
+            width=controls["width"].value(),
+            height=controls["height"].value(),
+            depth=controls["depth"].value(),
+            tool_diameter=controls["tool_diameter"].value(),
+            step_down=controls["step_down"].value(),
+            step_over=controls["step_over"].value(),
+            feed_rate=controls["feed_rate"].value(),
+            plunge_rate=controls["plunge_rate"].value(),
+            safe_z=controls["safe_z"].value(),
+            start_z=controls["start_z"].value(),
+            origin=controls["origin"].currentText(),
+            start_x=controls["start_x"].value(),
+            start_y=controls["start_y"].value(),
+            swap_xy=controls["swap_xy"].isChecked(),
+            cut_start_x=cut_start_x,
+            cut_start_y=cut_start_y,
+            source_document=source.get("document"),
+            source_object=source.get("object"),
+            source_feature=source.get("feature"),
+        )
+
+    def _populate_rectangle_template_controls(self, spec):
+        controls = getattr(self, "_template_controls", None)
+        if not controls:
+            return
+        controls["name"].setText(spec.name or "")
+        for key in (
+            "width",
+            "height",
+            "depth",
+            "tool_diameter",
+            "step_down",
+            "step_over",
+            "feed_rate",
+            "plunge_rate",
+            "safe_z",
+            "start_z",
+            "start_x",
+            "start_y",
+        ):
+            controls[key].setValue(float(getattr(spec, key)))
+        controls["origin"].setCurrentText(spec.origin)
+        controls["swap_xy"].setChecked(bool(spec.swap_xy))
+        self._select_template_source(spec)
+
+    def _on_reset_rectangle_template_controls(self):
+        spec = self._default_rectangle_template_spec()
+        spec = replace(
+            spec,
+            cut_start_x=None,
+            cut_start_y=None,
+            source_document=None,
+            source_object=None,
+            source_feature=None,
+        )
+        self._populate_rectangle_template_controls(spec)
+        self._last_template_spec = spec
+        self._append_console("Rectangle template parameters reset to Tee-Tablett defaults.", force=True)
 
     def _show_rectangle_template_dialog(self):
         default = self._default_rectangle_template_spec()
@@ -4677,6 +4832,99 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return replace(self._last_template_spec)
         safe_z = max(self._manual_start_safe_z(), 6.0)
         return rectangle_pocket_preset("tee_tablett", safe_z=safe_z)
+
+    def _refresh_template_cad_sources(self):
+        combo = getattr(self, "_template_source_combo", None)
+        if combo is None:
+            return
+        current = self._selected_template_source()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Manual / no CAD source", {})
+        for source in self._template_cad_sources():
+            combo.addItem(source["label"], source)
+        combo.blockSignals(False)
+        self._select_template_source_data(current)
+        self._update_template_source_summary()
+
+    def _template_cad_sources(self):
+        document = getattr(App, "ActiveDocument", None)
+        if document is None:
+            return []
+        document_name = getattr(document, "Name", "") or getattr(document, "Label", "") or "ActiveDocument"
+        objects = list(getattr(document, "Objects", []) or [])
+        sources = []
+        seen = set()
+        for obj in objects:
+            object_name = getattr(obj, "Name", "") or getattr(obj, "Label", "")
+            if not object_name:
+                continue
+            label = getattr(obj, "Label", "") or object_name
+            type_id = getattr(obj, "TypeId", "")
+            key = (document_name, object_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            display = f"{document_name}: {object_name}"
+            if label != object_name:
+                display += f" ({label})"
+            if type_id:
+                display += f" - {type_id}"
+            sources.append({
+                "label": display,
+                "document": document_name,
+                "object": object_name,
+                "feature": label if label != object_name else None,
+            })
+        return sources
+
+    def _selected_template_source(self):
+        combo = getattr(self, "_template_source_combo", None)
+        if combo is None:
+            return {}
+        try:
+            data = combo.itemData(combo.currentIndex())
+        except Exception:
+            data = None
+        return data if isinstance(data, dict) else {}
+
+    def _select_template_source(self, spec):
+        target = {
+            "document": spec.source_document,
+            "object": spec.source_object,
+            "feature": spec.source_feature,
+        }
+        self._select_template_source_data(target)
+        self._update_template_source_summary()
+
+    def _select_template_source_data(self, target):
+        combo = getattr(self, "_template_source_combo", None)
+        if combo is None:
+            return
+        target = target or {}
+        for index in range(combo.count()):
+            data = combo.itemData(index)
+            if not isinstance(data, dict):
+                continue
+            if (
+                data.get("document") == target.get("document")
+                and data.get("object") == target.get("object")
+                and data.get("feature") == target.get("feature")
+            ):
+                combo.setCurrentIndex(index)
+                return
+        combo.setCurrentIndex(0)
+
+    def _update_template_source_summary(self, *_args):
+        label = getattr(self, "_template_source_summary", None)
+        if label is None:
+            return
+        source = self._selected_template_source()
+        if not source:
+            label.setText("G-code header: no CAD source")
+            return
+        parts = [source.get("document"), source.get("object"), source.get("feature")]
+        label.setText("G-code header: " + " / ".join(part for part in parts if part))
 
     def _template_spin(self, value, minimum, maximum, decimals=3):
         spin = QtWidgets.QDoubleSpinBox()
@@ -5206,6 +5454,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._last_template_spec = spec
         self._disable_template_snap()
         self._gcode_edit.setPlainText(program.gcode + "\n")
+        self._populate_rectangle_template_controls(spec)
         self._append_console(
             f"Cut start set from snap: X{point.x:.3f} Y{point.y:.3f}. Template regenerated without moving the pocket.",
             force=True,

@@ -27,6 +27,9 @@ class TemplateSpec:
     swap_xy: bool = False
     cut_start_x: Optional[float] = None
     cut_start_y: Optional[float] = None
+    source_document: Optional[str] = None
+    source_object: Optional[str] = None
+    source_feature: Optional[str] = None
 
 
 _RECTANGLE_POCKET_PRESET_SPECS = {
@@ -113,6 +116,9 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
         "G17",
         f"G0 Z{_fmt(spec.safe_z)}",
     ]
+    source_lines = _source_header_lines(spec)
+    if source_lines:
+        lines[5:5] = source_lines
     if spec.cut_start_x is not None and spec.cut_start_y is not None:
         lines.insert(5, f"; cut start target: X{_fmt(spec.cut_start_x)} Y{_fmt(spec.cut_start_y)}")
 
@@ -216,6 +222,10 @@ def _validate_spec(spec: TemplateSpec) -> None:
         value = getattr(spec, name)
         if value is not None and not isinstance(value, (int, float)):
             raise ValueError(f"{name} must be numeric when set.")
+    for name in ("source_document", "source_object", "source_feature"):
+        value = getattr(spec, name)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{name} must be a string when set.")
 
 
 def _depth_levels(start_z: float, depth: float, step_down: float) -> list[float]:
@@ -291,6 +301,18 @@ def _distance_sq(left: Point2D, right: Point2D) -> float:
     dx = left[0] - right[0]
     dy = left[1] - right[1]
     return dx * dx + dy * dy
+
+
+def _source_header_lines(spec: TemplateSpec) -> list[str]:
+    values = [
+        ("document", spec.source_document),
+        ("object", spec.source_object),
+        ("feature", spec.source_feature),
+    ]
+    parts = [f"{label}={value}" for label, value in values if value]
+    if not parts:
+        return []
+    return [f"; source: {', '.join(parts)}"]
 
 
 def _bounds(spec: TemplateSpec, radius: float) -> tuple[float, float, float, float]:
