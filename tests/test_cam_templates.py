@@ -2,7 +2,14 @@
 
 import unittest
 
-from RouterKing.cam.templates import GcodeProgram, TemplateSpec, rectangle_pocket, square_pocket
+from RouterKing.cam.templates import (
+    GcodeProgram,
+    RECTANGLE_POCKET_PRESETS,
+    TemplateSpec,
+    rectangle_pocket,
+    rectangle_pocket_preset,
+    square_pocket,
+)
 
 
 class TestPocketTemplates(unittest.TestCase):
@@ -28,10 +35,11 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIsInstance(program, GcodeProgram)
         self.assertEqual(program.template, "rectangle_pocket")
         self.assertEqual(program.spec, spec)
-        self.assertEqual(program.lines[:7], [
+        self.assertEqual(program.lines[:8], [
             "; RouterKing rectangle pocket template",
             "; size: 40 x 40 x 5 mm",
             "; tool: 3 mm",
+            "; start: X0 Y0",
             "G21",
             "G90",
             "G17",
@@ -46,6 +54,21 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertEqual(program.lines[-2:], ["G0 X0 Y0", "M2"])
         self.assertEqual(str(program), program.text)
         self.assertEqual(program.gcode, program.text)
+
+    def test_rectangle_pocket_header_uses_name_and_offsets_local_xy_moves(self):
+        spec = self._forty_mm_spec()
+        spec.name = "Offset Test"
+        spec.start_x = 10.0
+        spec.start_y = 20.0
+
+        program = rectangle_pocket(spec)
+
+        self.assertEqual(program.lines[0], "; RouterKing rectangle pocket template: Offset Test")
+        self.assertIn("; start: X10 Y20", program.lines)
+        self.assertIn("G0 X-8.5 Y1.5", program.lines)
+        self.assertIn("G1 X28.5 Y1.5 F500", program.lines)
+        self.assertIn("G1 X28.5 Y38.5 F500", program.lines)
+        self.assertEqual(program.lines[-2:], ["G0 X10 Y20", "M2"])
 
     def test_square_pocket_accepts_size_keyword(self):
         program = square_pocket(
@@ -88,6 +111,45 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIn("G1 X38.5 Y1.5 F500", program.lines)
         self.assertIn("G1 X38.5 Y38.5 F500", program.lines)
 
+    def test_tee_tablett_preset_is_named_and_available_as_fresh_spec(self):
+        self.assertIn("tee_tablett", RECTANGLE_POCKET_PRESETS)
+
+        direct = RECTANGLE_POCKET_PRESETS["tee_tablett"]
+        first = rectangle_pocket_preset("Tee-Tablett")
+        second = rectangle_pocket_preset("tee_tablett")
+        direct.width = 20.0
+        first.width = 10.0
+
+        self.assertEqual(RECTANGLE_POCKET_PRESETS["tee_tablett"].width, 230.0)
+        self.assertEqual(second.name, "Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm")
+        self.assertEqual(second.width, 230.0)
+        self.assertEqual(second.height, 160.0)
+        self.assertEqual(second.depth, 4.0)
+        self.assertEqual(second.tool_diameter, 3.0)
+        self.assertEqual(second.step_down, 1.0)
+        self.assertEqual(second.step_over, 1.05)
+        self.assertEqual(second.feed_rate, 800.0)
+        self.assertEqual(second.plunge_rate, 300.0)
+        self.assertEqual(second.safe_z, 6.0)
+        self.assertEqual(second.origin, "center")
+
+        program = rectangle_pocket(second)
+
+        self.assertEqual(
+            program.lines[0],
+            "; RouterKing rectangle pocket template: Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm",
+        )
+        self.assertIn("G0 X-113.5 Y-78.5", program.lines)
+
+    def test_preset_accepts_overrides(self):
+        spec = rectangle_pocket_preset("tee tablett", start_x=25.0, start_y=30.0)
+        program = rectangle_pocket(spec)
+
+        self.assertEqual(spec.start_x, 25.0)
+        self.assertEqual(spec.start_y, 30.0)
+        self.assertIn("; start: X25 Y30", program.lines)
+        self.assertIn("G0 X-88.5 Y-48.5", program.lines)
+
     def test_program_omits_coordinate_setup_and_probe_commands(self):
         program = rectangle_pocket(self._forty_mm_spec())
         text = program.text.upper()
@@ -108,6 +170,8 @@ class TestPocketTemplates(unittest.TestCase):
             {"safe_z": 0.0},
             {"tool_diameter": 41.0},
             {"origin": "g54"},
+            {"start_x": "left"},
+            {"start_y": None},
         ]
 
         for overrides in cases:

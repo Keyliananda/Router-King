@@ -1,8 +1,10 @@
 import unittest
 
 from RouterKing.ui.gcode_preview import (
+    nearest_preview_snap,
     parse_gcode_preview,
     preview_items,
+    preview_snap_candidates,
     project_point,
     projected_bounds,
     segment_color,
@@ -96,6 +98,68 @@ class TestGcodePreview(unittest.TestCase):
 
         flat = parse_gcode_preview("G90\nG1 X1 Z0")
         self.assertEqual(z_color(0, flat.bounds), (118, 110, 128))
+
+    def test_snap_candidates_include_segment_points_and_feed_direction_changes(self):
+        path = parse_gcode_preview(
+            "\n".join(
+                [
+                    "G90",
+                    "G1 X10 Y0",
+                    "G1 X10 Y5",
+                    "G1 X15 Y5",
+                ]
+            )
+        )
+
+        candidates = preview_snap_candidates(path, "top")
+        self.assertEqual(
+            [candidate.projected for candidate in candidates],
+            [(0.0, -0.0), (10.0, -0.0), (10.0, -5.0), (15.0, -5.0)],
+        )
+
+        first_corner = candidates[1]
+        self.assertEqual(first_corner.point.x, 10.0)
+        self.assertEqual(first_corner.point.y, 0.0)
+        self.assertIn("segment_end", first_corner.reasons)
+        self.assertIn("segment_start", first_corner.reasons)
+        self.assertIn("direction_change", first_corner.reasons)
+        self.assertEqual(first_corner.segment_indices, (0, 1))
+        self.assertEqual(first_corner.line_nos, (2, 3))
+
+    def test_snap_candidates_do_not_mark_collinear_feed_continuations_as_direction_changes(self):
+        path = parse_gcode_preview("G90\nG1 X5 Y0\nG1 X10 Y0")
+
+        candidates = preview_snap_candidates(path, "top")
+        middle = candidates[1]
+
+        self.assertEqual(middle.projected, (5.0, -0.0))
+        self.assertIn("segment_end", middle.reasons)
+        self.assertIn("segment_start", middle.reasons)
+        self.assertNotIn("direction_change", middle.reasons)
+
+    def test_nearest_preview_snap_uses_scene_tolerance(self):
+        path = parse_gcode_preview("G90\nG1 X10 Y0\nG1 X10 Y5")
+
+        match = nearest_preview_snap(path, (10.2, -0.1), "top", scene_tolerance=0.25)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.candidate.projected, (10.0, -0.0))
+        self.assertAlmostEqual(match.distance, 0.22360679775)
+
+        self.assertIsNone(nearest_preview_snap(path, (10.2, -0.1), "top", scene_tolerance=0.1))
+
+    def test_nearest_preview_snap_converts_pixel_tolerance_to_scene_units(self):
+        path = parse_gcode_preview("G90\nG1 X10 Y0")
+        candidates = preview_snap_candidates(path, "top")
+
+        match = nearest_preview_snap(
+            candidates,
+            (9.1, 0.0),
+            pixel_tolerance=2.0,
+            scene_units_per_pixel=0.5,
+        )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match.candidate.point.x, 10.0)
 
 
 if __name__ == "__main__":

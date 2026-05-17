@@ -171,17 +171,36 @@ class _FakeConnectedSender:
 def _load_main_dock_module():
     sys.modules.pop("RouterKing.ui.main_dock", None)
 
+    class _QGraphicsView:
+        ScrollHandDrag = 1
+        NoDrag = 0
+        AnchorUnderMouse = 2
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def setRenderHint(self, *_args, **_kwargs):
+            pass
+
+        def setDragMode(self, *_args, **_kwargs):
+            pass
+
+        def setTransformationAnchor(self, *_args, **_kwargs):
+            pass
+
     qtcore = types.SimpleNamespace(
         QObject=type("QObject", (), {}),
         QThread=type("QThread", (), {}),
         Signal=lambda *args, **kwargs: object(),
         Slot=lambda *args, **kwargs: (lambda fn: fn),
-        Qt=types.SimpleNamespace(Horizontal=1, RightDockWidgetArea=2),
+        Qt=types.SimpleNamespace(Horizontal=1, RightDockWidgetArea=2, LeftButton=1, KeepAspectRatio=3),
+        QPoint=lambda x, y: types.SimpleNamespace(x=lambda: x, y=lambda: y),
     )
     qtwidgets = types.SimpleNamespace(
         QWidget=type("QWidget", (), {}),
         QDialog=type("QDialog", (), {}),
         QDockWidget=type("QDockWidget", (), {}),
+        QGraphicsView=_QGraphicsView,
         QApplication=type(
             "QApplication",
             (),
@@ -588,6 +607,77 @@ class TestMainDock(unittest.TestCase):
         widget._update_job_controls()
 
         self.assertTrue(widget._air_run_apply_btn.enabled)
+
+    def test_insert_template_uses_dialog_spec_and_records_last_spec(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        spec = main_dock.TemplateSpec(
+            name="Test Pocket",
+            width=20.0,
+            height=10.0,
+            depth=2.0,
+            tool_diameter=2.0,
+            step_down=1.0,
+            step_over=1.0,
+            feed_rate=400.0,
+            plunge_rate=100.0,
+            safe_z=5.0,
+        )
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._show_rectangle_template_dialog = mock.Mock(return_value=spec)
+        widget._append_console = mock.Mock()
+        widget._update_preview = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+
+        widget._on_insert_gcode_template()
+
+        self.assertIs(widget._last_template_spec, spec)
+        self.assertIn("; RouterKing rectangle pocket template: Test Pocket", widget._gcode_edit.toPlainText())
+        self.assertIn("; size: 20 x 10 x 2 mm", widget._gcode_edit.toPlainText())
+        widget._update_preview.assert_called_once_with()
+        widget._update_job_controls.assert_called_once_with()
+
+    def test_default_rectangle_template_uses_tee_tablett_preset(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._last_template_spec = None
+        widget._manual_start_safe_z = mock.Mock(return_value=5.0)
+
+        spec = widget._default_rectangle_template_spec()
+
+        self.assertEqual(spec.name, "Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm")
+        self.assertEqual(spec.width, 230.0)
+        self.assertEqual(spec.height, 160.0)
+        self.assertEqual(spec.depth, 4.0)
+        self.assertEqual(spec.safe_z, 6.0)
+
+    def test_apply_template_start_snap_regenerates_with_selected_point(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._last_template_spec = main_dock.TemplateSpec(
+            width=20.0,
+            height=10.0,
+            depth=2.0,
+            tool_diameter=2.0,
+            step_down=1.0,
+            step_over=1.0,
+            feed_rate=400.0,
+            plunge_rate=100.0,
+            safe_z=5.0,
+        )
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._disable_template_snap = mock.Mock()
+        widget._append_console = mock.Mock()
+        widget._update_preview = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+        point = types.SimpleNamespace(x=12.0, y=-3.0)
+
+        widget._apply_template_start_snap(point)
+
+        self.assertEqual(widget._last_template_spec.start_x, 12.0)
+        self.assertEqual(widget._last_template_spec.start_y, -3.0)
+        self.assertIn("; start: X12 Y-3", widget._gcode_edit.toPlainText())
+        widget._disable_template_snap.assert_called_once_with()
 
     def test_start_job_blocks_when_validation_fails(self):
         main_dock = _load_main_dock_module()

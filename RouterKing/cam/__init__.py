@@ -3,7 +3,14 @@
 from .dxf_import import DxfImportSettings, generate_gcode_from_dxf, load_dxf_paths
 from .hybrid import CamJobSettings, HybridResult, OperationSpec, generate_hybrid_gcode
 from .simple_engine import SimpleJobSettings, generate_gcode_from_paths, paths_from_shape
-from .templates import GcodeProgram, TemplateSpec, rectangle_pocket, square_pocket
+from .templates import (
+    GcodeProgram,
+    RECTANGLE_POCKET_PRESETS,
+    TemplateSpec,
+    rectangle_pocket,
+    rectangle_pocket_preset,
+    square_pocket,
+)
 from .workbench import CamWorkbenchStatus, activate_cam_workbench, get_cam_workbench_status
 
 __all__ = [
@@ -13,6 +20,7 @@ __all__ = [
     "GcodeProgram",
     "HybridResult",
     "OperationSpec",
+    "RECTANGLE_POCKET_PRESETS",
     "SimpleJobSettings",
     "TemplateSpec",
     "activate_cam_workbench",
@@ -23,5 +31,6 @@ __all__ = [
     "load_dxf_paths",
     "paths_from_shape",
     "rectangle_pocket",
+    "rectangle_pocket_preset",
     "square_pocket",
 ]

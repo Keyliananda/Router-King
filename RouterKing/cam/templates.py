@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Iterable, Optional, Sequence, Tuple
-
+from dataclasses import dataclass, field, replace
+from typing import Iterable, Iterator, Mapping, Optional, Sequence, Tuple
 
 Point2D = Tuple[float, float]
 
@@ -22,6 +21,46 @@ class TemplateSpec:
     safe_z: float
     start_z: float = 0.0
     origin: str = "center"
+    name: Optional[str] = None
+    start_x: float = 0.0
+    start_y: float = 0.0
+
+
+_RECTANGLE_POCKET_PRESET_SPECS = {
+    "tee_tablett": TemplateSpec(
+        name="Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm",
+        width=230.0,
+        height=160.0,
+        depth=4.0,
+        tool_diameter=3.0,
+        step_down=1.0,
+        step_over=1.05,
+        feed_rate=800.0,
+        plunge_rate=300.0,
+        safe_z=6.0,
+        start_z=0.0,
+        origin="center",
+    ),
+}
+
+
+class _TemplatePresetMapping(Mapping[str, TemplateSpec]):
+    def __init__(self, specs: Mapping[str, TemplateSpec]) -> None:
+        self._specs = specs
+
+    def __getitem__(self, key: str) -> TemplateSpec:
+        return replace(self._specs[key])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._specs)
+
+    def __len__(self) -> int:
+        return len(self._specs)
+
+
+RECTANGLE_POCKET_PRESETS: Mapping[str, TemplateSpec] = _TemplatePresetMapping(
+    _RECTANGLE_POCKET_PRESET_SPECS
+)
 
 
 @dataclass
@@ -53,14 +92,15 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
     spec = _coerce_spec(spec, kwargs)
     _validate_spec(spec)
 
-    paths = _raster_paths(spec)
+    paths = _offset_paths(_raster_paths(spec), spec.start_x, spec.start_y)
     depths = _depth_levels(spec.start_z, spec.depth, spec.step_down)
     first_x, first_y = paths[0]
 
     lines = [
-        "; RouterKing rectangle pocket template",
+        _template_header("rectangle pocket", spec),
         f"; size: {_fmt(spec.width)} x {_fmt(spec.height)} x {_fmt(spec.depth)} mm",
         f"; tool: {_fmt(spec.tool_diameter)} mm",
+        f"; start: X{_fmt(spec.start_x)} Y{_fmt(spec.start_y)}",
         "G21",
         "G90",
         "G17",
@@ -74,7 +114,7 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
         _append_raster_moves(lines, paths, spec.feed_rate)
         lines.append(f"G0 Z{_fmt(spec.safe_z)}")
 
-    lines.append(f"G0 X{_fmt(0.0)} Y{_fmt(0.0)}")
+    lines.append(f"G0 X{_fmt(spec.start_x)} Y{_fmt(spec.start_y)}")
     lines.append("M2")
     return GcodeProgram(lines=lines, template="rectangle_pocket", spec=spec)
 
@@ -102,8 +142,19 @@ def square_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProgram
     _validate_spec(spec)
     program = rectangle_pocket(spec)
     program.template = "square_pocket"
-    program.lines[0] = "; RouterKing square pocket template"
+    program.lines[0] = _template_header("square pocket", spec)
     return program
+
+
+def rectangle_pocket_preset(name: str, **overrides) -> TemplateSpec:
+    """Return a named rectangular pocket preset as a fresh ``TemplateSpec``."""
+    key = _normalize_preset_name(name)
+    try:
+        spec = _RECTANGLE_POCKET_PRESET_SPECS[key]
+    except KeyError as exc:
+        available = ", ".join(sorted(_RECTANGLE_POCKET_PRESET_SPECS))
+        raise KeyError(f"Unknown rectangle pocket preset '{name}'. Available presets: {available}.") from exc
+    return replace(spec, **overrides)
 
 
 def _coerce_spec(spec: Optional[TemplateSpec], kwargs: dict) -> TemplateSpec:
@@ -144,6 +195,11 @@ def _validate_spec(spec: TemplateSpec) -> None:
     if _normalize_origin(spec.origin) not in {"center", "lower_left"}:
         raise ValueError("origin must be 'center' or 'lower_left'.")
 
+    for name in ("start_x", "start_y"):
+        value = getattr(spec, name)
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be numeric.")
+
 
 def _depth_levels(start_z: float, depth: float, step_down: float) -> list[float]:
     target_z = start_z - depth
@@ -169,6 +225,10 @@ def _raster_paths(spec: TemplateSpec) -> list[Point2D]:
             points.append((x_max, y_val))
             points.append((x_min, y_val))
     return _dedupe_points(points)
+
+
+def _offset_paths(points: Sequence[Point2D], start_x: float, start_y: float) -> list[Point2D]:
+    return [(x_val + start_x, y_val + start_y) for x_val, y_val in points]
 
 
 def _bounds(spec: TemplateSpec, radius: float) -> tuple[float, float, float, float]:
@@ -222,6 +282,15 @@ def _normalize_origin(origin: str) -> str:
         "corner": "lower_left",
     }
     return aliases.get(value, value)
+
+
+def _normalize_preset_name(name: str) -> str:
+    return str(name or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _template_header(kind: str, spec: TemplateSpec) -> str:
+    suffix = f": {spec.name.strip()}" if spec.name and spec.name.strip() else ""
+    return f"; RouterKing {kind} template{suffix}"
 
 
 def _fmt(value: float) -> str:

@@ -10,6 +10,7 @@ import math
 import os
 import re
 import time
+from dataclasses import replace
 
 import FreeCAD as App
 import FreeCADGui as Gui
@@ -26,7 +27,7 @@ except Exception:
     from serial.tools import list_ports as _list_ports
 
 try:
-    from ..cam.templates import TemplateSpec, rectangle_pocket
+    from ..cam.templates import TemplateSpec, rectangle_pocket, rectangle_pocket_preset
     from ..gcode.parser import iter_gcode_lines, prepare_stream_lines
     from ..gcode.transform import prepare_air_run_lines
     from ..grbl.sender import GrblSender
@@ -43,9 +44,14 @@ try:
         make_fast_xy_jog_vector,
         make_jog_vector,
     )
-    from .gcode_preview import parse_gcode_preview, render_preview_scene
+    from .gcode_preview import (
+        nearest_preview_snap,
+        parse_gcode_preview,
+        preview_snap_candidates,
+        render_preview_scene,
+    )
 except ImportError:
-    from cam.templates import TemplateSpec, rectangle_pocket
+    from cam.templates import TemplateSpec, rectangle_pocket, rectangle_pocket_preset
     from gcode.parser import iter_gcode_lines, prepare_stream_lines
     from gcode.transform import prepare_air_run_lines
     from grbl.sender import GrblSender
@@ -62,7 +68,12 @@ except ImportError:
         make_fast_xy_jog_vector,
         make_jog_vector,
     )
-    from ui.gcode_preview import parse_gcode_preview, render_preview_scene
+    from ui.gcode_preview import (
+        nearest_preview_snap,
+        parse_gcode_preview,
+        preview_snap_candidates,
+        render_preview_scene,
+    )
 
 _dock = None
 
@@ -635,6 +646,104 @@ def show_panel():
     _dock.raise_()
 
 
+class GcodePreviewView(QtWidgets.QGraphicsView):
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+        self._snap_enabled = False
+        self._snap_candidates = ()
+        self._snap_callback = None
+        self._snap_marker = None
+        self.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+
+    def set_snap_mode(self, enabled, candidates=(), callback=None):
+        self._snap_enabled = bool(enabled)
+        self._snap_candidates = tuple(candidates or ())
+        self._snap_callback = callback
+        self.setDragMode(
+            QtWidgets.QGraphicsView.NoDrag
+            if self._snap_enabled
+            else QtWidgets.QGraphicsView.ScrollHandDrag
+        )
+        self._clear_snap_marker()
+
+    def set_snap_candidates(self, candidates):
+        self._snap_candidates = tuple(candidates or ())
+
+    def wheelEvent(self, event):
+        try:
+            delta = event.angleDelta().y()
+        except Exception:
+            delta = 0
+        factor = 1.15 if delta > 0 else 1.0 / 1.15
+        self.scale(factor, factor)
+
+    def mouseMoveEvent(self, event):
+        if self._snap_enabled:
+            self._update_snap_marker(event.pos())
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._snap_enabled and event.button() == QtCore.Qt.LeftButton:
+            match = self._snap_match_at(event.pos())
+            if match is not None and self._snap_callback is not None:
+                self._snap_callback(match.candidate.point)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def _snap_match_at(self, view_pos):
+        scene_pos = self.mapToScene(view_pos)
+        scene_units = self._scene_units_per_pixel()
+        return nearest_preview_snap(
+            self._snap_candidates,
+            (scene_pos.x(), scene_pos.y()),
+            pixel_tolerance=5.0,
+            scene_units_per_pixel=scene_units,
+        )
+
+    def _update_snap_marker(self, view_pos):
+        match = self._snap_match_at(view_pos)
+        if match is None:
+            self._clear_snap_marker()
+            return
+        x_val, y_val = match.candidate.projected
+        radius = max(self._scene_units_per_pixel() * 5.0, 0.25)
+        if self._snap_marker is not None:
+            try:
+                self.scene().removeItem(self._snap_marker)
+            except Exception:
+                pass
+        pen = QtGui.QPen(QtGui.QColor(255, 210, 0), 0)
+        brush = QtGui.QBrush(QtGui.QColor(255, 210, 0, 80))
+        self._snap_marker = self.scene().addEllipse(
+            x_val - radius,
+            y_val - radius,
+            radius * 2.0,
+            radius * 2.0,
+            pen,
+            brush,
+        )
+
+    def _clear_snap_marker(self):
+        if self._snap_marker is None:
+            return
+        try:
+            self.scene().removeItem(self._snap_marker)
+        except Exception:
+            pass
+        self._snap_marker = None
+
+    def _scene_units_per_pixel(self):
+        try:
+            left = self.mapToScene(QtCore.QPoint(0, 0))
+            right = self.mapToScene(QtCore.QPoint(1, 0))
+            return max(abs(right.x() - left.x()), 1e-9)
+        except Exception:
+            return 1.0
+
+
 class GcodePreviewDialog(QtWidgets.QDialog):
     def __init__(self, dock, parent=None):
         super().__init__(parent)
@@ -661,8 +770,7 @@ class GcodePreviewDialog(QtWidgets.QDialog):
         layout.addLayout(toolbar)
 
         self._scene = QtWidgets.QGraphicsScene(self)
-        self._view = QtWidgets.QGraphicsView(self._scene)
-        self._view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self._view = GcodePreviewView(self._scene)
         layout.addWidget(self._view, 1)
 
         self._projection.currentTextChanged.connect(self.refresh)
@@ -753,6 +861,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_preview_projection = None
         self._preview_refresh_timer = None
         self._preview_dialog = None
+        self._last_template_spec = None
+        self._template_snap_active = False
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
         self._dxf_import_defaults = {}
@@ -1169,8 +1279,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_preview_projection.addItems(["Iso", "Top", "Side", "Front"])
         self._gcode_preview_projection.setToolTip("Choose the G-code preview projection.")
         self._open_preview_btn = QtWidgets.QPushButton("Open Preview")
+        self._snap_start_btn = QtWidgets.QPushButton("Set Cut Start Snap")
         preview_row.addWidget(self._gcode_preview_projection)
         preview_row.addWidget(self._open_preview_btn)
+        preview_row.addWidget(self._snap_start_btn)
         preview_row.addStretch(1)
         layout.addLayout(preview_row)
 
@@ -1180,8 +1292,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_edit.setPlaceholderText("Load G-code to preview or send.")
         self._gcode_edit.setFont(self._fixed_font)
         self._preview_scene = QtWidgets.QGraphicsScene(self)
-        self._preview_view = QtWidgets.QGraphicsView(self._preview_scene)
-        self._preview_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self._preview_view = GcodePreviewView(self._preview_scene)
         self._preview_view.setMinimumWidth(220)
         splitter.addWidget(self._gcode_edit)
         splitter.addWidget(self._preview_view)
@@ -1209,6 +1320,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_edit.textChanged.connect(self._schedule_preview_update)
         self._gcode_preview_projection.currentTextChanged.connect(self._update_preview)
         self._open_preview_btn.clicked.connect(self._on_open_gcode_preview)
+        self._snap_start_btn.clicked.connect(self._on_set_template_start_from_snap)
 
         self._preview_refresh_timer = QtCore.QTimer(self)
         self._preview_refresh_timer.setSingleShot(True)
@@ -4464,26 +4576,108 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _on_insert_gcode_template(self):
         if self._gcode_edit.toPlainText().strip() and not self._confirm_replace_gcode():
             return
-        safe_z = self._manual_start_safe_z()
-        program = rectangle_pocket(
-            TemplateSpec(
-                width=40.0,
-                height=40.0,
-                depth=5.0,
-                tool_diameter=3.0,
-                step_down=2.0,
-                step_over=1.5,
-                feed_rate=500.0,
-                plunge_rate=120.0,
-                safe_z=safe_z,
-                start_z=0.0,
-                origin="center",
-            )
-        )
+        spec = self._show_rectangle_template_dialog()
+        if spec is None:
+            return
+        try:
+            program = rectangle_pocket(spec)
+        except ValueError as exc:
+            self._append_console(f"Template failed: {exc}", force=True)
+            return
+        self._last_template_spec = spec
         self._gcode_edit.setPlainText(program.gcode + "\n")
-        self._append_console("Inserted template: rectangle pocket 40 x 40 x 5 mm, tool 3 mm.")
+        self._append_console(
+            "Inserted template: "
+            f"{spec.name or 'rectangle pocket'} "
+            f"{spec.width:g} x {spec.height:g} x {spec.depth:g} mm.",
+            force=True,
+        )
         self._update_preview()
         self._update_job_controls()
+
+    def _show_rectangle_template_dialog(self):
+        default = self._default_rectangle_template_spec()
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Rectangle Pocket Template")
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        form = QtWidgets.QFormLayout()
+        name_edit = QtWidgets.QLineEdit(default.name or "")
+        form.addRow("Name", name_edit)
+
+        width = self._template_spin(default.width, 0.001, 10000.0)
+        height = self._template_spin(default.height, 0.001, 10000.0)
+        depth = self._template_spin(default.depth, 0.001, 1000.0)
+        tool_diameter = self._template_spin(default.tool_diameter, 0.001, 1000.0)
+        step_down = self._template_spin(default.step_down, 0.001, 1000.0)
+        step_over = self._template_spin(default.step_over, 0.001, 1000.0)
+        feed_rate = self._template_spin(default.feed_rate, 0.001, 50000.0, decimals=1)
+        plunge_rate = self._template_spin(default.plunge_rate, 0.001, 50000.0, decimals=1)
+        safe_z = self._template_spin(default.safe_z, -1000.0, 1000.0)
+        start_z = self._template_spin(default.start_z, -1000.0, 1000.0)
+        start_x = self._template_spin(default.start_x, -10000.0, 10000.0)
+        start_y = self._template_spin(default.start_y, -10000.0, 10000.0)
+        origin = QtWidgets.QComboBox()
+        origin.addItems(["center", "lower_left"])
+        origin.setCurrentText(default.origin)
+
+        form.addRow("Width (mm)", width)
+        form.addRow("Length (mm)", height)
+        form.addRow("Depth (mm)", depth)
+        form.addRow("Tool diameter (mm)", tool_diameter)
+        form.addRow("Step down (mm)", step_down)
+        form.addRow("Step over (mm)", step_over)
+        form.addRow("Feed rate (mm/min)", feed_rate)
+        form.addRow("Plunge rate (mm/min)", plunge_rate)
+        form.addRow("Safe Z (mm)", safe_z)
+        form.addRow("Start Z (mm)", start_z)
+        form.addRow("Start X (mm)", start_x)
+        form.addRow("Start Y (mm)", start_y)
+        form.addRow("Origin", origin)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QHBoxLayout()
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        generate_btn = QtWidgets.QPushButton("Generate")
+        buttons.addStretch(1)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(generate_btn)
+        layout.addLayout(buttons)
+        cancel_btn.clicked.connect(dialog.reject)
+        generate_btn.clicked.connect(dialog.accept)
+
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        return TemplateSpec(
+            name=name_edit.text().strip() or None,
+            width=width.value(),
+            height=height.value(),
+            depth=depth.value(),
+            tool_diameter=tool_diameter.value(),
+            step_down=step_down.value(),
+            step_over=step_over.value(),
+            feed_rate=feed_rate.value(),
+            plunge_rate=plunge_rate.value(),
+            safe_z=safe_z.value(),
+            start_z=start_z.value(),
+            origin=origin.currentText(),
+            start_x=start_x.value(),
+            start_y=start_y.value(),
+        )
+
+    def _default_rectangle_template_spec(self):
+        if self._last_template_spec is not None:
+            return replace(self._last_template_spec)
+        safe_z = max(self._manual_start_safe_z(), 6.0)
+        return rectangle_pocket_preset("tee_tablett", safe_z=safe_z)
+
+    def _template_spin(self, value, minimum, maximum, decimals=3):
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setDecimals(decimals)
+        spin.setRange(minimum, maximum)
+        spin.setValue(float(value))
+        return spin
 
     def _confirm_replace_gcode(self):
         result = QtWidgets.QMessageBox.question(
@@ -4908,6 +5102,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         path = parse_gcode_preview(text)
         scene.clear()
         bounds = render_preview_scene(scene, path, projection=projection, clear=False)
+        candidates = preview_snap_candidates(path, projection)
+        if hasattr(view, "set_snap_candidates"):
+            view.set_snap_candidates(candidates)
         if bounds is None:
             return
         bounds = scene.itemsBoundingRect()
@@ -4943,3 +5140,60 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             visible = True
         if visible:
             dialog.refresh()
+
+    def _on_set_template_start_from_snap(self):
+        spec = getattr(self, "_last_template_spec", None)
+        if spec is None:
+            self._append_console("Set cut start snap blocked: generate a rectangle template first.", force=True)
+            return
+        path = parse_gcode_preview(self._gcode_edit.toPlainText())
+        projection = self._preview_projection_name()
+        candidates = preview_snap_candidates(path, projection)
+        if not candidates:
+            self._append_console("Set cut start snap blocked: no preview snap points.", force=True)
+            return
+        self._template_snap_active = True
+        self._enable_template_snap(candidates)
+        self._append_console(
+            "Set cut start snap: move near a path corner or direction change and click within 5 px.",
+            force=True,
+        )
+
+    def _enable_template_snap(self, candidates):
+        callback = self._apply_template_start_snap
+        for view in self._active_preview_views():
+            view.set_snap_mode(True, candidates, callback)
+
+    def _disable_template_snap(self):
+        self._template_snap_active = False
+        for view in self._active_preview_views():
+            view.set_snap_mode(False)
+
+    def _active_preview_views(self):
+        views = []
+        if getattr(self, "_preview_view", None) is not None:
+            views.append(self._preview_view)
+        dialog = getattr(self, "_preview_dialog", None)
+        if dialog is not None and getattr(dialog, "_view", None) is not None:
+            views.append(dialog._view)
+        return views
+
+    def _apply_template_start_snap(self, point):
+        spec = getattr(self, "_last_template_spec", None)
+        if spec is None:
+            return
+        spec = replace(spec, start_x=point.x, start_y=point.y)
+        try:
+            program = rectangle_pocket(spec)
+        except ValueError as exc:
+            self._append_console(f"Set cut start snap failed: {exc}", force=True)
+            return
+        self._last_template_spec = spec
+        self._disable_template_snap()
+        self._gcode_edit.setPlainText(program.gcode + "\n")
+        self._append_console(
+            f"Cut start set from snap: X{point.x:.3f} Y{point.y:.3f}. Template regenerated.",
+            force=True,
+        )
+        self._update_preview()
+        self._update_job_controls()

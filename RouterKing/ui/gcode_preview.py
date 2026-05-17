@@ -55,6 +55,21 @@ class PreviewPath:
     bounds: PreviewBounds | None
 
 
+@dataclass(frozen=True)
+class PreviewSnapCandidate:
+    point: PreviewPoint
+    projected: tuple[float, float]
+    reasons: tuple[str, ...]
+    segment_indices: tuple[int, ...]
+    line_nos: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PreviewSnapMatch:
+    candidate: PreviewSnapCandidate
+    distance: float
+
+
 def parse_gcode_preview(gcode: str | Iterable[str], arc_step_radians: float = math.pi / 24.0) -> PreviewPath:
     """Parse G0/G1/G2/G3 moves into 3D preview segments.
 
@@ -150,6 +165,104 @@ def preview_items(path: PreviewPath, projection: str = "top") -> list[dict]:
     return items
 
 
+def preview_snap_candidates(
+    path: PreviewPath,
+    projection: str = "top",
+) -> tuple[PreviewSnapCandidate, ...]:
+    """Return projected snap points derived from preview segment topology.
+
+    Candidates are emitted for every segment start/end. Shared endpoints are
+    deduplicated and annotated when consecutive feed moves change direction.
+    """
+    builders: dict[tuple[float, float, float, float, float], _SnapCandidateBuilder] = {}
+    for index, segment in enumerate(path.segments):
+        _add_snap_candidate(
+            builders,
+            segment.start,
+            projection,
+            "segment_start",
+            index,
+            segment.line_no,
+        )
+        _add_snap_candidate(
+            builders,
+            segment.end,
+            projection,
+            "segment_end",
+            index,
+            segment.line_no,
+        )
+
+    for previous_index, current_index in zip(
+        range(len(path.segments) - 1),
+        range(1, len(path.segments)),
+    ):
+        previous = path.segments[previous_index]
+        current = path.segments[current_index]
+        if previous.rapid or current.rapid:
+            continue
+        if not _same_point(previous.end, current.start):
+            continue
+        previous_direction = _segment_direction(previous)
+        current_direction = _segment_direction(current)
+        if previous_direction is None or current_direction is None:
+            continue
+        if _directions_changed(previous_direction, current_direction):
+            _add_snap_candidate(
+                builders,
+                current.start,
+                projection,
+                "direction_change",
+                current_index,
+                current.line_no,
+            )
+
+    return tuple(builder.finish() for builder in builders.values())
+
+
+def nearest_preview_snap(
+    path_or_candidates: PreviewPath | Sequence[PreviewSnapCandidate],
+    projected: tuple[float, float],
+    projection: str = "top",
+    *,
+    scene_tolerance: float | None = None,
+    pixel_tolerance: float | None = None,
+    scene_units_per_pixel: float = 1.0,
+) -> PreviewSnapMatch | None:
+    """Return the nearest projected snap candidate within the optional tolerance.
+
+    ``projected`` is in scene coordinates. Pass ``scene_tolerance`` directly,
+    or pass ``pixel_tolerance`` with ``scene_units_per_pixel`` to convert a UI
+    pixel threshold into scene units.
+    """
+    candidates = (
+        preview_snap_candidates(path_or_candidates, projection)
+        if isinstance(path_or_candidates, PreviewPath)
+        else tuple(path_or_candidates)
+    )
+    if not candidates:
+        return None
+
+    tolerance = _snap_scene_tolerance(scene_tolerance, pixel_tolerance, scene_units_per_pixel)
+    target_x, target_y = float(projected[0]), float(projected[1])
+    best_candidate = None
+    best_distance_sq = None
+    for candidate in candidates:
+        dx = candidate.projected[0] - target_x
+        dy = candidate.projected[1] - target_y
+        distance_sq = dx * dx + dy * dy
+        if best_distance_sq is None or distance_sq < best_distance_sq:
+            best_candidate = candidate
+            best_distance_sq = distance_sq
+
+    if best_candidate is None or best_distance_sq is None:
+        return None
+    distance = math.sqrt(best_distance_sq)
+    if tolerance is not None and distance > tolerance:
+        return None
+    return PreviewSnapMatch(best_candidate, distance)
+
+
 def render_preview_scene(scene, path: PreviewPath, projection: str = "top", *, clear: bool = True) -> tuple[float, float, float, float] | None:
     """Render a parsed preview path into a ``QGraphicsScene``.
 
@@ -168,6 +281,98 @@ def render_preview_scene(scene, path: PreviewPath, projection: str = "top", *, c
         pen = qt_gui.QPen(qt_gui.QColor(*color), 0)
         scene.addLine(*project_segment(segment, projection), pen)
     return projected_bounds(path, projection)
+
+
+class _SnapCandidateBuilder:
+    def __init__(self, point: PreviewPoint, projected: tuple[float, float]):
+        self.point = point
+        self.projected = projected
+        self.reasons: list[str] = []
+        self.segment_indices: list[int] = []
+        self.line_nos: list[int] = []
+
+    def include(self, reason: str, segment_index: int, line_no: int) -> None:
+        if reason not in self.reasons:
+            self.reasons.append(reason)
+        if segment_index not in self.segment_indices:
+            self.segment_indices.append(segment_index)
+        if line_no not in self.line_nos:
+            self.line_nos.append(line_no)
+
+    def finish(self) -> PreviewSnapCandidate:
+        return PreviewSnapCandidate(
+            point=self.point,
+            projected=self.projected,
+            reasons=tuple(self.reasons),
+            segment_indices=tuple(self.segment_indices),
+            line_nos=tuple(self.line_nos),
+        )
+
+
+def _add_snap_candidate(
+    builders: dict[tuple[float, float, float, float, float], _SnapCandidateBuilder],
+    point: PreviewPoint,
+    projection: str,
+    reason: str,
+    segment_index: int,
+    line_no: int,
+) -> None:
+    projected = project_point(point, projection)
+    key = _snap_candidate_key(point, projected)
+    builder = builders.get(key)
+    if builder is None:
+        builder = _SnapCandidateBuilder(point, projected)
+        builders[key] = builder
+    builder.include(reason, segment_index, line_no)
+
+
+def _snap_candidate_key(
+    point: PreviewPoint,
+    projected: tuple[float, float],
+) -> tuple[float, float, float, float, float]:
+    return (
+        round(point.x, 9),
+        round(point.y, 9),
+        round(point.z, 9),
+        round(projected[0], 9),
+        round(projected[1], 9),
+    )
+
+
+def _segment_direction(segment: PreviewSegment) -> tuple[float, float, float] | None:
+    dx = segment.end.x - segment.start.x
+    dy = segment.end.y - segment.start.y
+    dz = segment.end.z - segment.start.z
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if length <= _EPS:
+        return None
+    return (dx / length, dy / length, dz / length)
+
+
+def _directions_changed(
+    previous: tuple[float, float, float],
+    current: tuple[float, float, float],
+) -> bool:
+    dot = sum(left * right for left, right in zip(previous, current))
+    return not math.isclose(max(-1.0, min(1.0, dot)), 1.0, abs_tol=1e-7)
+
+
+def _snap_scene_tolerance(
+    scene_tolerance: float | None,
+    pixel_tolerance: float | None,
+    scene_units_per_pixel: float,
+) -> float | None:
+    if scene_tolerance is not None:
+        tolerance = float(scene_tolerance)
+    elif pixel_tolerance is not None:
+        if scene_units_per_pixel <= 0.0:
+            raise ValueError("scene_units_per_pixel must be positive")
+        tolerance = float(pixel_tolerance) * float(scene_units_per_pixel)
+    else:
+        return None
+    if tolerance < 0.0:
+        raise ValueError("snap tolerance must be non-negative")
+    return tolerance
 
 
 class _PreviewParser:
