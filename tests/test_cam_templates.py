@@ -84,6 +84,18 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIn("G0 X-8.5 Y-13.5", program.lines)
         self.assertIn("G1 X-8.5 Y13.5 F500", program.lines)
 
+    def test_rectangle_pocket_can_rotate_around_machine_z(self):
+        spec = self._forty_mm_spec()
+        spec.width = 30.0
+        spec.height = 20.0
+        spec.rotation_z = 90
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; axes: normal (CAD X->machine X, CAD Y->machine Y), Z rotation=90deg", program.lines)
+        self.assertIn("G0 X8.5 Y-13.5", program.lines)
+        self.assertIn("G1 X8.5 Y13.5 F500", program.lines)
+
     def test_rectangle_pocket_can_choose_y_axis_passes_and_reverse_order(self):
         spec = self._forty_mm_spec()
         spec.pass_axis = "y"
@@ -192,6 +204,7 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertEqual(second.plunge_rate, 300.0)
         self.assertEqual(second.safe_z, 6.0)
         self.assertEqual(second.origin, "center")
+        self.assertEqual(second.rotation_z, 90)
         self.assertEqual(second.source_document, "tee-tablett")
         self.assertEqual(second.source_object, "Body")
         self.assertEqual(second.source_feature, "Pocket002")
@@ -203,8 +216,9 @@ class TestPocketTemplates(unittest.TestCase):
             "; RouterKing rectangle pocket template: Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm, 38 mm cutter",
         )
         self.assertIn("; tool: 38 mm", program.lines)
+        self.assertIn("; axes: normal (CAD X->machine X, CAD Y->machine Y), Z rotation=90deg", program.lines)
         self.assertIn("; source: document=tee-tablett, object=Body, feature=Pocket002", program.lines)
-        self.assertIn("G0 X-96 Y-61", program.lines)
+        self.assertIn("G0 X61 Y-96", program.lines)
 
     def test_preset_accepts_overrides(self):
         spec = rectangle_pocket_preset("tee tablett", start_x=25.0, start_y=30.0)
@@ -213,7 +227,7 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertEqual(spec.start_x, 25.0)
         self.assertEqual(spec.start_y, 30.0)
         self.assertIn("; start: X25 Y30", program.lines)
-        self.assertIn("G0 X-71 Y-31", program.lines)
+        self.assertIn("G0 X86 Y-66", program.lines)
 
     def test_program_omits_coordinate_setup_and_probe_commands(self):
         program = rectangle_pocket(self._forty_mm_spec())
@@ -238,6 +252,7 @@ class TestPocketTemplates(unittest.TestCase):
             {"pass_axis": "z"},
             {"path_direction": "sideways"},
             {"contour_direction": "inside"},
+            {"rotation_z": 45},
             {"start_x": "left"},
             {"start_y": None},
             {"cut_start_x": "left", "cut_start_y": 1.0},

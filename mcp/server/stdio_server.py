@@ -121,6 +121,44 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "routerking_select_tab",
+        "description": "Select a top-level tab in the RouterKing dock, such as Control, G-Code, or AI Tools.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tab": {"type": "string", "default": "G-Code"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_capture_dock",
+        "description": "Capture the RouterKing dock from inside FreeCAD/Qt and save it as an image.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "output_path": {"type": "string", "description": "Optional target image path."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "routerking_prepare_template_preview",
+        "description": "Apply the Tee-Tablett rectangle pocket template, fit it to a work-area corner, refresh preview, and optionally capture the RouterKing dock.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "corner": {
+                    "type": "string",
+                    "enum": ["lower_left", "lower_right", "upper_left", "upper_right"],
+                    "default": "lower_left",
+                },
+                "output_path": {"type": "string", "description": "Optional target image path for the rendered RouterKing dock."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "routerking_apply_actions",
         "description": "Execute one or more RouterKing actions (batch interface).",
         "inputSchema": {

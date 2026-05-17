@@ -180,6 +180,12 @@ wait_for_routerking_mcp() {
 
 routerking_tool_json() {
   local tool_name="$1"
+  local payload
+  if [[ $# -ge 2 ]]; then
+    payload="$2"
+  else
+    payload="{}"
+  fi
   (
     cd "$repo_dir"
     ROUTERKING_MCP_MODE=socket \
@@ -187,7 +193,7 @@ routerking_tool_json() {
       ROUTERKING_MCP_PORT="${ROUTERKING_MCP_PORT:-4400}" \
       python3 -m mcp.server.main \
         --tool "$tool_name" \
-        --payload '{}'
+        --payload "$payload"
   )
 }
 
@@ -225,6 +231,10 @@ try_open_routerking_panel_via_mcp() {
   routerking_tool_json routerking_open_panel >/dev/null
 }
 
+select_routerking_gcode_tab() {
+  routerking_tool_json routerking_select_tab '{"tab":"G-Code"}' >/dev/null
+}
+
 routerking_panel_is_active() {
   local state
   state="$(routerking_tool_json routerking_ui_state 2>/dev/null || true)"
@@ -240,7 +250,11 @@ except Exception:
     raise SystemExit(1)
 
 data = payload.get("data") or {}
-if data.get("active_workbench") == "RouterKingWorkbench" and data.get("routerking_dock_visible"):
+tab_ok = any(
+    tab.get("current_text") == "G-Code"
+    for tab in data.get("routerking_tabs") or []
+)
+if data.get("active_workbench") == "RouterKingWorkbench" and data.get("routerking_dock_visible") and tab_ok:
     raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -250,6 +264,7 @@ wait_for_routerking_panel() {
   local deadline=$((SECONDS + wait_seconds))
   while [[ "$SECONDS" -lt "$deadline" ]]; do
     if try_open_routerking_panel_via_mcp; then
+      select_routerking_gcode_tab || true
       sleep 1
       if routerking_panel_is_active; then
         return 0

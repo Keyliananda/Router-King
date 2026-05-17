@@ -657,6 +657,7 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(spec.depth, 4.0)
         self.assertEqual(spec.tool_diameter, 38.0)
         self.assertEqual(spec.safe_z, 6.0)
+        self.assertEqual(spec.rotation_z, 90)
 
     def test_apply_template_start_snap_regenerates_with_selected_point(self):
         main_dock = _load_main_dock_module()
@@ -721,6 +722,7 @@ class TestMainDock(unittest.TestCase):
             "start_y": _DummySpin(2.0),
             "origin": _DummyCombo("center"),
             "swap_xy": _DummyCheckBox(True),
+            "rotation_z": _DummyCombo("90"),
             "pass_axis": _DummyCombo("y"),
             "path_direction": _DummyCombo("reverse"),
             "final_contour": _DummyCheckBox(True),
@@ -735,6 +737,7 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(spec.name, "CAD Pocket")
         self.assertEqual(spec.width, 230.0)
         self.assertTrue(spec.swap_xy)
+        self.assertEqual(spec.rotation_z, 90)
         self.assertEqual(spec.pass_axis, "y")
         self.assertEqual(spec.path_direction, "reverse")
         self.assertTrue(spec.final_contour)
@@ -766,6 +769,7 @@ class TestMainDock(unittest.TestCase):
             "start_y": _DummySpin(0.0),
             "origin": _DummyCombo("center"),
             "swap_xy": _DummyCheckBox(False),
+            "rotation_z": _DummyCombo("0"),
             "pass_axis": _DummyCombo("x"),
             "path_direction": _DummyCombo("forward"),
             "final_contour": _DummyCheckBox(False),
@@ -832,6 +836,35 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(candidates[3]["start_x"], 30.0)
         self.assertEqual(candidates[3]["start_y"], 35.0)
 
+    def test_fit_candidates_use_z_rotation_for_effective_size(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        spec = main_dock.TemplateSpec(
+            width=40.0,
+            height=30.0,
+            depth=2.0,
+            tool_diameter=4.0,
+            step_down=1.0,
+            step_over=2.0,
+            feed_rate=500.0,
+            plunge_rate=100.0,
+            safe_z=6.0,
+            origin="center",
+            rotation_z=90,
+        )
+        area = {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0}
+
+        candidates = widget._template_fit_candidates_for_point(spec, 50.0, 50.0, area)
+
+        self.assertEqual(candidates[0]["start_x"], 65.0)
+        self.assertEqual(candidates[0]["start_y"], 70.0)
+        self.assertEqual(candidates[0]["bounds"], {
+            "x_min": 50.0,
+            "x_max": 80.0,
+            "y_min": 50.0,
+            "y_max": 90.0,
+        })
+
     def test_apply_fit_candidate_updates_template_start_and_preview_gcode(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -851,6 +884,7 @@ class TestMainDock(unittest.TestCase):
             "start_y": _DummySpin(0.0),
             "origin": _DummyCombo("center"),
             "swap_xy": _DummyCheckBox(False),
+            "rotation_z": _DummyCombo("0"),
             "pass_axis": _DummyCombo("x"),
             "path_direction": _DummyCombo("forward"),
             "final_contour": _DummyCheckBox(False),

@@ -93,6 +93,38 @@ def routerking_ui_state(connection: Optional[FreeCADConnection] = None):
     return (connection or FreeCADConnection()).invoke("ui_state")
 
 
+def routerking_select_tab(
+    *,
+    tab: str = "G-Code",
+    connection: Optional[FreeCADConnection] = None,
+):
+    """Select a top-level tab in the RouterKing dock."""
+    return (connection or FreeCADConnection()).invoke("select_tab", tab=tab)
+
+
+def routerking_capture_dock(
+    *,
+    output_path: Optional[str] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """Capture the RouterKing dock as an image."""
+    return (connection or FreeCADConnection()).invoke("capture_dock", output_path=output_path)
+
+
+def routerking_prepare_template_preview(
+    *,
+    corner: str = "lower_left",
+    output_path: Optional[str] = None,
+    connection: Optional[FreeCADConnection] = None,
+):
+    """Apply the Tee-Tablett template, fit it to a work-area corner, and refresh preview."""
+    return (connection or FreeCADConnection()).invoke(
+        "prepare_template_preview",
+        corner=corner,
+        output_path=output_path,
+    )
+
+
 def routerking_cam_list_setups(
     *,
     document: Optional[str] = None,

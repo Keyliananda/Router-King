@@ -48,6 +48,9 @@ class TestToolsList:
         assert "routerking_list_actions" in names
         assert "routerking_open_panel" in names
         assert "routerking_ui_state" in names
+        assert "routerking_select_tab" in names
+        assert "routerking_capture_dock" in names
+        assert "routerking_prepare_template_preview" in names
         assert "routerking_console_exec" in names
         assert "routerking_console_read" in names
         assert "routerking_machine_stop" in names

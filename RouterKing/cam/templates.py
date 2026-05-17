@@ -25,6 +25,7 @@ class TemplateSpec:
     start_x: float = 0.0
     start_y: float = 0.0
     swap_xy: bool = False
+    rotation_z: int = 0
     pass_axis: str = "x"
     path_direction: str = "forward"
     final_contour: bool = False
@@ -53,6 +54,7 @@ _RECTANGLE_POCKET_PRESET_SPECS = {
         source_document="tee-tablett",
         source_object="Body",
         source_feature="Pocket002",
+        rotation_z=90,
     ),
 }
 
@@ -228,6 +230,8 @@ def _validate_spec(spec: TemplateSpec) -> None:
         raise ValueError("path_direction must be 'forward' or 'reverse'.")
     if _normalize_contour_direction(spec.contour_direction) not in {"cw", "ccw"}:
         raise ValueError("contour_direction must be 'cw' or 'ccw'.")
+    if _normalize_rotation_z(spec.rotation_z) not in {0, 90, 180, 270}:
+        raise ValueError("rotation_z must be one of 0, 90, 180, or 270.")
 
     for name in ("start_x", "start_y"):
         value = getattr(spec, name)
@@ -306,6 +310,13 @@ def _offset_paths(points: Sequence[Point2D], start_x: float, start_y: float) -> 
 
 def _orient_paths(points: Sequence[Point2D], spec: TemplateSpec) -> list[Point2D]:
     oriented = [(y_val, x_val) for x_val, y_val in points] if spec.swap_xy else list(points)
+    rotation = _normalize_rotation_z(spec.rotation_z)
+    if rotation == 90:
+        return [(-y_val, x_val) for x_val, y_val in oriented]
+    if rotation == 180:
+        return [(-x_val, -y_val) for x_val, y_val in oriented]
+    if rotation == 270:
+        return [(y_val, -x_val) for x_val, y_val in oriented]
     return oriented
 
 
@@ -467,10 +478,25 @@ def _normalize_contour_direction(contour_direction: str) -> str:
     return aliases.get(value, value)
 
 
+def _normalize_rotation_z(rotation_z) -> int:
+    try:
+        value = int(float(rotation_z))
+    except (TypeError, ValueError):
+        return -1
+    value = value % 360
+    return value if value in {0, 90, 180, 270} else -1
+
+
 def _axis_mapping_label(spec: TemplateSpec) -> str:
+    parts = []
     if spec.swap_xy:
-        return "swapped (CAD X->machine Y, CAD Y->machine X)"
-    return "normal (CAD X->machine X, CAD Y->machine Y)"
+        parts.append("swapped (CAD X->machine Y, CAD Y->machine X)")
+    else:
+        parts.append("normal (CAD X->machine X, CAD Y->machine Y)")
+    rotation = _normalize_rotation_z(spec.rotation_z)
+    if rotation:
+        parts.append(f"Z rotation={rotation}deg")
+    return ", ".join(parts)
 
 
 def _contour_label(spec: TemplateSpec) -> str:

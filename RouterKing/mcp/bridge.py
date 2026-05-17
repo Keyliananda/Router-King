@@ -8,6 +8,7 @@ import io
 import importlib
 import traceback
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from mcp.server.safety import log_tool_request, validate_risk
@@ -506,6 +507,43 @@ class RouterKingBridge:
             errors=errors,
         )
 
+    def select_tab(self, tab: str = "G-Code") -> Dict[str, Any]:
+        """Select a top-level tab in the RouterKing dock."""
+        payload = run_on_main_thread(lambda: _select_routerking_tab(tab))
+        errors = payload.get("errors") or []
+        return make_response(
+            not errors,
+            f"RouterKing tab selected: {payload.get('selected_tab')}" if not errors else "RouterKing tab could not be selected.",
+            data=payload,
+            errors=errors,
+        )
+
+    def capture_dock(self, output_path: str | None = None) -> Dict[str, Any]:
+        """Capture the RouterKing dock widget as an image."""
+        payload = run_on_main_thread(lambda: _capture_routerking_dock(output_path))
+        errors = payload.get("errors") or []
+        return make_response(
+            not errors,
+            "RouterKing dock captured." if not errors else "RouterKing dock capture failed.",
+            data=payload,
+            errors=errors,
+        )
+
+    def prepare_template_preview(
+        self,
+        corner: str = "lower_left",
+        output_path: str | None = None,
+    ) -> Dict[str, Any]:
+        """Apply the Tee-Tablett template, fit it to a work-area corner, and refresh preview."""
+        payload = run_on_main_thread(lambda: _prepare_routerking_template_preview(corner, output_path))
+        errors = payload.get("errors") or []
+        return make_response(
+            not errors,
+            "RouterKing template preview prepared." if not errors else "RouterKing template preview failed.",
+            data=payload,
+            errors=errors,
+        )
+
     def run_script(self, code: str) -> Dict[str, Any]:
         """Execute arbitrary Python code in the FreeCAD context.
 
@@ -837,6 +875,7 @@ def _collect_routerking_ui_state() -> Dict[str, Any]:
     active_document_label = None
     active_document_file = None
     docks: List[Dict[str, Any]] = []
+    tabs: List[Dict[str, Any]] = []
 
     try:
         import FreeCAD as App  # type: ignore
@@ -893,6 +932,16 @@ def _collect_routerking_ui_state() -> Dict[str, Any]:
                     "area": int(main_window.dockWidgetArea(dock)),
                 }
             )
+            for tab_widget in dock.findChildren(QtWidgets.QTabWidget):
+                current_index = int(tab_widget.currentIndex())
+                labels = [tab_widget.tabText(index) for index in range(tab_widget.count())]
+                tabs.append(
+                    {
+                        "current_index": current_index,
+                        "current_text": tab_widget.tabText(current_index) if labels else "",
+                        "tabs": labels,
+                    }
+                )
     except Exception as exc:
         errors.append(f"RouterKing dock read failed: {exc}")
 
@@ -903,8 +952,210 @@ def _collect_routerking_ui_state() -> Dict[str, Any]:
         "active_document_file": active_document_file,
         "routerking_docks": docks,
         "routerking_dock_visible": any(dock.get("visible") for dock in docks),
+        "routerking_tabs": tabs,
         "errors": errors,
     }
+
+
+def _find_routerking_dock():
+    import FreeCADGui as Gui  # type: ignore
+    try:
+        from PySide2 import QtWidgets
+    except Exception:
+        from PySide import QtGui as QtWidgets
+
+    main_window = Gui.getMainWindow()
+    for dock in main_window.findChildren(QtWidgets.QDockWidget):
+        object_name = dock.objectName()
+        title = dock.windowTitle()
+        if object_name == "RouterKingDock" or title == "RouterKing":
+            return dock, QtWidgets
+    return None, QtWidgets
+
+
+def _routerking_dock_widget():
+    dock, _QtWidgets = _find_routerking_dock()
+    if dock is None:
+        return None
+    widget = dock.widget()
+    return widget
+
+
+def _select_routerking_tab(tab: str) -> Dict[str, Any]:
+    errors: List[str] = []
+    requested = str(tab or "").strip()
+    if not requested:
+        requested = "G-Code"
+    try:
+        import FreeCADGui as Gui  # type: ignore
+    except Exception as exc:
+        return {"selected_tab": None, "errors": [f"FreeCADGui is not available: {exc}"]}
+
+    try:
+        Gui.activateWorkbench("RouterKingWorkbench")
+    except Exception as exc:
+        errors.append(f"activateWorkbench failed: {exc}")
+
+    try:
+        dock, QtWidgets = _find_routerking_dock()
+        if dock is None:
+            return {"selected_tab": None, "errors": [*errors, "RouterKing dock not found."]}
+        dock.show()
+        dock.raise_()
+        for tabs in dock.findChildren(QtWidgets.QTabWidget):
+            labels = [tabs.tabText(i) for i in range(tabs.count())]
+            if requested not in labels:
+                continue
+            tabs.setCurrentIndex(labels.index(requested))
+            try:
+                Gui.updateGui()
+            except Exception:
+                pass
+            return {
+                "selected_tab": requested,
+                "tabs": labels,
+                "active_workbench": Gui.activeWorkbench().name() if Gui.activeWorkbench() else None,
+                "errors": errors,
+            }
+        return {"selected_tab": None, "errors": [*errors, f"RouterKing tab not found: {requested}"]}
+    except Exception as exc:
+        return {"selected_tab": None, "errors": [*errors, f"RouterKing tab selection failed: {exc}"]}
+
+
+def _prepare_routerking_template_preview(corner: str, output_path: str | None = None) -> Dict[str, Any]:
+    errors: List[str] = []
+    open_result = _open_routerking_panel()
+    errors.extend(open_result.get("errors") or [])
+    tab_result = _select_routerking_tab("G-Code")
+    errors.extend(tab_result.get("errors") or [])
+
+    widget = _routerking_dock_widget()
+    if widget is None:
+        return {
+            "corner": corner,
+            "fit_status": None,
+            "gcode_lines": 0,
+            "capture": None,
+            "errors": [*errors, "RouterKing dock widget not found."],
+        }
+
+    try:
+        widget._on_reset_rectangle_template_controls()
+        widget._on_insert_gcode_template()
+        area = widget._preview_work_area()
+        if area is None:
+            return {
+                "corner": corner,
+                "fit_status": None,
+                "gcode_lines": _routerking_gcode_line_count(widget),
+                "capture": None,
+                "errors": [*errors, "Machine work area unavailable."],
+            }
+
+        corner_key = str(corner or "lower_left").strip().lower().replace("-", "_")
+        point_map = {
+            "lower_left": (area["x_min"], area["y_min"]),
+            "lower_right": (area["x_max"], area["y_min"]),
+            "upper_left": (area["x_min"], area["y_max"]),
+            "upper_right": (area["x_max"], area["y_max"]),
+        }
+        if corner_key not in point_map:
+            return {
+                "corner": corner_key,
+                "fit_status": None,
+                "gcode_lines": _routerking_gcode_line_count(widget),
+                "capture": None,
+                "errors": [*errors, f"Unknown fit corner: {corner}"],
+            }
+
+        preview_point = SimpleNamespace(
+            x=float(point_map[corner_key][0]),
+            y=float(point_map[corner_key][1]),
+            z=float(widget._preview_overlay_z()),
+        )
+        widget._apply_template_fit_pick(preview_point)
+        widget._update_preview()
+        try:
+            widget._preview_view.show()
+            widget._preview_view.viewport().update()
+        except Exception:
+            pass
+        try:
+            import FreeCADGui as Gui  # type: ignore
+            Gui.updateGui()
+        except Exception:
+            pass
+    except Exception as exc:
+        return {
+            "corner": corner,
+            "fit_status": None,
+            "gcode_lines": _routerking_gcode_line_count(widget),
+            "capture": None,
+            "errors": [*errors, f"Template preview preparation failed: {exc}"],
+        }
+
+    capture = _capture_routerking_dock(output_path) if output_path else None
+    fit_label = getattr(widget, "_fit_status", None)
+    return {
+        "corner": str(corner or "lower_left"),
+        "work_area": area,
+        "fit_status": fit_label.text() if fit_label is not None else None,
+        "gcode_lines": _routerking_gcode_line_count(widget),
+        "gcode_preview": _routerking_gcode_excerpt(widget),
+        "capture": capture,
+        "errors": errors,
+    }
+
+
+def _routerking_gcode_line_count(widget) -> int:
+    edit = getattr(widget, "_gcode_edit", None)
+    if edit is None:
+        return 0
+    text = edit.toPlainText()
+    return len([line for line in text.splitlines() if line.strip()])
+
+
+def _routerking_gcode_excerpt(widget, limit: int = 8) -> List[str]:
+    edit = getattr(widget, "_gcode_edit", None)
+    if edit is None:
+        return []
+    return edit.toPlainText().splitlines()[:limit]
+
+
+def _capture_routerking_dock(output_path: str | None = None) -> Dict[str, Any]:
+    errors: List[str] = []
+    try:
+        import os
+    except Exception as exc:
+        return {"path": None, "saved": False, "errors": [f"os import failed: {exc}"]}
+
+    path = output_path or os.path.join(
+        os.path.expanduser("~"),
+        ".local",
+        "state",
+        "routerking",
+        "routerking-dock.png",
+    )
+    path = os.path.expanduser(path)
+
+    try:
+        dock, _QtWidgets = _find_routerking_dock()
+        if dock is None:
+            return {"path": path, "saved": False, "errors": ["RouterKing dock not found."]}
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        pixmap = dock.grab()
+        saved = bool(pixmap.save(path))
+        if not saved:
+            errors.append(f"Qt failed to save dock capture: {path}")
+        return {
+            "path": path,
+            "saved": saved,
+            "width": int(pixmap.width()),
+            "height": int(pixmap.height()),
+            "errors": errors,
+        }
+    except Exception as exc:
+        return {"path": path, "saved": False, "errors": [f"RouterKing dock capture failed: {exc}"]}
 
 
 def _exec_with_optional_last_expr(code: str, namespace: Dict[str, Any]) -> Any:

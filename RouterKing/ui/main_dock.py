@@ -1421,6 +1421,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             "start_y": self._template_spin(default.start_y, -10000.0, 10000.0),
             "origin": QtWidgets.QComboBox(),
             "swap_xy": QtWidgets.QCheckBox("Swap X/Y machining direction"),
+            "rotation_z": QtWidgets.QComboBox(),
             "pass_axis": QtWidgets.QComboBox(),
             "path_direction": QtWidgets.QComboBox(),
             "final_contour": QtWidgets.QCheckBox("Add final contour pass at full depth"),
@@ -1429,6 +1430,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         controls["origin"].addItems(["center", "lower_left"])
         controls["origin"].setCurrentText(default.origin)
         controls["swap_xy"].setChecked(bool(default.swap_xy))
+        controls["rotation_z"].addItems(["0", "90", "180", "270"])
+        controls["rotation_z"].setCurrentText(str(int(getattr(default, "rotation_z", 0))))
+        controls["rotation_z"].setToolTip("Rotation of the pocket/template around machine Z, matching how the workpiece is clamped.")
         controls["pass_axis"].addItems(["x", "y"])
         controls["pass_axis"].setCurrentText(default.pass_axis)
         controls["pass_axis"].setToolTip("Raster pass direction: X means long cutting moves along X, stepping in Y.")
@@ -1465,6 +1469,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         axes_tab = QtWidgets.QWidget()
         axes_form = QtWidgets.QFormLayout(axes_tab)
         axes_form.addRow(controls["swap_xy"])
+        axes_form.addRow("Z rotation (deg)", controls["rotation_z"])
         axes_form.addRow("Raster pass axis", controls["pass_axis"])
         axes_form.addRow("Path order", controls["path_direction"])
         axes_form.addRow(controls["final_contour"])
@@ -4790,6 +4795,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             start_x=controls["start_x"].value(),
             start_y=controls["start_y"].value(),
             swap_xy=controls["swap_xy"].isChecked(),
+            rotation_z=int(controls["rotation_z"].currentText()),
             pass_axis=controls["pass_axis"].currentText(),
             path_direction=controls["path_direction"].currentText(),
             final_contour=controls["final_contour"].isChecked(),
@@ -4823,6 +4829,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             controls[key].setValue(float(getattr(spec, key)))
         controls["origin"].setCurrentText(spec.origin)
         controls["swap_xy"].setChecked(bool(spec.swap_xy))
+        controls["rotation_z"].setCurrentText(str(int(getattr(spec, "rotation_z", 0))))
         controls["pass_axis"].setCurrentText(spec.pass_axis)
         controls["path_direction"].setCurrentText(spec.path_direction)
         controls["final_contour"].setChecked(bool(spec.final_contour))
@@ -4872,6 +4879,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         origin.setCurrentText(default.origin)
         swap_xy = QtWidgets.QCheckBox("Swap X/Y machining direction")
         swap_xy.setChecked(bool(default.swap_xy))
+        rotation_z = QtWidgets.QComboBox()
+        rotation_z.addItems(["0", "90", "180", "270"])
+        rotation_z.setCurrentText(str(int(getattr(default, "rotation_z", 0))))
 
         form.addRow("Width (mm)", width)
         form.addRow("Length (mm)", height)
@@ -4887,6 +4897,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         form.addRow("Start Y (mm)", start_y)
         form.addRow("Origin", origin)
         form.addRow(swap_xy)
+        form.addRow("Z rotation (deg)", rotation_z)
         layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -4918,6 +4929,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             start_x=start_x.value(),
             start_y=start_y.value(),
             swap_xy=swap_xy.isChecked(),
+            rotation_z=int(rotation_z.currentText()),
             cut_start_x=default.cut_start_x,
             cut_start_y=default.cut_start_y,
         )
@@ -5819,8 +5831,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _template_effective_size(self, spec):
         if bool(getattr(spec, "swap_xy", False)):
-            return float(spec.height), float(spec.width)
-        return float(spec.width), float(spec.height)
+            width, height = float(spec.height), float(spec.width)
+        else:
+            width, height = float(spec.width), float(spec.height)
+        rotation = int(float(getattr(spec, "rotation_z", 0) or 0)) % 360
+        if rotation in {90, 270}:
+            return height, width
+        return width, height
 
     def _template_start_for_corner(self, spec, width, height, x_value, y_value, corner):
         origin = str(getattr(spec, "origin", "center") or "center").strip().lower().replace("-", "_")

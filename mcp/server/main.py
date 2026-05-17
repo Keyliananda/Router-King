@@ -37,6 +37,7 @@ from .routerking_tools import (
     routerking_cam_list_setups,
     routerking_cam_postprocess,
     routerking_cam_analyze_gcode,
+    routerking_capture_dock,
     routerking_console_exec,
     routerking_console_read,
     routerking_console_reset,
@@ -45,7 +46,9 @@ from .routerking_tools import (
     routerking_list_actions,
     routerking_open_panel,
     routerking_optimize_splines_preview,
+    routerking_prepare_template_preview,
     routerking_run_script,
+    routerking_select_tab,
     routerking_ui_state,
 )
 
@@ -61,6 +64,19 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
         "routerking_list_actions": lambda **_: routerking_list_actions(bound_connection),
         "routerking_open_panel": lambda **_: routerking_open_panel(connection=bound_connection),
         "routerking_ui_state": lambda **_: routerking_ui_state(connection=bound_connection),
+        "routerking_select_tab": lambda **payload: routerking_select_tab(
+            tab=payload.get("tab", "G-Code"),
+            connection=bound_connection,
+        ),
+        "routerking_capture_dock": lambda **payload: routerking_capture_dock(
+            output_path=payload.get("output_path"),
+            connection=bound_connection,
+        ),
+        "routerking_prepare_template_preview": lambda **payload: routerking_prepare_template_preview(
+            corner=payload.get("corner", "lower_left"),
+            output_path=payload.get("output_path"),
+            connection=bound_connection,
+        ),
         "routerking_apply_actions": lambda **kwargs: routerking_apply_actions(
             payload=kwargs.get("payload"),
             include_context=kwargs.get("include_context", True),

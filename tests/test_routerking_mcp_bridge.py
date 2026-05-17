@@ -162,6 +162,19 @@ class TestRouterKingMcpBridge(unittest.TestCase):
             def isFloating(self):
                 return False
 
+            def findChildren(self, _klass):
+                return [FakeTabs()]
+
+        class FakeTabs:
+            def currentIndex(self):
+                return 1
+
+            def count(self):
+                return 3
+
+            def tabText(self, index):
+                return ["Control", "G-Code", "AI Tools"][index]
+
         class FakeMainWindow:
             def findChildren(self, _klass):
                 return [FakeDock()]
@@ -174,7 +187,7 @@ class TestRouterKingMcpBridge(unittest.TestCase):
             activeWorkbench=lambda: FakeWorkbench(),
             getMainWindow=lambda: FakeMainWindow(),
         )
-        fake_widgets = SimpleNamespace(QDockWidget=object)
+        fake_widgets = SimpleNamespace(QDockWidget=object, QTabWidget=object)
         bridge = RouterKingBridge(
             action_executor=lambda actions: (["ok"], []),
             context_module=StubContextModule,
@@ -197,6 +210,127 @@ class TestRouterKingMcpBridge(unittest.TestCase):
         self.assertEqual(response["data"]["active_workbench"], "RouterKingWorkbench")
         self.assertEqual(response["data"]["active_document_file"], "/tmp/tee-tablett.FCStd")
         self.assertTrue(response["data"]["routerking_dock_visible"])
+        self.assertEqual(response["data"]["routerking_tabs"][0]["current_text"], "G-Code")
+
+    def test_select_tab_sets_routerking_tab(self):
+        class FakeWorkbench:
+            @staticmethod
+            def name():
+                return "RouterKingWorkbench"
+
+        class FakeTabs:
+            def __init__(self):
+                self.current = 0
+
+            def count(self):
+                return 3
+
+            def tabText(self, index):
+                return ["Control", "G-Code", "AI Tools"][index]
+
+            def setCurrentIndex(self, index):
+                self.current = index
+
+            def currentIndex(self):
+                return self.current
+
+        tabs = FakeTabs()
+
+        class FakeDock:
+            def objectName(self):
+                return "RouterKingDock"
+
+            def windowTitle(self):
+                return "RouterKing"
+
+            def show(self):
+                return None
+
+            def raise_(self):
+                return None
+
+            def findChildren(self, _klass):
+                return [tabs]
+
+        class FakeMainWindow:
+            def findChildren(self, _klass):
+                return [FakeDock()]
+
+        fake_gui = SimpleNamespace(
+            activeWorkbench=lambda: FakeWorkbench(),
+            activateWorkbench=lambda _name: None,
+            getMainWindow=lambda: FakeMainWindow(),
+            updateGui=lambda: None,
+        )
+        fake_widgets = SimpleNamespace(QDockWidget=object, QTabWidget=object)
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "FreeCADGui": fake_gui,
+                "PySide2": SimpleNamespace(QtWidgets=fake_widgets),
+                "PySide2.QtWidgets": fake_widgets,
+            },
+        ):
+            response = bridge.select_tab("G-Code")
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["data"]["selected_tab"], "G-Code")
+        self.assertEqual(tabs.current, 1)
+
+    def test_capture_dock_grabs_routerking_widget(self):
+        class FakePixmap:
+            def width(self):
+                return 320
+
+            def height(self):
+                return 240
+
+            def save(self, _path):
+                return True
+
+        class FakeDock:
+            def objectName(self):
+                return "RouterKingDock"
+
+            def windowTitle(self):
+                return "RouterKing"
+
+            def grab(self):
+                return FakePixmap()
+
+        class FakeMainWindow:
+            def findChildren(self, _klass):
+                return [FakeDock()]
+
+        fake_gui = SimpleNamespace(getMainWindow=lambda: FakeMainWindow())
+        fake_widgets = SimpleNamespace(QDockWidget=object)
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "FreeCADGui": fake_gui,
+                "PySide2": SimpleNamespace(QtWidgets=fake_widgets),
+                "PySide2.QtWidgets": fake_widgets,
+            },
+        ):
+            response = bridge.capture_dock("/tmp/routerking-dock.png")
+
+        self.assertTrue(response["success"])
+        self.assertTrue(response["data"]["saved"])
+        self.assertEqual(response["data"]["width"], 320)
 
     def test_list_actions_returns_registry(self):
         bridge = RouterKingBridge(
