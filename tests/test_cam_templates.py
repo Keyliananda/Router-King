@@ -35,10 +35,11 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIsInstance(program, GcodeProgram)
         self.assertEqual(program.template, "rectangle_pocket")
         self.assertEqual(program.spec, spec)
-        self.assertEqual(program.lines[:8], [
+        self.assertEqual(program.lines[:9], [
             "; RouterKing rectangle pocket template",
             "; size: 40 x 40 x 5 mm",
             "; tool: 3 mm",
+            "; axes: normal",
             "; start: X0 Y0",
             "G21",
             "G90",
@@ -69,6 +70,30 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIn("G1 X28.5 Y1.5 F500", program.lines)
         self.assertIn("G1 X28.5 Y38.5 F500", program.lines)
         self.assertEqual(program.lines[-2:], ["G0 X10 Y20", "M2"])
+
+    def test_rectangle_pocket_can_swap_xy_axes(self):
+        spec = self._forty_mm_spec()
+        spec.width = 30.0
+        spec.height = 20.0
+        spec.swap_xy = True
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; axes: swapped", program.lines)
+        self.assertIn("G0 X-8.5 Y-13.5", program.lines)
+        self.assertIn("G1 X-8.5 Y13.5 F500", program.lines)
+
+    def test_rectangle_pocket_can_prefer_cut_start_without_moving_geometry(self):
+        spec = self._forty_mm_spec()
+        spec.cut_start_x = 18.5
+        spec.cut_start_y = 18.5
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; cut start target: X18.5 Y18.5", program.lines)
+        self.assertIn("; start: X0 Y0", program.lines)
+        self.assertIn("G0 X18.5 Y18.5", program.lines[:16])
+        self.assertEqual(program.lines[-2:], ["G0 X0 Y0", "M2"])
 
     def test_square_pocket_accepts_size_keyword(self):
         program = square_pocket(
@@ -172,6 +197,9 @@ class TestPocketTemplates(unittest.TestCase):
             {"origin": "g54"},
             {"start_x": "left"},
             {"start_y": None},
+            {"cut_start_x": "left", "cut_start_y": 1.0},
+            {"cut_start_x": 1.0},
+            {"cut_start_y": 1.0},
         ]
 
         for overrides in cases:

@@ -24,6 +24,9 @@ class TemplateSpec:
     name: Optional[str] = None
     start_x: float = 0.0
     start_y: float = 0.0
+    swap_xy: bool = False
+    cut_start_x: Optional[float] = None
+    cut_start_y: Optional[float] = None
 
 
 _RECTANGLE_POCKET_PRESET_SPECS = {
@@ -92,7 +95,10 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
     spec = _coerce_spec(spec, kwargs)
     _validate_spec(spec)
 
-    paths = _offset_paths(_raster_paths(spec), spec.start_x, spec.start_y)
+    local_paths = _orient_paths(_raster_paths(spec), spec)
+    paths = _offset_paths(local_paths, spec.start_x, spec.start_y)
+    if spec.cut_start_x is not None and spec.cut_start_y is not None:
+        paths = _prefer_start_near(paths, spec.cut_start_x, spec.cut_start_y)
     depths = _depth_levels(spec.start_z, spec.depth, spec.step_down)
     first_x, first_y = paths[0]
 
@@ -100,12 +106,15 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
         _template_header("rectangle pocket", spec),
         f"; size: {_fmt(spec.width)} x {_fmt(spec.height)} x {_fmt(spec.depth)} mm",
         f"; tool: {_fmt(spec.tool_diameter)} mm",
+        f"; axes: {'swapped' if spec.swap_xy else 'normal'}",
         f"; start: X{_fmt(spec.start_x)} Y{_fmt(spec.start_y)}",
         "G21",
         "G90",
         "G17",
         f"G0 Z{_fmt(spec.safe_z)}",
     ]
+    if spec.cut_start_x is not None and spec.cut_start_y is not None:
+        lines.insert(5, f"; cut start target: X{_fmt(spec.cut_start_x)} Y{_fmt(spec.cut_start_y)}")
 
     for depth in depths:
         lines.append(f"; depth {_fmt(depth)}")
@@ -199,6 +208,14 @@ def _validate_spec(spec: TemplateSpec) -> None:
         value = getattr(spec, name)
         if not isinstance(value, (int, float)):
             raise ValueError(f"{name} must be numeric.")
+    if spec.cut_start_x is None and spec.cut_start_y is not None:
+        raise ValueError("cut_start_x must be set when cut_start_y is set.")
+    if spec.cut_start_y is None and spec.cut_start_x is not None:
+        raise ValueError("cut_start_y must be set when cut_start_x is set.")
+    for name in ("cut_start_x", "cut_start_y"):
+        value = getattr(spec, name)
+        if value is not None and not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be numeric when set.")
 
 
 def _depth_levels(start_z: float, depth: float, step_down: float) -> list[float]:
@@ -229,6 +246,51 @@ def _raster_paths(spec: TemplateSpec) -> list[Point2D]:
 
 def _offset_paths(points: Sequence[Point2D], start_x: float, start_y: float) -> list[Point2D]:
     return [(x_val + start_x, y_val + start_y) for x_val, y_val in points]
+
+
+def _orient_paths(points: Sequence[Point2D], spec: TemplateSpec) -> list[Point2D]:
+    oriented = [(y_val, x_val) for x_val, y_val in points] if spec.swap_xy else list(points)
+    return oriented
+
+
+def _prefer_start_near(points: Sequence[Point2D], target_x: float, target_y: float) -> list[Point2D]:
+    variants = _path_variants(points)
+    return min(variants, key=lambda variant: _distance_sq(variant[0], (target_x, target_y)))
+
+
+def _path_variants(points: Sequence[Point2D]) -> list[list[Point2D]]:
+    base = list(points)
+    pair_swapped = []
+    for index in range(0, len(base), 2):
+        pair = base[index:index + 2]
+        pair_swapped.extend(reversed(pair))
+
+    row_reversed = []
+    for index in range(len(base) - 2, -1, -2):
+        row_reversed.extend(base[index:index + 2])
+
+    variants = [
+        base,
+        list(reversed(base)),
+        pair_swapped,
+        list(reversed(pair_swapped)),
+        row_reversed,
+        list(reversed(row_reversed)),
+    ]
+    deduped = []
+    seen = set()
+    for variant in variants:
+        key = tuple(variant)
+        if key not in seen and variant:
+            seen.add(key)
+            deduped.append(variant)
+    return deduped
+
+
+def _distance_sq(left: Point2D, right: Point2D) -> float:
+    dx = left[0] - right[0]
+    dy = left[1] - right[1]
+    return dx * dx + dy * dy
 
 
 def _bounds(spec: TemplateSpec, radius: float) -> tuple[float, float, float, float]:

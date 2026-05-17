@@ -674,10 +674,35 @@ class TestMainDock(unittest.TestCase):
 
         widget._apply_template_start_snap(point)
 
-        self.assertEqual(widget._last_template_spec.start_x, 12.0)
-        self.assertEqual(widget._last_template_spec.start_y, -3.0)
-        self.assertIn("; start: X12 Y-3", widget._gcode_edit.toPlainText())
+        self.assertEqual(widget._last_template_spec.start_x, 0.0)
+        self.assertEqual(widget._last_template_spec.start_y, 0.0)
+        self.assertEqual(widget._last_template_spec.cut_start_x, 12.0)
+        self.assertEqual(widget._last_template_spec.cut_start_y, -3.0)
+        self.assertIn("; start: X0 Y0", widget._gcode_edit.toPlainText())
+        self.assertIn("; cut start target: X12 Y-3", widget._gcode_edit.toPlainText())
         widget._disable_template_snap.assert_called_once_with()
+
+    def test_template_cut_start_candidates_ignore_safe_z_points(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._last_template_spec = main_dock.TemplateSpec(
+            width=20.0,
+            height=10.0,
+            depth=2.0,
+            tool_diameter=2.0,
+            step_down=1.0,
+            step_over=1.0,
+            feed_rate=400.0,
+            plunge_rate=100.0,
+            safe_z=5.0,
+            start_z=0.0,
+        )
+        path = main_dock.parse_gcode_preview("G90\nG0 X1 Y2 Z5\nG1 Z-1\nG1 X3 Y2")
+
+        candidates = widget._template_cut_start_candidates(path, "top")
+
+        self.assertTrue(candidates)
+        self.assertTrue(all(candidate.point.z <= 0.0 for candidate in candidates))
 
     def test_start_job_blocks_when_validation_fails(self):
         main_dock = _load_main_dock_module()

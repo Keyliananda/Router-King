@@ -4620,11 +4620,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         origin = QtWidgets.QComboBox()
         origin.addItems(["center", "lower_left"])
         origin.setCurrentText(default.origin)
+        swap_xy = QtWidgets.QCheckBox("Swap X/Y machining direction")
+        swap_xy.setChecked(bool(default.swap_xy))
 
         form.addRow("Width (mm)", width)
         form.addRow("Length (mm)", height)
         form.addRow("Depth (mm)", depth)
-        form.addRow("Tool diameter (mm)", tool_diameter)
+        form.addRow("Cutter diameter (mm)", tool_diameter)
         form.addRow("Step down (mm)", step_down)
         form.addRow("Step over (mm)", step_over)
         form.addRow("Feed rate (mm/min)", feed_rate)
@@ -4634,6 +4636,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         form.addRow("Start X (mm)", start_x)
         form.addRow("Start Y (mm)", start_y)
         form.addRow("Origin", origin)
+        form.addRow(swap_xy)
         layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -4664,6 +4667,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             origin=origin.currentText(),
             start_x=start_x.value(),
             start_y=start_y.value(),
+            swap_xy=swap_xy.isChecked(),
+            cut_start_x=default.cut_start_x,
+            cut_start_y=default.cut_start_y,
         )
 
     def _default_rectangle_template_spec(self):
@@ -5148,7 +5154,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         path = parse_gcode_preview(self._gcode_edit.toPlainText())
         projection = self._preview_projection_name()
-        candidates = preview_snap_candidates(path, projection)
+        candidates = self._template_cut_start_candidates(path, projection)
         if not candidates:
             self._append_console("Set cut start snap blocked: no preview snap points.", force=True)
             return
@@ -5157,6 +5163,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._append_console(
             "Set cut start snap: move near a path corner or direction change and click within 5 px.",
             force=True,
+        )
+
+    def _template_cut_start_candidates(self, path, projection):
+        spec = getattr(self, "_last_template_spec", None)
+        start_z = float(spec.start_z) if spec is not None else 0.0
+        return tuple(
+            candidate
+            for candidate in preview_snap_candidates(path, projection)
+            if candidate.point.z <= start_z + 1e-6
         )
 
     def _enable_template_snap(self, candidates):
@@ -5182,7 +5197,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         spec = getattr(self, "_last_template_spec", None)
         if spec is None:
             return
-        spec = replace(spec, start_x=point.x, start_y=point.y)
+        spec = replace(spec, cut_start_x=point.x, cut_start_y=point.y)
         try:
             program = rectangle_pocket(spec)
         except ValueError as exc:
@@ -5192,7 +5207,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._disable_template_snap()
         self._gcode_edit.setPlainText(program.gcode + "\n")
         self._append_console(
-            f"Cut start set from snap: X{point.x:.3f} Y{point.y:.3f}. Template regenerated.",
+            f"Cut start set from snap: X{point.x:.3f} Y{point.y:.3f}. Template regenerated without moving the pocket.",
             force=True,
         )
         self._update_preview()
