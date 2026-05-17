@@ -34,18 +34,21 @@ class TemplateSpec:
 
 _RECTANGLE_POCKET_PRESET_SPECS = {
     "tee_tablett": TemplateSpec(
-        name="Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm",
+        name="Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm, 38 mm cutter",
         width=230.0,
         height=160.0,
         depth=4.0,
-        tool_diameter=3.0,
+        tool_diameter=38.0,
         step_down=1.0,
-        step_over=1.05,
+        step_over=13.3,
         feed_rate=800.0,
         plunge_rate=300.0,
         safe_z=6.0,
         start_z=0.0,
         origin="center",
+        source_document="tee-tablett",
+        source_object="Body",
+        source_feature="Pocket002",
     ),
 }
 

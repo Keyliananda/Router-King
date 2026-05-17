@@ -645,10 +645,11 @@ class TestMainDock(unittest.TestCase):
 
         spec = widget._default_rectangle_template_spec()
 
-        self.assertEqual(spec.name, "Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm")
+        self.assertEqual(spec.name, "Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm, 38 mm cutter")
         self.assertEqual(spec.width, 230.0)
         self.assertEqual(spec.height, 160.0)
         self.assertEqual(spec.depth, 4.0)
+        self.assertEqual(spec.tool_diameter, 38.0)
         self.assertEqual(spec.safe_z, 6.0)
 
     def test_apply_template_start_snap_regenerates_with_selected_point(self):

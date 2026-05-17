@@ -156,25 +156,30 @@ class TestPocketTemplates(unittest.TestCase):
         first.width = 10.0
 
         self.assertEqual(RECTANGLE_POCKET_PRESETS["tee_tablett"].width, 230.0)
-        self.assertEqual(second.name, "Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm")
+        self.assertEqual(second.name, "Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm, 38 mm cutter")
         self.assertEqual(second.width, 230.0)
         self.assertEqual(second.height, 160.0)
         self.assertEqual(second.depth, 4.0)
-        self.assertEqual(second.tool_diameter, 3.0)
+        self.assertEqual(second.tool_diameter, 38.0)
         self.assertEqual(second.step_down, 1.0)
-        self.assertEqual(second.step_over, 1.05)
+        self.assertEqual(second.step_over, 13.3)
         self.assertEqual(second.feed_rate, 800.0)
         self.assertEqual(second.plunge_rate, 300.0)
         self.assertEqual(second.safe_z, 6.0)
         self.assertEqual(second.origin, "center")
+        self.assertEqual(second.source_document, "tee-tablett")
+        self.assertEqual(second.source_object, "Body")
+        self.assertEqual(second.source_feature, "Pocket002")
 
         program = rectangle_pocket(second)
 
         self.assertEqual(
             program.lines[0],
-            "; RouterKing rectangle pocket template: Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm",
+            "; RouterKing rectangle pocket template: Tee-Tablett Pocket002 bottom-up 230 x 160 x 4 mm, 38 mm cutter",
         )
-        self.assertIn("G0 X-113.5 Y-78.5", program.lines)
+        self.assertIn("; tool: 38 mm", program.lines)
+        self.assertIn("; source: document=tee-tablett, object=Body, feature=Pocket002", program.lines)
+        self.assertIn("G0 X-96 Y-61", program.lines)
 
     def test_preset_accepts_overrides(self):
         spec = rectangle_pocket_preset("tee tablett", start_x=25.0, start_y=30.0)
@@ -183,7 +188,7 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertEqual(spec.start_x, 25.0)
         self.assertEqual(spec.start_y, 30.0)
         self.assertIn("; start: X25 Y30", program.lines)
-        self.assertIn("G0 X-88.5 Y-48.5", program.lines)
+        self.assertIn("G0 X-71 Y-31", program.lines)
 
     def test_program_omits_coordinate_setup_and_probe_commands(self):
         program = rectangle_pocket(self._forty_mm_spec())
