@@ -83,6 +83,16 @@ def routerking_cam_capabilities(connection: Optional[FreeCADConnection] = None):
     return (connection or FreeCADConnection()).invoke("cam_capabilities")
 
 
+def routerking_open_panel(connection: Optional[FreeCADConnection] = None):
+    """Activate RouterKing in FreeCAD and open the RouterKing panel."""
+    return (connection or FreeCADConnection()).invoke("open_panel")
+
+
+def routerking_ui_state(connection: Optional[FreeCADConnection] = None):
+    """Read FreeCAD/RouterKing UI state for CLI health checks."""
+    return (connection or FreeCADConnection()).invoke("ui_state")
+
+
 def routerking_cam_list_setups(
     *,
     document: Optional[str] = None,

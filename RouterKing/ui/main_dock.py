@@ -45,8 +45,11 @@ try:
         make_jog_vector,
     )
     from .gcode_preview import (
+        PreviewPoint,
+        PreviewSnapCandidate,
         nearest_preview_snap,
         parse_gcode_preview,
+        project_point,
         preview_snap_candidates,
         render_preview_scene,
     )
@@ -69,8 +72,11 @@ except ImportError:
         make_jog_vector,
     )
     from ui.gcode_preview import (
+        PreviewPoint,
+        PreviewSnapCandidate,
         nearest_preview_snap,
         parse_gcode_preview,
+        project_point,
         preview_snap_candidates,
         render_preview_scene,
     )
@@ -664,6 +670,7 @@ class GcodePreviewView(QtWidgets.QGraphicsView):
         self._snap_candidates = ()
         self._snap_callback = None
         self._snap_marker = None
+        self._projection_name = "iso"
         self.setRenderHint(QtGui.QPainter.Antialiasing)
         self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
@@ -681,6 +688,9 @@ class GcodePreviewView(QtWidgets.QGraphicsView):
 
     def set_snap_candidates(self, candidates):
         self._snap_candidates = tuple(candidates or ())
+
+    def set_projection_name(self, projection):
+        self._projection_name = str(projection or "iso").lower()
 
     def wheelEvent(self, event):
         try:
@@ -720,14 +730,17 @@ class GcodePreviewView(QtWidgets.QGraphicsView):
             self._clear_snap_marker()
             return
         x_val, y_val = match.candidate.projected
-        radius = max(self._scene_units_per_pixel() * 5.0, 0.25)
+        self._draw_snap_marker(x_val, y_val, QtGui.QColor(255, 210, 0, 80), pixel_radius=5.0)
+
+    def _draw_snap_marker(self, x_val, y_val, color, pixel_radius=5.0):
+        radius = max(self._scene_units_per_pixel() * float(pixel_radius), 0.25)
         if self._snap_marker is not None:
             try:
                 self.scene().removeItem(self._snap_marker)
             except Exception:
                 pass
         pen = QtGui.QPen(QtGui.QColor(255, 210, 0), 0)
-        brush = QtGui.QBrush(QtGui.QColor(255, 210, 0, 80))
+        brush = QtGui.QBrush(color)
         self._snap_marker = self.scene().addEllipse(
             x_val - radius,
             y_val - radius,
@@ -879,6 +892,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._template_source_summary = None
         self._template_cad_tool_summary = None
         self._template_snap_active = False
+        self._template_fit_pick_active = False
+        self._template_fit_candidates = []
+        self._template_fit_index = None
+        self._template_fit_point = None
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
         self._dxf_import_defaults = {}
@@ -1272,9 +1289,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         manual_start_row = QtWidgets.QHBoxLayout()
         self._set_manual_start_btn = QtWidgets.QPushButton("Set Manual Start")
+        self._use_manual_start_template_btn = QtWidgets.QPushButton("Use Manual Start In Template")
         self._go_manual_start_btn = QtWidgets.QPushButton("Go To Manual Start Safely")
         self._manual_start_status = QtWidgets.QLabel("Manual start: not set")
         manual_start_row.addWidget(self._set_manual_start_btn)
+        manual_start_row.addWidget(self._use_manual_start_template_btn)
         manual_start_row.addWidget(self._go_manual_start_btn)
         manual_start_row.addWidget(self._manual_start_status, 1)
         layout.addLayout(manual_start_row)
@@ -1297,9 +1316,20 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_preview_projection.setToolTip("Choose the G-code preview projection.")
         self._open_preview_btn = QtWidgets.QPushButton("Open Preview")
         self._snap_start_btn = QtWidgets.QPushButton("Set Cut Start Snap")
+        self._preview_tool_area_check = QtWidgets.QCheckBox("Show Tool Area")
+        self._preview_tool_area_check.setChecked(True)
+        self._pick_fit_corner_btn = QtWidgets.QPushButton("Pick Fit Corner")
+        self._prev_fit_btn = QtWidgets.QPushButton("Prev Fit")
+        self._next_fit_btn = QtWidgets.QPushButton("Next Fit")
+        self._fit_status = QtWidgets.QLabel("Fit: pick corner")
         preview_row.addWidget(self._gcode_preview_projection)
         preview_row.addWidget(self._open_preview_btn)
         preview_row.addWidget(self._snap_start_btn)
+        preview_row.addWidget(self._preview_tool_area_check)
+        preview_row.addWidget(self._pick_fit_corner_btn)
+        preview_row.addWidget(self._prev_fit_btn)
+        preview_row.addWidget(self._next_fit_btn)
+        preview_row.addWidget(self._fit_status)
         preview_row.addStretch(1)
         layout.addLayout(preview_row)
 
@@ -1333,14 +1363,19 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._pause_btn.clicked.connect(self._on_pause_resume_job)
         self._stop_btn.clicked.connect(self._on_stop_job)
         self._set_manual_start_btn.clicked.connect(self._on_set_manual_start)
+        self._use_manual_start_template_btn.clicked.connect(self._on_use_manual_start_in_template)
         self._go_manual_start_btn.clicked.connect(self._on_go_to_manual_start_safely)
         self._cam_check_btn.clicked.connect(self._on_cam_check)
         self._cam_activate_btn.clicked.connect(self._on_cam_activate)
         self._gcode_edit.textChanged.connect(self._update_job_controls)
         self._gcode_edit.textChanged.connect(self._schedule_preview_update)
         self._gcode_preview_projection.currentTextChanged.connect(self._update_preview)
+        self._preview_tool_area_check.toggled.connect(self._update_preview)
         self._open_preview_btn.clicked.connect(self._on_open_gcode_preview)
         self._snap_start_btn.clicked.connect(self._on_set_template_start_from_snap)
+        self._pick_fit_corner_btn.clicked.connect(self._on_pick_template_fit_corner)
+        self._prev_fit_btn.clicked.connect(self._on_previous_template_fit)
+        self._next_fit_btn.clicked.connect(self._on_next_template_fit)
 
         self._preview_refresh_timer = QtCore.QTimer(self)
         self._preview_refresh_timer.setSingleShot(True)
@@ -4708,6 +4743,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _on_insert_gcode_template(self):
         if self._gcode_edit.toPlainText().strip() and not self._confirm_replace_gcode():
             return
+        self._clear_template_fit_selection()
         spec = self._read_rectangle_template_controls()
         if spec is None:
             spec = self._show_rectangle_template_dialog()
@@ -4806,6 +4842,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._populate_rectangle_template_controls(spec)
         self._last_template_spec = spec
         self._append_console("Rectangle template parameters reset to Tee-Tablett defaults.", force=True)
+        self._clear_template_fit_selection()
+        self._update_preview()
 
     def _show_rectangle_template_dialog(self):
         default = self._default_rectangle_template_spec()
@@ -5078,6 +5116,41 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             f"WPos X{live['wpos']['x']:.3f} Y{live['wpos']['y']:.3f} Z{live['wpos']['z']:.3f}",
             force=True,
         )
+        self._update_preview()
+        self._update_job_controls()
+
+    def _on_use_manual_start_in_template(self):
+        start = getattr(self, "_gcode_manual_start_wpos", None)
+        if not start:
+            self._append_console("Use manual start blocked: manual start not set.", force=True)
+            return
+        controls = getattr(self, "_template_controls", None)
+        if not controls:
+            self._append_console("Use manual start blocked: template controls unavailable.", force=True)
+            return
+        controls["start_z"].setValue(float(start["z"]))
+        spec = self._read_rectangle_template_controls()
+        if spec is None:
+            return
+        spec = replace(
+            spec,
+            start_z=float(start["z"]),
+            cut_start_x=float(start["x"]),
+            cut_start_y=float(start["y"]),
+        )
+        try:
+            program = rectangle_pocket(spec)
+        except ValueError as exc:
+            self._append_console(f"Use manual start failed: {exc}", force=True)
+            return
+        self._last_template_spec = spec
+        self._gcode_edit.setPlainText(program.gcode + "\n")
+        self._append_console(
+            "Manual start applied as cut start target: "
+            f"X{start['x']:.3f} Y{start['y']:.3f} Z{start['z']:.3f}.",
+            force=True,
+        )
+        self._update_preview()
         self._update_job_controls()
 
     def _can_set_manual_start(self):
@@ -5342,6 +5415,21 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 and not self._explore_active
                 and bool(getattr(self, "_gcode_manual_start_wpos", None))
             )
+        use_manual_start_btn = getattr(self, "_use_manual_start_template_btn", None)
+        if use_manual_start_btn is not None:
+            use_manual_start_btn.setEnabled(bool(getattr(self, "_gcode_manual_start_wpos", None)))
+        pick_fit_btn = getattr(self, "_pick_fit_corner_btn", None)
+        if pick_fit_btn is not None:
+            pick_fit_btn.setEnabled(not streaming)
+            pick_fit_btn.setText("Cancel Fit Pick" if getattr(self, "_template_fit_pick_active", False) else "Pick Fit Corner")
+        fit_candidates = getattr(self, "_template_fit_candidates", None) or []
+        can_cycle_fit = len(fit_candidates) > 1 and not streaming
+        prev_fit_btn = getattr(self, "_prev_fit_btn", None)
+        if prev_fit_btn is not None:
+            prev_fit_btn.setEnabled(can_cycle_fit)
+        next_fit_btn = getattr(self, "_next_fit_btn", None)
+        if next_fit_btn is not None:
+            next_fit_btn.setEnabled(can_cycle_fit)
 
     def _update_machine_controls(self):
         connected = self._sender.is_connected()
@@ -5452,7 +5540,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _update_preview(self):
         projection = self._preview_projection_name()
-        self._render_gcode_preview(self._preview_scene, self._preview_view, projection)
+        scene = getattr(self, "_preview_scene", None)
+        view = getattr(self, "_preview_view", None)
+        if scene is not None and view is not None:
+            self._render_gcode_preview(scene, view, projection)
         self._refresh_detached_preview()
 
     def _preview_projection_name(self):
@@ -5465,15 +5556,380 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         text = self._gcode_edit.toPlainText()
         path = parse_gcode_preview(text)
         scene.clear()
+        if hasattr(view, "set_projection_name"):
+            view.set_projection_name(projection)
         bounds = render_preview_scene(scene, path, projection=projection, clear=False)
+        self._render_preview_tool_area_overlay(scene, projection)
         candidates = preview_snap_candidates(path, projection)
         if hasattr(view, "set_snap_candidates"):
-            view.set_snap_candidates(candidates)
-        if bounds is None:
+            if getattr(self, "_template_fit_pick_active", False):
+                view.set_snap_candidates(self._template_fit_pick_candidates(projection))
+            else:
+                view.set_snap_candidates(candidates)
+        scene_bounds = scene.itemsBoundingRect()
+        if bounds is None and scene_bounds.isNull():
             return
-        bounds = scene.itemsBoundingRect()
-        if not bounds.isNull():
-            view.fitInView(bounds, QtCore.Qt.KeepAspectRatio)
+        if not scene_bounds.isNull():
+            view.fitInView(scene_bounds, QtCore.Qt.KeepAspectRatio)
+
+    def _render_preview_tool_area_overlay(self, scene, projection):
+        if not self._preview_tool_area_enabled():
+            return
+        self._add_preview_machine_area(scene, projection)
+        self._add_preview_template_fit_candidates(scene, projection)
+        self._add_preview_manual_tool_dummy(scene, projection)
+
+    def _preview_tool_area_enabled(self):
+        checkbox = getattr(self, "_preview_tool_area_check", None)
+        if checkbox is None:
+            return True
+        try:
+            return checkbox.isChecked()
+        except Exception:
+            return True
+
+    def _add_preview_machine_area(self, scene, projection):
+        area = self._preview_work_area()
+        if area is None:
+            return
+        qt_gui = QtGui
+        pen = qt_gui.QPen(qt_gui.QColor(80, 180, 110, 160), 0)
+        z_value = self._preview_overlay_z()
+        corners = [
+            PreviewPoint(area["x_min"], area["y_min"], z_value),
+            PreviewPoint(area["x_max"], area["y_min"], z_value),
+            PreviewPoint(area["x_max"], area["y_max"], z_value),
+            PreviewPoint(area["x_min"], area["y_max"], z_value),
+        ]
+        for start, end in zip(corners, corners[1:] + corners[:1]):
+            scene.addLine(*project_point(start, projection), *project_point(end, projection), pen)
+
+    def _add_preview_template_fit_candidates(self, scene, projection):
+        candidates = getattr(self, "_template_fit_candidates", None) or []
+        if not candidates:
+            return
+        selected = getattr(self, "_template_fit_index", None)
+        z_value = self._preview_overlay_z()
+        qt_gui = QtGui
+        for index, candidate in enumerate(candidates):
+            bounds = candidate.get("bounds") or {}
+            if index == selected:
+                color = qt_gui.QColor(255, 210, 0, 230)
+            else:
+                color = qt_gui.QColor(255, 210, 0, 90)
+            pen = qt_gui.QPen(color, 0)
+            corners = [
+                PreviewPoint(bounds["x_min"], bounds["y_min"], z_value),
+                PreviewPoint(bounds["x_max"], bounds["y_min"], z_value),
+                PreviewPoint(bounds["x_max"], bounds["y_max"], z_value),
+                PreviewPoint(bounds["x_min"], bounds["y_max"], z_value),
+            ]
+            for start, end in zip(corners, corners[1:] + corners[:1]):
+                scene.addLine(*project_point(start, projection), *project_point(end, projection), pen)
+
+    def _add_preview_manual_tool_dummy(self, scene, projection):
+        start = getattr(self, "_gcode_manual_start_wpos", None)
+        if not start:
+            return
+        point = PreviewPoint(float(start["x"]), float(start["y"]), float(start.get("z", 0.0)))
+        x_val, y_val = project_point(point, projection)
+        radius = self._preview_tool_radius()
+        qt_gui = QtGui
+        pen = qt_gui.QPen(qt_gui.QColor(255, 210, 0), 0)
+        brush = qt_gui.QBrush(qt_gui.QColor(255, 210, 0, 60))
+        scene.addEllipse(x_val - radius, y_val - radius, radius * 2.0, radius * 2.0, pen, brush)
+        cross = max(radius * 1.4, 2.0)
+        scene.addLine(x_val - cross, y_val, x_val + cross, y_val, pen)
+        scene.addLine(x_val, y_val - cross, x_val, y_val + cross, pen)
+
+    def _preview_tool_radius(self):
+        spec = self._read_rectangle_template_controls()
+        if spec is not None:
+            try:
+                return max(float(spec.tool_diameter) / 2.0, 1.0)
+            except (TypeError, ValueError):
+                pass
+        return 1.0
+
+    def _preview_overlay_z(self):
+        start = getattr(self, "_gcode_manual_start_wpos", None)
+        if start:
+            try:
+                return float(start.get("z", 0.0))
+            except (TypeError, ValueError):
+                pass
+        spec = getattr(self, "_last_template_spec", None)
+        if spec is not None:
+            return float(spec.start_z)
+        return 0.0
+
+    def _preview_work_area(self):
+        profile = {}
+        try:
+            profile, _profile_path = grbl_load_machine_profile(None)
+        except Exception:
+            profile = {}
+        limits = profile.get("machine_limits") or {}
+        if not isinstance(limits, dict):
+            return None
+        x_limits = limits.get("x")
+        y_limits = limits.get("y")
+        if not x_limits or not y_limits:
+            return None
+        wco = self._preview_work_offset(profile)
+        try:
+            return {
+                "x_min": float(x_limits[0]) - wco["x"],
+                "x_max": float(x_limits[1]) - wco["x"],
+                "y_min": float(y_limits[0]) - wco["y"],
+                "y_max": float(y_limits[1]) - wco["y"],
+            }
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _preview_work_offset(self, profile):
+        sender = getattr(self, "_sender", None)
+        status = getattr(sender, "get_status", lambda: None)() or {}
+        live = self._extract_live_xyz(status)
+        if live is not None and live.get("wco") is not None:
+            return live["wco"]
+        wco = grbl_parse_xyz_value(status.get("WCO"))
+        if wco is not None:
+            return {axis: float(wco[axis]) for axis in ("x", "y", "z")}
+        stored = getattr(self, "_gcode_manual_start_wco", None)
+        if stored:
+            return stored
+        profile_offset = profile.get("work_offset") if isinstance(profile, dict) else None
+        if isinstance(profile_offset, dict):
+            return {
+                "x": float(profile_offset.get("x", 0.0)),
+                "y": float(profile_offset.get("y", 0.0)),
+                "z": float(profile_offset.get("z", 0.0)),
+            }
+        return {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    def _on_pick_template_fit_corner(self):
+        if getattr(self, "_template_fit_pick_active", False):
+            self._disable_template_fit_pick()
+            self._append_console("Fit corner pick cancelled.", force=True)
+            return
+        spec = self._read_rectangle_template_controls()
+        if spec is None:
+            self._append_console("Pick fit corner blocked: template controls unavailable.", force=True)
+            return
+        area = self._preview_work_area()
+        if area is None:
+            self._append_console("Pick fit corner blocked: machine work area unavailable.", force=True)
+            return
+        if getattr(self, "_template_snap_active", False):
+            self._disable_template_snap()
+        self._template_fit_pick_active = True
+        self._enable_template_fit_snap()
+        self._update_fit_status()
+        self._append_console(
+            "Pick fit corner: move near a green work-area corner and click the snap marker.",
+            force=True,
+        )
+        self._update_job_controls()
+
+    def _template_fit_pick_candidates(self, projection):
+        area = self._preview_work_area()
+        if area is None:
+            return ()
+        z_value = self._preview_overlay_z()
+        points = (
+            PreviewPoint(area["x_min"], area["y_min"], z_value),
+            PreviewPoint(area["x_max"], area["y_min"], z_value),
+            PreviewPoint(area["x_max"], area["y_max"], z_value),
+            PreviewPoint(area["x_min"], area["y_max"], z_value),
+        )
+        return tuple(
+            PreviewSnapCandidate(
+                point=point,
+                projected=project_point(point, projection),
+                reasons=("work_area_corner",),
+                segment_indices=(),
+                line_nos=(),
+            )
+            for point in points
+        )
+
+    def _disable_template_fit_pick(self):
+        self._template_fit_pick_active = False
+        for view in self._active_preview_views():
+            view.set_snap_mode(False)
+        self._update_job_controls()
+
+    def _clear_template_fit_selection(self):
+        self._template_fit_candidates = []
+        self._template_fit_index = None
+        self._template_fit_point = None
+        self._update_fit_status()
+
+    def _apply_template_fit_pick(self, point):
+        spec = self._read_rectangle_template_controls()
+        if spec is None:
+            return
+        area = self._preview_work_area()
+        if area is None:
+            self._append_console("Pick fit corner failed: machine work area unavailable.", force=True)
+            self._disable_template_fit_pick()
+            return
+        candidates = self._template_fit_candidates_for_point(spec, point.x, point.y, area)
+        self._disable_template_fit_pick()
+        if not candidates:
+            self._template_fit_candidates = []
+            self._template_fit_index = None
+            self._template_fit_point = point
+            self._update_fit_status()
+            self._update_preview()
+            self._append_console(
+                f"No fit candidate for X{point.x:.3f} Y{point.y:.3f}; rectangle does not fit there.",
+                force=True,
+            )
+            return
+        self._template_fit_candidates = candidates
+        self._template_fit_index = 0
+        self._template_fit_point = point
+        self._apply_template_fit_candidate(0)
+        self._append_console(
+            f"Fit corner picked at X{point.x:.3f} Y{point.y:.3f}: "
+            f"{len(candidates)} placement candidate(s). Use Prev/Next Fit to cycle.",
+            force=True,
+        )
+
+    def _template_fit_candidates_for_point(self, spec, x_value, y_value, area):
+        width, height = self._template_effective_size(spec)
+        candidates = []
+        for corner in ("lower_left", "lower_right", "upper_left", "upper_right"):
+            start_x, start_y = self._template_start_for_corner(spec, width, height, x_value, y_value, corner)
+            bounds = self._template_bounds_for_start(spec, width, height, start_x, start_y)
+            if self._bounds_fit_area(bounds, area):
+                candidates.append(
+                    {
+                        "corner": corner,
+                        "start_x": start_x,
+                        "start_y": start_y,
+                        "cut_start_x": float(x_value),
+                        "cut_start_y": float(y_value),
+                        "bounds": bounds,
+                    }
+                )
+        return candidates
+
+    def _template_effective_size(self, spec):
+        if bool(getattr(spec, "swap_xy", False)):
+            return float(spec.height), float(spec.width)
+        return float(spec.width), float(spec.height)
+
+    def _template_start_for_corner(self, spec, width, height, x_value, y_value, corner):
+        origin = str(getattr(spec, "origin", "center") or "center").strip().lower().replace("-", "_")
+        if origin == "lower_left":
+            if corner == "lower_left":
+                return float(x_value), float(y_value)
+            if corner == "lower_right":
+                return float(x_value) - width, float(y_value)
+            if corner == "upper_left":
+                return float(x_value), float(y_value) - height
+            return float(x_value) - width, float(y_value) - height
+
+        if corner == "lower_left":
+            return float(x_value) + width / 2.0, float(y_value) + height / 2.0
+        if corner == "lower_right":
+            return float(x_value) - width / 2.0, float(y_value) + height / 2.0
+        if corner == "upper_left":
+            return float(x_value) + width / 2.0, float(y_value) - height / 2.0
+        return float(x_value) - width / 2.0, float(y_value) - height / 2.0
+
+    def _template_bounds_for_start(self, spec, width, height, start_x, start_y):
+        origin = str(getattr(spec, "origin", "center") or "center").strip().lower().replace("-", "_")
+        if origin == "lower_left":
+            return {
+                "x_min": float(start_x),
+                "x_max": float(start_x) + width,
+                "y_min": float(start_y),
+                "y_max": float(start_y) + height,
+            }
+        return {
+            "x_min": float(start_x) - width / 2.0,
+            "x_max": float(start_x) + width / 2.0,
+            "y_min": float(start_y) - height / 2.0,
+            "y_max": float(start_y) + height / 2.0,
+        }
+
+    def _bounds_fit_area(self, bounds, area, tolerance=1e-6):
+        return (
+            bounds["x_min"] >= area["x_min"] - tolerance
+            and bounds["x_max"] <= area["x_max"] + tolerance
+            and bounds["y_min"] >= area["y_min"] - tolerance
+            and bounds["y_max"] <= area["y_max"] + tolerance
+        )
+
+    def _on_previous_template_fit(self):
+        self._cycle_template_fit(-1)
+
+    def _on_next_template_fit(self):
+        self._cycle_template_fit(1)
+
+    def _cycle_template_fit(self, direction):
+        candidates = getattr(self, "_template_fit_candidates", None) or []
+        if not candidates:
+            self._append_console("Fit cycle blocked: no placement candidates.", force=True)
+            return
+        current = getattr(self, "_template_fit_index", None)
+        if current is None:
+            current = 0
+        self._apply_template_fit_candidate((int(current) + int(direction)) % len(candidates))
+
+    def _apply_template_fit_candidate(self, index):
+        candidates = getattr(self, "_template_fit_candidates", None) or []
+        if index < 0 or index >= len(candidates):
+            return
+        candidate = candidates[index]
+        controls = getattr(self, "_template_controls", None)
+        if controls:
+            controls["start_x"].setValue(float(candidate["start_x"]))
+            controls["start_y"].setValue(float(candidate["start_y"]))
+        spec = self._read_rectangle_template_controls()
+        if spec is None:
+            return
+        spec = replace(
+            spec,
+            start_x=float(candidate["start_x"]),
+            start_y=float(candidate["start_y"]),
+            cut_start_x=float(candidate["cut_start_x"]),
+            cut_start_y=float(candidate["cut_start_y"]),
+        )
+        try:
+            program = rectangle_pocket(spec)
+        except ValueError as exc:
+            self._append_console(f"Apply fit failed: {exc}", force=True)
+            return
+        self._template_fit_index = index
+        self._last_template_spec = spec
+        self._gcode_edit.setPlainText(program.gcode + "\n")
+        self._populate_rectangle_template_controls(spec)
+        self._update_fit_status()
+        self._update_preview()
+        self._update_job_controls()
+
+    def _update_fit_status(self):
+        label = getattr(self, "_fit_status", None)
+        if label is None:
+            return
+        candidates = getattr(self, "_template_fit_candidates", None) or []
+        index = getattr(self, "_template_fit_index", None)
+        if getattr(self, "_template_fit_pick_active", False):
+            label.setText("Fit: picking")
+            return
+        if not candidates or index is None:
+            label.setText("Fit: no placement" if getattr(self, "_template_fit_point", None) else "Fit: pick corner")
+            return
+        candidate = candidates[index]
+        label.setText(
+            f"Fit: {index + 1}/{len(candidates)} "
+            f"{str(candidate.get('corner', '')).replace('_', ' ')}"
+        )
 
     def _schedule_preview_update(self):
         timer = getattr(self, "_preview_refresh_timer", None)
@@ -5493,6 +5949,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         dialog.raise_()
         if hasattr(dialog, "activateWindow"):
             dialog.activateWindow()
+        if getattr(self, "_template_fit_pick_active", False) and getattr(dialog, "_view", None) is not None:
+            self._enable_template_fit_snap()
 
     def _refresh_detached_preview(self):
         dialog = getattr(self, "_preview_dialog", None)
@@ -5506,6 +5964,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             dialog.refresh()
 
     def _on_set_template_start_from_snap(self):
+        if getattr(self, "_template_fit_pick_active", False):
+            self._disable_template_fit_pick()
         spec = getattr(self, "_last_template_spec", None)
         if spec is None:
             self._append_console("Set cut start snap blocked: generate a rectangle template first.", force=True)
@@ -5536,6 +5996,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         callback = self._apply_template_start_snap
         for view in self._active_preview_views():
             view.set_snap_mode(True, candidates, callback)
+
+    def _enable_template_fit_snap(self):
+        for view in self._active_preview_views():
+            projection = getattr(view, "_projection_name", self._preview_projection_name())
+            candidates = self._template_fit_pick_candidates(projection)
+            view.set_snap_mode(True, candidates, self._apply_template_fit_pick)
 
     def _disable_template_snap(self):
         self._template_snap_active = False

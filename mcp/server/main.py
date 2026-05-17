@@ -43,8 +43,10 @@ from .routerking_tools import (
     routerking_dxf_generate_gcode,
     routerking_generate_gcode,
     routerking_list_actions,
+    routerking_open_panel,
     routerking_optimize_splines_preview,
     routerking_run_script,
+    routerking_ui_state,
 )
 
 
@@ -57,6 +59,8 @@ def build_tool_registry(connection: FreeCADConnection | None = None) -> Dict[str
         "get_selection_context": lambda **_: get_selection_context(bound_connection),
         "capture_view": lambda **payload: capture_view(connection=bound_connection, output_path=payload.get("output_path")),
         "routerking_list_actions": lambda **_: routerking_list_actions(bound_connection),
+        "routerking_open_panel": lambda **_: routerking_open_panel(connection=bound_connection),
+        "routerking_ui_state": lambda **_: routerking_ui_state(connection=bound_connection),
         "routerking_apply_actions": lambda **kwargs: routerking_apply_actions(
             payload=kwargs.get("payload"),
             include_context=kwargs.get("include_context", True),

@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from RouterKing.mcp.bridge import RouterKingBridge
 from mcp.server.machine_tools import (
@@ -302,14 +303,14 @@ class TestRouterKingMcpSafety(unittest.TestCase):
 
     def test_console_exec_blocked_without_flag(self):
         connection = StubConnection()
-        with unittest.mock.patch.dict("os.environ", {}, clear=False):
+        with mock.patch.dict("os.environ", {}, clear=False):
             response = routerking_console_exec("print('hi')", connection=connection)
         self.assertFalse(response["success"])
         self.assertIn("dangerous development tools are disabled", response["message"])
 
     def test_console_exec_allowed_with_flag(self):
         connection = StubConnection()
-        with unittest.mock.patch.dict("os.environ", {"ROUTERKING_MCP_DEV_TOOLS": "1"}, clear=False):
+        with mock.patch.dict("os.environ", {"ROUTERKING_MCP_DEV_TOOLS": "1"}, clear=False):
             response = routerking_console_exec("print('hi')", connection=connection)
         self.assertTrue(response["success"])
         self.assertEqual(connection.operation, "console_exec")

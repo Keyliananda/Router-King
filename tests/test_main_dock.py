@@ -44,6 +44,9 @@ class _DummySpin:
     def value(self):
         return self._value
 
+    def setValue(self, value):
+        self._value = value
+
 
 class _DummyLineEdit:
     def __init__(self, text=""):
@@ -62,6 +65,9 @@ class _DummyCombo:
 
     def currentText(self):
         return self._text
+
+    def setCurrentText(self, text):
+        self._text = str(text)
 
 
 class _DummyPlainTextEdit:
@@ -738,6 +744,165 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(spec.source_document, "tee-tablett")
         self.assertEqual(spec.source_object, "Body")
         self.assertEqual(spec.source_feature, "Pocket002")
+
+    def test_use_manual_start_in_template_sets_cut_start_target_and_gcode(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._gcode_manual_start_wpos = {"x": 18.0, "y": 13.0, "z": 1.5}
+        widget._last_template_spec = None
+        widget._template_controls = {
+            "name": _DummyLineEdit("Manual Pocket"),
+            "width": _DummySpin(40.0),
+            "height": _DummySpin(30.0),
+            "depth": _DummySpin(2.0),
+            "tool_diameter": _DummySpin(4.0),
+            "step_down": _DummySpin(1.0),
+            "step_over": _DummySpin(2.0),
+            "feed_rate": _DummySpin(500.0),
+            "plunge_rate": _DummySpin(100.0),
+            "safe_z": _DummySpin(6.0),
+            "start_z": _DummySpin(0.0),
+            "start_x": _DummySpin(0.0),
+            "start_y": _DummySpin(0.0),
+            "origin": _DummyCombo("center"),
+            "swap_xy": _DummyCheckBox(False),
+            "pass_axis": _DummyCombo("x"),
+            "path_direction": _DummyCombo("forward"),
+            "final_contour": _DummyCheckBox(False),
+            "contour_direction": _DummyCombo("cw"),
+        }
+        widget._selected_template_source = mock.Mock(return_value={})
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._append_console = mock.Mock()
+        widget._update_preview = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+
+        widget._on_use_manual_start_in_template()
+
+        self.assertEqual(widget._template_controls["start_x"].value(), 0.0)
+        self.assertEqual(widget._template_controls["start_y"].value(), 0.0)
+        self.assertEqual(widget._template_controls["start_z"].value(), 1.5)
+        self.assertEqual(widget._last_template_spec.cut_start_x, 18.0)
+        self.assertEqual(widget._last_template_spec.cut_start_y, 13.0)
+        self.assertIn("; start: X0 Y0", widget._gcode_edit.toPlainText())
+        self.assertIn("; cut start target: X18 Y13", widget._gcode_edit.toPlainText())
+        self.assertIn("G0 X18 Y13", widget._gcode_edit.toPlainText())
+        widget._update_preview.assert_called_once_with()
+        widget._update_job_controls.assert_called_once_with()
+
+    def test_preview_work_area_converts_machine_limits_to_work_coordinates(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status={"WCO": "10.000,20.000,0.000"})
+        widget._gcode_manual_start_wco = None
+        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]}}
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            area = widget._preview_work_area()
+
+        self.assertEqual(area, {"x_min": -310.0, "x_max": -10.0, "y_min": -400.0, "y_max": -20.0})
+
+    def test_fit_candidates_place_each_rectangle_corner_inside_work_area(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        spec = main_dock.TemplateSpec(
+            width=40.0,
+            height=30.0,
+            depth=2.0,
+            tool_diameter=4.0,
+            step_down=1.0,
+            step_over=2.0,
+            feed_rate=500.0,
+            plunge_rate=100.0,
+            safe_z=6.0,
+            origin="center",
+        )
+        area = {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0}
+
+        candidates = widget._template_fit_candidates_for_point(spec, 50.0, 50.0, area)
+
+        self.assertEqual([candidate["corner"] for candidate in candidates], [
+            "lower_left",
+            "lower_right",
+            "upper_left",
+            "upper_right",
+        ])
+        self.assertEqual(candidates[0]["start_x"], 70.0)
+        self.assertEqual(candidates[0]["start_y"], 65.0)
+        self.assertEqual(candidates[3]["start_x"], 30.0)
+        self.assertEqual(candidates[3]["start_y"], 35.0)
+
+    def test_apply_fit_candidate_updates_template_start_and_preview_gcode(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._template_controls = {
+            "name": _DummyLineEdit("Fit Pocket"),
+            "width": _DummySpin(40.0),
+            "height": _DummySpin(30.0),
+            "depth": _DummySpin(2.0),
+            "tool_diameter": _DummySpin(4.0),
+            "step_down": _DummySpin(1.0),
+            "step_over": _DummySpin(2.0),
+            "feed_rate": _DummySpin(500.0),
+            "plunge_rate": _DummySpin(100.0),
+            "safe_z": _DummySpin(6.0),
+            "start_z": _DummySpin(0.0),
+            "start_x": _DummySpin(0.0),
+            "start_y": _DummySpin(0.0),
+            "origin": _DummyCombo("center"),
+            "swap_xy": _DummyCheckBox(False),
+            "pass_axis": _DummyCombo("x"),
+            "path_direction": _DummyCombo("forward"),
+            "final_contour": _DummyCheckBox(False),
+            "contour_direction": _DummyCombo("cw"),
+        }
+        widget._selected_template_source = mock.Mock(return_value={})
+        widget._select_template_source = mock.Mock()
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._append_console = mock.Mock()
+        widget._update_preview = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+        widget._fit_status = _DummyWidget()
+        widget._template_fit_candidates = [
+            {
+                "corner": "lower_left",
+                "start_x": 70.0,
+                "start_y": 65.0,
+                "cut_start_x": 50.0,
+                "cut_start_y": 50.0,
+                "bounds": {"x_min": 50.0, "x_max": 90.0, "y_min": 50.0, "y_max": 80.0},
+            }
+        ]
+
+        widget._apply_template_fit_candidate(0)
+
+        self.assertEqual(widget._template_controls["start_x"].value(), 70.0)
+        self.assertEqual(widget._template_controls["start_y"].value(), 65.0)
+        self.assertEqual(widget._last_template_spec.cut_start_x, 50.0)
+        self.assertEqual(widget._last_template_spec.cut_start_y, 50.0)
+        self.assertIn("; start: X70 Y65", widget._gcode_edit.toPlainText())
+        self.assertIn("; cut start target: X50 Y50", widget._gcode_edit.toPlainText())
+        self.assertEqual(widget._fit_status.text, "Fit: 1/1 lower left")
+
+    def test_fit_status_distinguishes_unpicked_and_failed_fit(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._fit_status = _DummyWidget()
+        widget._template_fit_candidates = []
+        widget._template_fit_index = None
+        widget._template_fit_pick_active = False
+        widget._template_fit_point = None
+
+        widget._update_fit_status()
+        self.assertEqual(widget._fit_status.text, "Fit: pick corner")
+
+        widget._template_fit_point = {"x": 999.0, "y": 999.0}
+        widget._update_fit_status()
+        self.assertEqual(widget._fit_status.text, "Fit: no placement")
+
+        widget._template_fit_pick_active = True
+        widget._update_fit_status()
+        self.assertEqual(widget._fit_status.text, "Fit: picking")
 
     def test_template_cut_start_candidates_ignore_safe_z_points(self):
         main_dock = _load_main_dock_module()

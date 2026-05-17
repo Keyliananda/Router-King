@@ -46,6 +46,8 @@ class TestToolsList:
     def test_known_tools_present(self):
         names = {t["name"] for t in TOOL_SCHEMAS}
         assert "routerking_list_actions" in names
+        assert "routerking_open_panel" in names
+        assert "routerking_ui_state" in names
         assert "routerking_console_exec" in names
         assert "routerking_console_read" in names
         assert "routerking_machine_stop" in names

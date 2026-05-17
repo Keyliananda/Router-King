@@ -483,6 +483,29 @@ class RouterKingBridge:
             errors=warnings,
         )
 
+    def open_panel(self) -> Dict[str, Any]:
+        """Activate RouterKing and open its control panel in the FreeCAD UI."""
+        payload = run_on_main_thread(_open_routerking_panel)
+        errors = payload.get("errors") or []
+        success = not errors
+        return make_response(
+            success,
+            "RouterKing panel opened." if success else "RouterKing panel could not be opened.",
+            data=payload,
+            errors=errors,
+        )
+
+    def ui_state(self) -> Dict[str, Any]:
+        """Return read-only RouterKing/FreeCAD UI state for CLI health checks."""
+        payload = run_on_main_thread(_collect_routerking_ui_state)
+        errors = payload.get("errors") or []
+        return make_response(
+            not errors,
+            "RouterKing UI state collected." if not errors else "RouterKing UI state unavailable.",
+            data=payload,
+            errors=errors,
+        )
+
     def run_script(self, code: str) -> Dict[str, Any]:
         """Execute arbitrary Python code in the FreeCAD context.
 
@@ -754,6 +777,134 @@ def _result_item(
     if data is not None:
         item["data"] = data
     return item
+
+
+def _open_routerking_panel() -> Dict[str, Any]:
+    errors: List[str] = []
+    activated = False
+    command_used = False
+    fallback_used = False
+
+    try:
+        import FreeCADGui as Gui  # type: ignore
+    except Exception as exc:
+        return {
+            "activated_workbench": False,
+            "command_used": False,
+            "fallback_used": False,
+            "errors": [f"FreeCADGui is not available: {exc}"],
+        }
+
+    try:
+        Gui.activateWorkbench("RouterKingWorkbench")
+        activated = True
+    except Exception as exc:
+        errors.append(f"activateWorkbench failed: {exc}")
+
+    try:
+        Gui.runCommand("RK_ShowPanel", 0)
+        command_used = True
+    except Exception as exc:
+        errors.append(f"RK_ShowPanel command failed: {exc}")
+        try:
+            try:
+                from RouterKing.ui.main_dock import show_panel
+            except Exception:
+                from ui.main_dock import show_panel
+            show_panel()
+            fallback_used = True
+            errors = [error for error in errors if not error.startswith("RK_ShowPanel command failed:")]
+        except Exception as fallback_exc:
+            errors.append(f"show_panel fallback failed: {fallback_exc}")
+
+    try:
+        Gui.updateGui()
+    except Exception:
+        pass
+
+    return {
+        "activated_workbench": activated,
+        "command_used": command_used,
+        "fallback_used": fallback_used,
+        "errors": errors,
+    }
+
+
+def _collect_routerking_ui_state() -> Dict[str, Any]:
+    errors: List[str] = []
+    active_workbench = None
+    active_document_name = None
+    active_document_label = None
+    active_document_file = None
+    docks: List[Dict[str, Any]] = []
+
+    try:
+        import FreeCAD as App  # type: ignore
+    except Exception as exc:
+        App = None  # type: ignore
+        errors.append(f"FreeCAD is not available: {exc}")
+
+    try:
+        import FreeCADGui as Gui  # type: ignore
+    except Exception as exc:
+        return {
+            "active_workbench": None,
+            "active_document_name": None,
+            "active_document_label": None,
+            "active_document_file": None,
+            "routerking_docks": [],
+            "routerking_dock_visible": False,
+            "errors": [*errors, f"FreeCADGui is not available: {exc}"],
+        }
+
+    try:
+        workbench = Gui.activeWorkbench()
+        active_workbench = workbench.name() if workbench is not None else None
+    except Exception as exc:
+        errors.append(f"activeWorkbench failed: {exc}")
+
+    if App is not None:
+        try:
+            document = getattr(App, "ActiveDocument", None)
+            if document is not None:
+                active_document_name = getattr(document, "Name", None)
+                active_document_label = getattr(document, "Label", None) or active_document_name
+                active_document_file = getattr(document, "FileName", None) or None
+        except Exception as exc:
+            errors.append(f"active document read failed: {exc}")
+
+    try:
+        try:
+            from PySide2 import QtWidgets
+        except Exception:
+            from PySide import QtGui as QtWidgets
+        main_window = Gui.getMainWindow()
+        for dock in main_window.findChildren(QtWidgets.QDockWidget):
+            object_name = dock.objectName()
+            title = dock.windowTitle()
+            if "RouterKing" not in object_name and "RouterKing" not in title:
+                continue
+            docks.append(
+                {
+                    "object_name": object_name,
+                    "title": title,
+                    "visible": bool(dock.isVisible()),
+                    "floating": bool(dock.isFloating()),
+                    "area": int(main_window.dockWidgetArea(dock)),
+                }
+            )
+    except Exception as exc:
+        errors.append(f"RouterKing dock read failed: {exc}")
+
+    return {
+        "active_workbench": active_workbench,
+        "active_document_name": active_document_name,
+        "active_document_label": active_document_label,
+        "active_document_file": active_document_file,
+        "routerking_docks": docks,
+        "routerking_dock_visible": any(dock.get("visible") for dock in docks),
+        "errors": errors,
+    }
 
 
 def _exec_with_optional_last_expr(code: str, namespace: Dict[str, Any]) -> Any:

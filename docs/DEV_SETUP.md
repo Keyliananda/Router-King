@@ -44,3 +44,25 @@ Developer ID build is required.
 - RouterKing does not patch FreeCAD.
 - All UI and sender logic lives inside the workbench.
 - pyserial is vendored; no extra install step is required.
+
+## Restart FreeCAD With RouterKing
+
+For local development on macOS, use:
+
+```bash
+./scripts/restart_freecad_routerking.sh
+```
+
+The helper quits FreeCAD safely, reopens the last FreeCAD document from
+FreeCAD's recent-file list, activates `RouterKingWorkbench`, and opens the
+RouterKing panel on startup. It uses two paths: a startup marker for FreeCAD
+initialization and then an MCP socket call to explicitly run
+`routerking_open_panel` once RouterKing is reachable. To force a specific file:
+
+```bash
+./scripts/restart_freecad_routerking.sh --file /path/to/project.FCStd
+```
+
+If FreeCAD does not quit because of unsaved changes, the script aborts instead
+of killing it. Use `--force` only when discarding the running process is
+intentional.

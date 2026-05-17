@@ -111,6 +111,16 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "routerking_open_panel",
+        "description": "Activate the RouterKing FreeCAD workbench and open the RouterKing control panel.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "routerking_ui_state",
+        "description": "Read active FreeCAD workbench, active document file, and RouterKing dock visibility.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "routerking_apply_actions",
         "description": "Execute one or more RouterKing actions (batch interface).",
         "inputSchema": {

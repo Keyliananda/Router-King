@@ -1,5 +1,7 @@
 import unittest
+import sys
 from types import SimpleNamespace
+from unittest import mock
 
 from RouterKing.mcp.bridge import ACTION_REGISTRY, RouterKingBridge
 
@@ -111,6 +113,91 @@ class StubCamJob:
 
 
 class TestRouterKingMcpBridge(unittest.TestCase):
+    def test_open_panel_activates_workbench_and_command(self):
+        calls = []
+
+        fake_gui = SimpleNamespace(
+            activateWorkbench=lambda name: calls.append(("activateWorkbench", name)),
+            runCommand=lambda name, arg=0: calls.append(("runCommand", name, arg)),
+            updateGui=lambda: calls.append(("updateGui",)),
+        )
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+
+        with mock.patch.dict(sys.modules, {"FreeCADGui": fake_gui}):
+            response = bridge.open_panel()
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["message"], "RouterKing panel opened.")
+        self.assertIn(("activateWorkbench", "RouterKingWorkbench"), calls)
+        self.assertIn(("runCommand", "RK_ShowPanel", 0), calls)
+        self.assertTrue(response["data"]["activated_workbench"])
+        self.assertTrue(response["data"]["command_used"])
+
+    def test_ui_state_reports_workbench_document_and_routerking_dock(self):
+        class FakeWorkbench:
+            @staticmethod
+            def name():
+                return "RouterKingWorkbench"
+
+        class FakeDocument:
+            Name = "tee_tablett"
+            Label = "tee-tablett"
+            FileName = "/tmp/tee-tablett.FCStd"
+
+        class FakeDock:
+            def objectName(self):
+                return "RouterKingDock"
+
+            def windowTitle(self):
+                return "RouterKing"
+
+            def isVisible(self):
+                return True
+
+            def isFloating(self):
+                return False
+
+        class FakeMainWindow:
+            def findChildren(self, _klass):
+                return [FakeDock()]
+
+            def dockWidgetArea(self, _dock):
+                return 2
+
+        fake_app = SimpleNamespace(ActiveDocument=FakeDocument())
+        fake_gui = SimpleNamespace(
+            activeWorkbench=lambda: FakeWorkbench(),
+            getMainWindow=lambda: FakeMainWindow(),
+        )
+        fake_widgets = SimpleNamespace(QDockWidget=object)
+        bridge = RouterKingBridge(
+            action_executor=lambda actions: (["ok"], []),
+            context_module=StubContextModule,
+            screenshot_module=StubScreenshotModule,
+            transaction_factory=StubTransaction,
+        )
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "FreeCAD": fake_app,
+                "FreeCADGui": fake_gui,
+                "PySide2": SimpleNamespace(QtWidgets=fake_widgets),
+                "PySide2.QtWidgets": fake_widgets,
+            },
+        ):
+            response = bridge.ui_state()
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["data"]["active_workbench"], "RouterKingWorkbench")
+        self.assertEqual(response["data"]["active_document_file"], "/tmp/tee-tablett.FCStd")
+        self.assertTrue(response["data"]["routerking_dock_visible"])
+
     def test_list_actions_returns_registry(self):
         bridge = RouterKingBridge(
             action_executor=lambda actions: (["ok"], []),
