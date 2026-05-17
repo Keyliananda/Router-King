@@ -33,7 +33,13 @@ try:
         parse_xyz_value as grbl_parse_xyz_value,
         resolve_machine_limits as grbl_resolve_machine_limits,
     )
-    from .gamepad import DEFAULT_CONTROLLER_BINDINGS, PygameGamepad, active_binding_tokens, make_jog_vector
+    from .gamepad import (
+        DEFAULT_CONTROLLER_BINDINGS,
+        PygameGamepad,
+        active_binding_tokens,
+        make_fast_xy_jog_vector,
+        make_jog_vector,
+    )
 except ImportError:
     from gcode.parser import iter_gcode_lines, parse_gcode, prepare_stream_lines
     from grbl.sender import GrblSender
@@ -42,7 +48,13 @@ except ImportError:
         parse_xyz_value as grbl_parse_xyz_value,
         resolve_machine_limits as grbl_resolve_machine_limits,
     )
-    from ui.gamepad import DEFAULT_CONTROLLER_BINDINGS, PygameGamepad, active_binding_tokens, make_jog_vector
+    from ui.gamepad import (
+        DEFAULT_CONTROLLER_BINDINGS,
+        PygameGamepad,
+        active_binding_tokens,
+        make_fast_xy_jog_vector,
+        make_jog_vector,
+    )
 
 _dock = None
 
@@ -74,6 +86,10 @@ def _controller_log(text):
 
 
 _PREFS = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing")
+_CONTROLLER_LIMIT_MARGIN_MM = 2.0
+_CONTROLLER_FAST_LOOKAHEAD_S = 0.28
+_CONTROLLER_FAST_INTERVAL_S = 0.22
+_CONTROLLER_STEP_INTERVAL_S = 0.12
 _ALARM_CODES = {
     1: "Hard limit triggered. Machine position may be lost.",
     2: "Soft limit alarm. Target exceeds machine travel.",
@@ -3977,12 +3993,20 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 limited_axes.append(axis.upper())
                 continue
             min_limit, max_limit = axis_limits
+            margin = _CONTROLLER_LIMIT_MARGIN_MM
+            guarded_min = min_limit + margin
+            guarded_max = max_limit - margin
+            if guarded_min < guarded_max:
+                min_limit = guarded_min
+                max_limit = guarded_max
             target = current + delta
             if target < min_limit:
-                adjusted[axis] = max(0.0, min_limit - current) if delta > 0 else min_limit - current
+                allowed_delta = min_limit - current
+                adjusted[axis] = allowed_delta if delta < 0.0 and allowed_delta < 0.0 else 0.0
                 limited_axes.append(axis.upper())
             elif target > max_limit:
-                adjusted[axis] = min(0.0, max_limit - current) if delta < 0 else max_limit - current
+                allowed_delta = max_limit - current
+                adjusted[axis] = allowed_delta if delta > 0.0 and allowed_delta > 0.0 else 0.0
                 limited_axes.append(axis.upper())
 
         reason = ""
@@ -4239,27 +4263,38 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._controller_connect_btn.setText("Connect Controller")
             self._update_machine_controls()
             return
-        x, y, z = make_jog_vector(
-            state,
-            deadzone=self._controller_deadzone.value(),
-            xy_step=self._controller_xy_step.value(),
-            z_step=self._controller_z_step.value(),
-        )
+        speed_label = getattr(state, "speed_label", "slow")
+        speed_multiplier = max(1.0, float(getattr(state, "speed_multiplier", 1.0) or 1.0))
+        feed = min(5000.0, float(self._controller_feed.value()) * speed_multiplier)
+        if speed_label == "fast":
+            x, y, z = make_fast_xy_jog_vector(
+                state,
+                deadzone=self._controller_deadzone.value(),
+                xy_feed=feed,
+                lookahead_s=_CONTROLLER_FAST_LOOKAHEAD_S,
+                z_step=self._controller_z_step.value(),
+            )
+            interval = _CONTROLLER_FAST_INTERVAL_S
+        else:
+            x, y, z = make_jog_vector(
+                state,
+                deadzone=self._controller_deadzone.value(),
+                xy_step=self._controller_xy_step.value(),
+                z_step=self._controller_z_step.value(),
+            )
+            interval = _CONTROLLER_STEP_INTERVAL_S
         if x == 0.0 and y == 0.0 and z == 0.0:
             if self._controller_was_active:
                 self._controller_cancel_jog()
             self._controller_was_active = False
             return
         now = time.time()
-        if now - self._controller_last_jog_at < 0.12:
+        if now - self._controller_last_jog_at < interval:
             return
-        speed_multiplier = max(1.0, float(getattr(state, "speed_multiplier", 1.0) or 1.0))
-        feed = min(5000.0, float(self._controller_feed.value()) * speed_multiplier)
         if self._send_jog(x=x, y=y, z=z, feed=feed, source="Controller", log=False):
             self._controller_last_jog_at = now
             self._controller_was_active = True
             prefix = "Manual XYZ" if self._controller_manual_xyz_active else "Controller"
-            speed_label = getattr(state, "speed_label", "slow")
             self._controller_status.setText(
                 f"{prefix}: {state.name} [{speed_label}] | X{x:+.3f} Y{y:+.3f} Z{z:+.3f}"
             )

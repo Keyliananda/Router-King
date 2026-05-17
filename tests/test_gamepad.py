@@ -9,6 +9,7 @@ from RouterKing.ui.gamepad import (
     PygameGamepad,
     active_binding_tokens,
     apply_deadzone,
+    make_fast_xy_jog_vector,
     make_jog_vector,
     state_from_snapshot,
 )
@@ -173,6 +174,15 @@ class TestGamepadHelpers(unittest.TestCase):
         self.assertAlmostEqual(x, 1.5)
         self.assertEqual(y, 0.0)
         self.assertAlmostEqual(z, 0.3)
+
+    def test_make_fast_xy_jog_vector_uses_feed_lookahead_for_xy(self):
+        state = GamepadState(name="Pad", x=1.0, y=0.0, z=0.0, speed_multiplier=3.0, speed_label="fast")
+
+        x, y, z = make_fast_xy_jog_vector(state, deadzone=0.2, xy_feed=1800.0, lookahead_s=0.28, z_step=0.1)
+
+        self.assertAlmostEqual(x, 8.4)
+        self.assertEqual(y, 0.0)
+        self.assertEqual(z, 0.0)
 
     def test_state_from_snapshot_allows_custom_button_rebinding(self):
         snapshot = GamepadSnapshot(

@@ -359,9 +359,9 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(sender.commands, [])
         widget._append_console.assert_called_once()
 
-    def test_send_jog_advances_predicted_position_to_prevent_repeated_stale_status_overrun(self):
+    def test_send_jog_uses_margin_before_machine_limit(self):
         main_dock = _load_main_dock_module()
-        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-299.800,-190.000,-25.000"})
+        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-297.500,-190.000,-25.000"})
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._sender = sender
         widget._explore_active = False
@@ -373,7 +373,7 @@ class TestMainDock(unittest.TestCase):
 
         self.assertTrue(first)
         self.assertFalse(second)
-        self.assertEqual(sender.commands, ["$J=G91 X-0.200 F600"])
+        self.assertEqual(sender.commands, ["$J=G91 X-0.500 F600"])
 
     def test_send_jog_blocks_when_sender_streaming(self):
         main_dock = _load_main_dock_module()

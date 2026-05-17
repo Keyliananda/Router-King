@@ -299,6 +299,31 @@ def make_jog_vector(
     return (_round_zero(x), _round_zero(y), _round_zero(z))
 
 
+def make_fast_xy_jog_vector(
+    state: GamepadState,
+    *,
+    deadzone: float,
+    xy_feed: float,
+    lookahead_s: float,
+    z_step: float,
+) -> tuple[float, float, float]:
+    x_axis = apply_deadzone(state.x, deadzone)
+    y_axis = apply_deadzone(state.y, deadzone)
+    xy_magnitude = min(1.0, (x_axis * x_axis + y_axis * y_axis) ** 0.5)
+    xy_distance = max(0.0, float(xy_feed)) * max(0.05, float(lookahead_s)) / 60.0 * xy_magnitude
+    if xy_magnitude > 0.0:
+        x = (x_axis / xy_magnitude) * xy_distance
+        y = (y_axis / xy_magnitude) * xy_distance
+    else:
+        x = 0.0
+        y = 0.0
+    z = apply_deadzone(state.z, deadzone) * float(z_step) * max(
+        1.0,
+        float(getattr(state, "speed_multiplier", 1.0) or 1.0),
+    )
+    return (_round_zero(x), _round_zero(y), _round_zero(z))
+
+
 def state_from_snapshot(snapshot: GamepadSnapshot, bindings: dict[str, str] | None = None) -> GamepadState:
     bindings = dict(DEFAULT_CONTROLLER_BINDINGS | dict(bindings or {}))
     axes = {axis.name: float(axis.value) for axis in snapshot.axes}
