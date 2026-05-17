@@ -56,6 +56,17 @@ class _DummyLineEdit:
         self._text = str(text)
 
 
+class _DummyPlainTextEdit:
+    def __init__(self, text=""):
+        self._text = text
+
+    def toPlainText(self):
+        return self._text
+
+    def setPlainText(self, text):
+        self._text = str(text)
+
+
 class _DummyTimer:
     def __init__(self):
         self.stopped = False
@@ -108,6 +119,7 @@ class _FakeDisconnectedSender:
 class _FakeConnectedSender:
     def __init__(self, status=None, streaming=False):
         self.commands = []
+        self.started_lines = None
         self.cancelled = False
         self._status = status if status is not None else {"state": "Idle"}
         self._streaming = streaming
@@ -118,6 +130,10 @@ class _FakeConnectedSender:
     def send_and_collect(self, command, timeout=5.0):
         self.commands.append(command)
         return ["ok"]
+
+    def start_stream(self, lines):
+        self.started_lines = list(lines)
+        self._streaming = True
 
     def cancel_jog(self):
         self.cancelled = True
@@ -131,6 +147,18 @@ class _FakeConnectedSender:
     def get_status(self):
         return self._status
 
+    def get_progress(self):
+        total = len(self.started_lines or [])
+        return {
+            "streaming": self._streaming,
+            "paused": False,
+            "awaiting_ok": False,
+            "sent": 0,
+            "acked": 0,
+            "total": total,
+            "last_error": None,
+        }
+
 
 def _load_main_dock_module():
     sys.modules.pop("RouterKing.ui.main_dock", None)
@@ -139,6 +167,7 @@ def _load_main_dock_module():
         QObject=type("QObject", (), {}),
         QThread=type("QThread", (), {}),
         Signal=lambda *args, **kwargs: object(),
+        Slot=lambda *args, **kwargs: (lambda fn: fn),
         Qt=types.SimpleNamespace(Horizontal=1, RightDockWidgetArea=2),
     )
     qtwidgets = types.SimpleNamespace(
@@ -423,6 +452,148 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(sender.commands, [])
         widget._append_console.assert_called_once()
+
+    def test_set_manual_start_saves_live_position_without_motion(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-150.000,-190.000,-40.000",
+                "WPos": "0.000,0.000,0.000",
+                "WCO": "-150.000,-190.000,-40.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._manual_start_status = _DummyWidget()
+        widget._append_console = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+
+        widget._on_set_manual_start()
+
+        self.assertEqual(sender.commands, [])
+        self.assertEqual(widget._gcode_manual_start_wpos, {"x": 0.0, "y": 0.0, "z": 0.0})
+        self.assertEqual(widget._manual_start_status.text, "Manual start: X0.000 Y0.000 Z0.000")
+
+    def test_go_to_manual_start_safely_moves_z_before_xy(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-150.000,-190.000,-40.000",
+                "WPos": "0.000,0.000,0.000",
+                "WCO": "-150.000,-190.000,-40.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._gcode_manual_start_wpos = {"x": 12.0, "y": -3.0, "z": 0.0}
+        widget._gcode_manual_start_wco = {"x": -150.0, "y": -190.0, "z": -40.0}
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+
+        widget._on_go_to_manual_start_safely()
+
+        self.assertEqual(sender.commands, ["G90 G21", "G0 Z1.500", "G0 X12.000 Y-3.000"])
+        widget._request_status.assert_called_once_with()
+
+    def test_go_to_manual_start_blocks_when_work_offset_changed(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-150.000,-190.000,-40.000",
+                "WPos": "0.000,0.000,0.000",
+                "WCO": "-150.000,-190.000,-40.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._gcode_manual_start_wpos = {"x": 12.0, "y": -3.0, "z": 0.0}
+        widget._gcode_manual_start_wco = {"x": -149.0, "y": -190.0, "z": -40.0}
+        widget._append_console = mock.Mock()
+
+        widget._on_go_to_manual_start_safely()
+
+        self.assertEqual(sender.commands, [])
+        widget._append_console.assert_called_once()
+
+    def test_air_run_streams_transformed_validated_lines(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-150.000,-190.000,-40.000",
+                "WPos": "0.000,0.000,0.000",
+                "WCO": "-150.000,-190.000,-40.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._gcode_edit = _DummyPlainTextEdit("G90\nM3 S10000\nG1 X1 Y2 Z-2 F500")
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._append_console = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=({"settings": {}}, "/tmp/profile.json")):
+            with mock.patch.object(
+                main_dock,
+                "grbl_validate_gcode",
+                return_value={"valid": True, "line_count": 2, "bounding_box": {"x": [0, 1], "y": [0, 2], "z": [1.5, 1.5]}},
+            ) as validate:
+                widget._on_air_run()
+
+        self.assertEqual(sender.started_lines, ["G90", "G1 X1 Y2 Z1.5 F500"])
+        validate.assert_called_once()
+
+    def test_show_apply_air_run_replaces_editor_without_machine_action(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._gcode_edit = _DummyPlainTextEdit("G90\nM3 S10000\nG1 X1 Y2 Z-2 F500")
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._append_console = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+
+        widget._on_show_apply_air_run()
+
+        self.assertEqual(widget._gcode_edit.toPlainText(), "G90\nG1 X1 Y2 Z1.5 F500\n")
+        self.assertEqual(sender.commands, [])
+        self.assertIsNone(sender.started_lines)
+        widget._append_console.assert_called_once_with(
+            "Show/Apply Air Run: applied 2 transformed line(s); no machine commands sent.",
+            force=True,
+        )
+        widget._update_job_controls.assert_called_once_with()
+
+    def test_show_apply_air_run_enabled_without_connection(self):
+        main_dock = _load_main_dock_module()
+        widget = self._make_widget(main_dock)
+        widget._gcode_edit = _DummyPlainTextEdit("G90\nG1 X1")
+        widget._air_run_apply_btn = _DummyWidget()
+
+        widget._update_job_controls()
+
+        self.assertTrue(widget._air_run_apply_btn.enabled)
+
+    def test_start_job_blocks_when_validation_fails(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._gcode_edit = _DummyPlainTextEdit("G10 L20 P1 X0")
+        widget._dry_run_check = _DummyCheckBox(False)
+        widget._append_console = mock.Mock()
+
+        widget._on_start_job()
+
+        self.assertIsNone(sender.started_lines)
+        widget._append_console.assert_called()
 
     def test_mcp_machine_event_updates_visible_shared_sender_state(self):
         main_dock = _load_main_dock_module()

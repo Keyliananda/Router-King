@@ -26,12 +26,15 @@ except Exception:
     from serial.tools import list_ports as _list_ports
 
 try:
-    from ..gcode.parser import iter_gcode_lines, parse_gcode, prepare_stream_lines
+    from ..cam.templates import TemplateSpec, rectangle_pocket
+    from ..gcode.parser import iter_gcode_lines, prepare_stream_lines
+    from ..gcode.transform import prepare_air_run_lines
     from ..grbl.sender import GrblSender
     from ..grbl.validator import (
         load_machine_profile as grbl_load_machine_profile,
         parse_xyz_value as grbl_parse_xyz_value,
         resolve_machine_limits as grbl_resolve_machine_limits,
+        validate_gcode as grbl_validate_gcode,
     )
     from .gamepad import (
         DEFAULT_CONTROLLER_BINDINGS,
@@ -40,13 +43,17 @@ try:
         make_fast_xy_jog_vector,
         make_jog_vector,
     )
+    from .gcode_preview import parse_gcode_preview, render_preview_scene
 except ImportError:
-    from gcode.parser import iter_gcode_lines, parse_gcode, prepare_stream_lines
+    from cam.templates import TemplateSpec, rectangle_pocket
+    from gcode.parser import iter_gcode_lines, prepare_stream_lines
+    from gcode.transform import prepare_air_run_lines
     from grbl.sender import GrblSender
     from grbl.validator import (
         load_machine_profile as grbl_load_machine_profile,
         parse_xyz_value as grbl_parse_xyz_value,
         resolve_machine_limits as grbl_resolve_machine_limits,
+        validate_gcode as grbl_validate_gcode,
     )
     from ui.gamepad import (
         DEFAULT_CONTROLLER_BINDINGS,
@@ -55,6 +62,7 @@ except ImportError:
         make_fast_xy_jog_vector,
         make_jog_vector,
     )
+    from ui.gcode_preview import parse_gcode_preview, render_preview_scene
 
 _dock = None
 
@@ -641,6 +649,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._sender_was_connected = False
         self._last_gcode_path = None
         self._last_dxf_path = None
+        self._gcode_manual_start_wpos = None
+        self._gcode_manual_start_mpos = None
+        self._gcode_manual_start_wco = None
+        self._gcode_manual_start_at = 0.0
+        self._gcode_last_validation = None
         self._status_tick = 0
         self._fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
         self._ports_cache = []
@@ -698,6 +711,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._cam_activate_btn = None
         self._cam_generate_btn = None
         self._import_dxf_btn = None
+        self._gcode_preview_projection = None
+        self._preview_refresh_timer = None
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
         self._dxf_import_defaults = {}
@@ -1057,11 +1072,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._load_btn = QtWidgets.QPushButton("Load")
         self._save_btn = QtWidgets.QPushButton("Save")
         self._import_dxf_btn = QtWidgets.QPushButton("Import DXF")
+        self._template_btn = QtWidgets.QPushButton("Template")
         self._preview_btn = QtWidgets.QPushButton("Preview")
         self._cam_generate_btn = QtWidgets.QPushButton("Generate CAM")
         file_row.addWidget(self._load_btn)
         file_row.addWidget(self._save_btn)
         file_row.addWidget(self._import_dxf_btn)
+        file_row.addWidget(self._template_btn)
         file_row.addWidget(self._preview_btn)
         file_row.addWidget(self._cam_generate_btn)
         file_row.addStretch(1)
@@ -1069,8 +1086,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         job_row = QtWidgets.QHBoxLayout()
         self._start_btn = QtWidgets.QPushButton("Start")
+        self._validate_btn = QtWidgets.QPushButton("Validate")
+        self._air_run_apply_btn = QtWidgets.QPushButton("Show/Apply Air Run")
+        self._air_run_btn = QtWidgets.QPushButton("Air Run")
         self._pause_btn = QtWidgets.QPushButton("Pause")
         self._stop_btn = QtWidgets.QPushButton("Stop")
+        job_row.addWidget(self._validate_btn)
+        job_row.addWidget(self._air_run_apply_btn)
+        job_row.addWidget(self._air_run_btn)
         job_row.addWidget(self._start_btn)
         job_row.addWidget(self._pause_btn)
         job_row.addWidget(self._stop_btn)
@@ -1079,6 +1102,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         job_row.addWidget(self._dry_run_check)
         job_row.addStretch(1)
         layout.addLayout(job_row)
+
+        manual_start_row = QtWidgets.QHBoxLayout()
+        self._set_manual_start_btn = QtWidgets.QPushButton("Set Manual Start")
+        self._go_manual_start_btn = QtWidgets.QPushButton("Go To Manual Start Safely")
+        self._manual_start_status = QtWidgets.QLabel("Manual start: not set")
+        manual_start_row.addWidget(self._set_manual_start_btn)
+        manual_start_row.addWidget(self._go_manual_start_btn)
+        manual_start_row.addWidget(self._manual_start_status, 1)
+        layout.addLayout(manual_start_row)
 
         cam_row = QtWidgets.QHBoxLayout()
         self._cam_status = QtWidgets.QLabel("CAM Workbench: unknown")
@@ -1091,6 +1123,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         cam_row.addStretch(1)
         layout.addLayout(cam_row)
 
+        preview_row = QtWidgets.QHBoxLayout()
+        preview_row.addWidget(QtWidgets.QLabel("Preview"))
+        self._gcode_preview_projection = QtWidgets.QComboBox()
+        self._gcode_preview_projection.addItems(["Iso", "Top", "Side", "Front"])
+        self._gcode_preview_projection.setToolTip("Choose the G-code preview projection.")
+        preview_row.addWidget(self._gcode_preview_projection)
+        preview_row.addStretch(1)
+        layout.addLayout(preview_row)
+
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self._gcode_edit = QtWidgets.QPlainTextEdit()
         self._gcode_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
@@ -1099,22 +1140,37 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._preview_scene = QtWidgets.QGraphicsScene(self)
         self._preview_view = QtWidgets.QGraphicsView(self._preview_scene)
         self._preview_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self._preview_view.setMinimumWidth(220)
         splitter.addWidget(self._gcode_edit)
         splitter.addWidget(self._preview_view)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter, 1)
 
         self._load_btn.clicked.connect(self._on_load_gcode)
         self._save_btn.clicked.connect(self._on_save_gcode)
         self._import_dxf_btn.clicked.connect(self._on_import_dxf)
+        self._template_btn.clicked.connect(self._on_insert_gcode_template)
         self._preview_btn.clicked.connect(self._update_preview)
         self._cam_generate_btn.clicked.connect(self._on_cam_generate)
+        self._validate_btn.clicked.connect(self._on_validate_gcode)
+        self._air_run_apply_btn.clicked.connect(self._on_show_apply_air_run)
+        self._air_run_btn.clicked.connect(self._on_air_run)
         self._start_btn.clicked.connect(self._on_start_job)
         self._pause_btn.clicked.connect(self._on_pause_resume_job)
         self._stop_btn.clicked.connect(self._on_stop_job)
+        self._set_manual_start_btn.clicked.connect(self._on_set_manual_start)
+        self._go_manual_start_btn.clicked.connect(self._on_go_to_manual_start_safely)
         self._cam_check_btn.clicked.connect(self._on_cam_check)
         self._cam_activate_btn.clicked.connect(self._on_cam_activate)
+        self._gcode_edit.textChanged.connect(self._update_job_controls)
+        self._gcode_edit.textChanged.connect(self._schedule_preview_update)
+        self._gcode_preview_projection.currentTextChanged.connect(self._update_preview)
+
+        self._preview_refresh_timer = QtCore.QTimer(self)
+        self._preview_refresh_timer.setSingleShot(True)
+        self._preview_refresh_timer.setInterval(250)
+        self._preview_refresh_timer.timeout.connect(self._update_preview)
 
         self._update_job_controls()
         self._update_machine_controls()
@@ -4362,36 +4418,264 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         except Exception as exc:
             self._append_console(f"Save failed: {exc}")
 
-    def _on_start_job(self):
-        if not self._sender.is_connected():
-            self._append_console("Start failed: not connected.")
+    def _on_insert_gcode_template(self):
+        if self._gcode_edit.toPlainText().strip() and not self._confirm_replace_gcode():
             return
-        if self._sender.is_streaming():
-            self._append_console("Start failed: sender busy.")
+        safe_z = self._manual_start_safe_z()
+        program = rectangle_pocket(
+            TemplateSpec(
+                width=40.0,
+                height=40.0,
+                depth=5.0,
+                tool_diameter=3.0,
+                step_down=2.0,
+                step_over=1.5,
+                feed_rate=500.0,
+                plunge_rate=120.0,
+                safe_z=safe_z,
+                start_z=0.0,
+                origin="center",
+            )
+        )
+        self._gcode_edit.setPlainText(program.gcode + "\n")
+        self._append_console("Inserted template: rectangle pocket 40 x 40 x 5 mm, tool 3 mm.")
+        self._update_preview()
+        self._update_job_controls()
+
+    def _confirm_replace_gcode(self):
+        result = QtWidgets.QMessageBox.question(
+            self,
+            "Replace G-code?",
+            "Replace current editor contents with the template?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        return result == QtWidgets.QMessageBox.Yes
+
+    def _on_set_manual_start(self):
+        allowed, reason = self._can_set_manual_start()
+        if not allowed:
+            self._append_console(f"Set manual start blocked: {reason}", force=True)
+            if reason == "missing live position":
+                self._request_status()
             return
-        state = self._machine_state()
-        if state is None:
-            self._append_console("Start failed: machine status unknown. Wait for an Idle status.")
+        status = self._sender.get_status() or {}
+        live = self._extract_live_xyz(status)
+        if live is None:
+            self._append_console("Set manual start blocked: missing live position", force=True)
             self._request_status()
             return
+        self._gcode_manual_start_wpos = live["wpos"]
+        self._gcode_manual_start_mpos = live["mpos"]
+        self._gcode_manual_start_wco = live["wco"]
+        self._gcode_manual_start_at = time.time()
+        self._manual_start_status.setText(
+            "Manual start: "
+            f"X{live['wpos']['x']:.3f} Y{live['wpos']['y']:.3f} Z{live['wpos']['z']:.3f}"
+        )
+        self._append_console(
+            "Manual start saved: "
+            f"WPos X{live['wpos']['x']:.3f} Y{live['wpos']['y']:.3f} Z{live['wpos']['z']:.3f}",
+            force=True,
+        )
+        self._update_job_controls()
+
+    def _can_set_manual_start(self):
+        if not self._sender.is_connected():
+            return False, "not connected"
+        if self._sender.is_streaming():
+            return False, "sender busy"
+        if self._explore_active:
+            return False, "limit explore active"
+        if self._machine_state() != "idle":
+            return False, f"machine state is {self._machine_state() or '?'}"
+        if self._extract_live_xyz(self._sender.get_status() or {}) is None:
+            return False, "missing live position"
+        return True, ""
+
+    def _on_go_to_manual_start_safely(self):
+        allowed, reason = self._can_go_to_manual_start()
+        if not allowed:
+            self._append_console(f"Go to manual start blocked: {reason}", force=True)
+            if reason == "missing live position":
+                self._request_status()
+            return
+        start = self._gcode_manual_start_wpos
+        safe_z = self._manual_start_safe_z()
+        commands = [
+            "G90 G21",
+            f"G0 Z{safe_z:.3f}",
+            f"G0 X{start['x']:.3f} Y{start['y']:.3f}",
+        ]
+        for command in commands:
+            if not self._send_checked_command(command, timeout=8.0):
+                return
+        self._append_console("Moved safely to manual start X/Y at safe Z.", force=True)
+        self._request_status()
+
+    def _can_go_to_manual_start(self):
+        if not self._gcode_manual_start_wpos:
+            return False, "manual start not set"
+        if not self._sender.is_connected():
+            return False, "not connected"
+        if self._sender.is_streaming():
+            return False, "sender busy"
+        if self._explore_active:
+            return False, "limit explore active"
+        if self._machine_state() != "idle":
+            return False, f"machine state is {self._machine_state() or '?'}"
+        live = self._extract_live_xyz(self._sender.get_status() or {})
+        if live is None:
+            return False, "missing live position"
+        if self._gcode_manual_start_wco and not self._xyz_close(live["wco"], self._gcode_manual_start_wco):
+            return False, "work offset changed"
+        return True, ""
+
+    def _on_validate_gcode(self):
+        lines, _removed = prepare_stream_lines(self._gcode_edit.toPlainText(), dry_run=False)
+        report = self._validate_gcode_lines(lines, label="Validate")
+        self._gcode_last_validation = report
+        self._update_job_controls()
+
+    def _on_air_run(self):
+        allowed, reason = self._can_stream_job()
+        if not allowed:
+            self._append_console(f"Air Run failed: {reason}", force=True)
+            return
+        lines = prepare_air_run_lines(self._gcode_edit.toPlainText(), air_z=self._manual_start_safe_z())
+        if not lines:
+            self._append_console("Air Run failed: G-code is empty.")
+            return
+        report = self._validate_gcode_lines(lines, label="Air Run")
+        if not report or not report.get("valid"):
+            return
+        self._start_stream_lines(lines, "Air Run")
+
+    def _on_show_apply_air_run(self):
+        lines = prepare_air_run_lines(self._gcode_edit.toPlainText(), air_z=self._manual_start_safe_z())
+        if not lines:
+            self._append_console("Show/Apply Air Run failed: G-code is empty.", force=True)
+            return
+        self._gcode_edit.setPlainText("\n".join(lines) + "\n")
+        self._append_console(
+            f"Show/Apply Air Run: applied {len(lines)} transformed line(s); no machine commands sent.",
+            force=True,
+        )
+        self._update_job_controls()
+
+    def _can_stream_job(self):
+        if not self._sender.is_connected():
+            return False, "not connected"
+        if self._sender.is_streaming():
+            return False, "sender busy"
+        state = self._machine_state()
+        if state is None:
+            self._request_status()
+            return False, "machine status unknown"
         if state != "idle":
-            self._append_console(f"Start failed: machine not idle ({state}).")
+            return False, f"machine not idle ({state})"
+        return True, ""
+
+    def _validate_gcode_lines(self, lines, label="Validate"):
+        if not lines:
+            self._append_console(f"{label} failed: G-code is empty.")
+            return None
+        blocked = self._find_blocked_stream_command(lines)
+        if blocked is not None:
+            line_no, command, reason = blocked
+            self._append_console(f"{label} failed at line {line_no}: {reason} ({command})", force=True)
+            return {"valid": False, "errors": [{"line": line_no, "command": command, "reason": reason}]}
+        status = self._sender.get_status() or {}
+        profile, _profile_path = grbl_load_machine_profile(None)
+        report = grbl_validate_gcode(
+            lines,
+            machine_profile=profile,
+            grbl_settings=profile.get("settings") if isinstance(profile, dict) else None,
+            status=status,
+        )
+        if report.get("valid"):
+            bbox = report.get("bounding_box") or {}
+            self._append_console(
+                f"{label} ok: {report.get('line_count', len(lines))} lines, "
+                f"bbox X{bbox.get('x')} Y{bbox.get('y')} Z{bbox.get('z')}.",
+                force=True,
+            )
+        else:
+            errors = report.get("errors") or []
+            first = errors[0] if errors else {}
+            self._append_console(
+                f"{label} failed at line {first.get('line', '?')}: {first.get('reason', 'unknown error')}",
+                force=True,
+            )
+        return report
+
+    def _start_stream_lines(self, lines, label):
+        try:
+            self._sender.start_stream(lines)
+            self._append_console(f"{label}: streaming {len(lines)} lines.")
+        except Exception as exc:
+            self._append_console(f"{label} failed: {exc}")
+        self._update_job_controls()
+
+    def _manual_start_safe_z(self):
+        clearance = getattr(self, "_controller_manual_clearance", None)
+        try:
+            value = float(clearance.value()) if clearance is not None else 5.0
+        except Exception:
+            value = 5.0
+        return max(value, 0.0)
+
+    def _extract_live_xyz(self, status):
+        status = status or {}
+        mpos = grbl_parse_xyz_value(status.get("MPos"))
+        wco = grbl_parse_xyz_value(status.get("WCO"))
+        wpos = grbl_parse_xyz_value(status.get("WPos"))
+        if wpos is None and mpos is not None and wco is not None:
+            wpos = {axis: float(mpos[axis]) - float(wco[axis]) for axis in ("x", "y", "z")}
+        if mpos is None or wco is None or wpos is None:
+            return None
+        return {
+            "mpos": {axis: float(mpos[axis]) for axis in ("x", "y", "z")},
+            "wco": {axis: float(wco[axis]) for axis in ("x", "y", "z")},
+            "wpos": {axis: float(wpos[axis]) for axis in ("x", "y", "z")},
+        }
+
+    def _xyz_close(self, left, right, tolerance=0.01):
+        if not left or not right:
+            return False
+        return all(abs(float(left[axis]) - float(right[axis])) <= tolerance for axis in ("x", "y", "z"))
+
+    def _find_blocked_stream_command(self, lines):
+        for line_no, line in enumerate(lines, start=1):
+            command = str(line).strip()
+            upper = command.upper()
+            if upper.startswith("$H"):
+                return line_no, command, "Homing is not allowed in normal G-code streaming"
+            words = re.findall(r"([A-Z])\s*([-+]?\d*\.?\d+)", upper)
+            for letter, number_text in words:
+                try:
+                    number = float(number_text)
+                except ValueError:
+                    continue
+                if letter == "G" and any(abs(number - value) < 1e-9 for value in (10.0, 28.0, 30.0)):
+                    return line_no, command, f"G{int(round(number))} is not allowed in normal G-code streaming"
+        return None
+
+    def _on_start_job(self):
+        allowed, reason = self._can_stream_job()
+        if not allowed:
+            self._append_console(f"Start failed: {reason}.")
             return
         dry_run = self._dry_run_check.isChecked()
         lines, removed = prepare_stream_lines(self._gcode_edit.toPlainText(), dry_run=dry_run)
         if not lines:
             self._append_console("Start failed: G-code is empty.")
             return
-        try:
-            self._sender.start_stream(lines)
-            if dry_run and removed:
-                self._append_console(
-                    f"Dry run active: skipped {len(removed)} spindle/laser command(s)."
-                )
-            self._append_console(f"Streaming {len(lines)} lines.")
-        except Exception as exc:
-            self._append_console(f"Start failed: {exc}")
-        self._update_job_controls()
+        report = self._validate_gcode_lines(lines, label="Start")
+        if not report or not report.get("valid"):
+            return
+        if dry_run and removed:
+            self._append_console(f"Dry run active: skipped {len(removed)} spindle/laser command(s).")
+        self._start_stream_lines(lines, "Start")
 
     def _on_pause_resume_job(self):
         if not self._sender.is_streaming():
@@ -4429,10 +4713,34 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         streaming = progress.get("streaming")
         paused = progress.get("paused")
-        self._start_btn.setEnabled(self._sender.is_connected() and not streaming and self._machine_state() == "idle")
+        connected = self._sender.is_connected()
+        idle = self._machine_state() == "idle"
+        has_gcode = bool(getattr(self, "_gcode_edit", None) is not None and self._gcode_edit.toPlainText().strip())
+        self._start_btn.setEnabled(connected and not streaming and idle and has_gcode)
         self._pause_btn.setEnabled(streaming)
         self._stop_btn.setEnabled(streaming)
         self._pause_btn.setText("Resume" if paused else "Pause")
+        validate_btn = getattr(self, "_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(not streaming and has_gcode)
+        air_run_apply_btn = getattr(self, "_air_run_apply_btn", None)
+        if air_run_apply_btn is not None:
+            air_run_apply_btn.setEnabled(not streaming and has_gcode)
+        air_run_btn = getattr(self, "_air_run_btn", None)
+        if air_run_btn is not None:
+            air_run_btn.setEnabled(connected and not streaming and idle and has_gcode)
+        set_manual_start_btn = getattr(self, "_set_manual_start_btn", None)
+        if set_manual_start_btn is not None:
+            set_manual_start_btn.setEnabled(connected and not streaming and idle and not self._explore_active)
+        go_manual_start_btn = getattr(self, "_go_manual_start_btn", None)
+        if go_manual_start_btn is not None:
+            go_manual_start_btn.setEnabled(
+                connected
+                and not streaming
+                and idle
+                and not self._explore_active
+                and bool(getattr(self, "_gcode_manual_start_wpos", None))
+            )
 
     def _update_machine_controls(self):
         connected = self._sender.is_connected()
@@ -4543,14 +4851,22 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _update_preview(self):
         text = self._gcode_edit.toPlainText()
-        path = parse_gcode(text)
+        projection = "iso"
+        projection_widget = getattr(self, "_gcode_preview_projection", None)
+        if projection_widget is not None:
+            projection = str(projection_widget.currentText() or "Iso").lower()
+        path = parse_gcode_preview(text)
         self._preview_scene.clear()
-        if not path.segments:
+        bounds = render_preview_scene(self._preview_scene, path, projection=projection, clear=False)
+        if bounds is None:
             return
-        for x0, y0, x1, y1, rapid in path.segments:
-            color = QtGui.QColor(150, 150, 150) if rapid else QtGui.QColor(0, 120, 255)
-            pen = QtGui.QPen(color, 0)
-            self._preview_scene.addLine(x0, -y0, x1, -y1, pen)
         bounds = self._preview_scene.itemsBoundingRect()
         if not bounds.isNull():
             self._preview_view.fitInView(bounds, QtCore.Qt.KeepAspectRatio)
+
+    def _schedule_preview_update(self):
+        timer = getattr(self, "_preview_refresh_timer", None)
+        if timer is None:
+            self._update_preview()
+            return
+        timer.start()

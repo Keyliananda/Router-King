@@ -640,6 +640,15 @@ def _simulate_gcode(
         cleaned = strip_gcode_comments(raw_line)
         if not cleaned:
             continue
+        cleaned_upper = cleaned.strip().upper()
+        if cleaned_upper.startswith("$H"):
+            _append_error(
+                errors,
+                line=line_no,
+                command=raw_line,
+                reason="Homing commands are not allowed in normal G-code streaming; use machine home controls.",
+            )
+            continue
         words = parse_gcode_words(cleaned)
         if not words:
             continue
@@ -678,6 +687,20 @@ def _simulate_gcode(
                     state["unit_scale"] = 1.0
                 elif _near(number, 53.0):
                     machine_coords_block = True
+                elif _near(number, 10.0):
+                    _append_error(
+                        errors,
+                        line=line_no,
+                        command=raw_line,
+                        reason="G10 work-offset commands are not allowed in normal G-code streaming; use explicit setup/probe actions.",
+                    )
+                elif any(_near(number, value) for value in (28.0, 30.0)):
+                    _append_error(
+                        errors,
+                        line=line_no,
+                        command=raw_line,
+                        reason=f"G{int(round(number))} return commands are not allowed in normal G-code streaming.",
+                    )
                 elif _near(number, 54.0):
                     pass
                 elif any(_near(number, value) for value in (38.0, 38.2, 38.3, 38.4, 38.5)):

@@ -55,7 +55,7 @@ def get_model_pricing(model_id: str) -> Optional[Tuple[float, float]]:
         return _MODEL_PRICING[base_model]
     
     # Try to match family prefix (e.g., gpt-4o-mini-xyz -> gpt-4o-mini)
-    for known_model in _MODEL_PRICING:
+    for known_model in sorted(_MODEL_PRICING, key=len, reverse=True):
         if model_id.startswith(known_model + "-"):
             return _MODEL_PRICING[known_model]
     
