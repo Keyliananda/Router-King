@@ -106,6 +106,10 @@ class GrblSender:
         """Send GRBL soft reset."""
         self.send_realtime_command(b"\x18")
 
+    def cancel_jog(self):
+        """Cancel an active GRBL jog motion."""
+        self.send_realtime_command(b"\x85")
+
     def request_status(self):
         """Request a GRBL status report."""
         self.send_realtime_command("?")

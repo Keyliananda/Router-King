@@ -27,9 +27,17 @@
 - Persisted Z probe defaults for this router are: touch plate height 15 mm,
   probe feed 50 mm/min, retract 3 mm. Use these defaults unless the setup
   explicitly changes.
-- For manual XY setup after Z probing, use `machine_prepare_manual_xy`. It
-  lowers only Z to the configured manual clearance, defaulting to 10% of the
-  touch plate height above work Z0, and never changes X/Y.
+- For manual XY/XYZ setup after Z probing, use `machine_prepare_manual_xy` or
+  the dock's `Prepare Manual XYZ` button. Both lower only Z to the configured
+  manual clearance, defaulting to 10% of the touch plate height above work Z0,
+  and never change X/Y.
+- Optional gamepad jogging is documented in `docs/CONTROLLER_JOG.md`. Keep it
+  disabled unless the RouterKing dock is connected, no stream is running, and
+  the controller deadman is held.
+- MCP machine actions and the visible RouterKing dock share one process-wide
+  GRBL sender. Run machine-control actions through that shared sender so the
+  dock status, console, and Agent / MCP panel stay current and the operator can
+  intervene from the UI.
 
 ## Laser
 1. CAD or vector import (DXF/SVG) into FreeCAD.

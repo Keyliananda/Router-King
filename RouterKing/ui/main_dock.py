@@ -28,9 +28,21 @@ except Exception:
 try:
     from ..gcode.parser import iter_gcode_lines, parse_gcode, prepare_stream_lines
     from ..grbl.sender import GrblSender
+    from ..grbl.validator import (
+        load_machine_profile as grbl_load_machine_profile,
+        parse_xyz_value as grbl_parse_xyz_value,
+        resolve_machine_limits as grbl_resolve_machine_limits,
+    )
+    from .gamepad import DEFAULT_CONTROLLER_BINDINGS, PygameGamepad, active_binding_tokens, make_jog_vector
 except ImportError:
     from gcode.parser import iter_gcode_lines, parse_gcode, prepare_stream_lines
     from grbl.sender import GrblSender
+    from grbl.validator import (
+        load_machine_profile as grbl_load_machine_profile,
+        parse_xyz_value as grbl_parse_xyz_value,
+        resolve_machine_limits as grbl_resolve_machine_limits,
+    )
+    from ui.gamepad import DEFAULT_CONTROLLER_BINDINGS, PygameGamepad, active_binding_tokens, make_jog_vector
 
 _dock = None
 
@@ -44,6 +56,19 @@ def _status_message(text, error=False):
             App.Console.PrintError(text)
         else:
             App.Console.PrintMessage(text)
+    except Exception:
+        pass
+
+
+def _controller_log(text):
+    try:
+        base_dir = App.getUserAppDataDir()
+    except Exception:
+        base_dir = os.path.expanduser("~/Library/Application Support/FreeCAD")
+    try:
+        os.makedirs(base_dir, exist_ok=True)
+        with open(os.path.join(base_dir, "routerking_controller.log"), "a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
     except Exception:
         pass
 
@@ -88,6 +113,266 @@ _AI_MODEL_PREFIX_ORDER = [
     "o5", "o4", "o3", "o2", "o1", 
     "gpt-4", "gpt-3.5"
 ]
+
+_CONTROLLER_BINDING_FIELDS = (
+    ("x_axes", "X axis"),
+    ("y_axes", "Y axis"),
+    ("z_axes", "Z axis"),
+    ("x_neg_buttons", "X- buttons"),
+    ("x_pos_buttons", "X+ buttons"),
+    ("y_neg_buttons", "Y- buttons"),
+    ("y_pos_buttons", "Y+ buttons"),
+    ("z_neg_buttons", "Z- buttons"),
+    ("z_pos_buttons", "Z+ buttons"),
+    ("deadman_buttons", "Deadman"),
+)
+
+
+def _set_layout_visible(layout, visible):
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        widget = item.widget()
+        child_layout = item.layout()
+        if widget is not None:
+            widget.setVisible(visible)
+        elif child_layout is not None:
+            _set_layout_visible(child_layout, visible)
+
+
+def _make_collapsible(group, *, collapsed=False):
+    group.setCheckable(True)
+
+    def apply(expanded):
+        layout = group.layout()
+        if layout is not None:
+            _set_layout_visible(layout, bool(expanded))
+
+    group.toggled.connect(apply)
+    group.setChecked(not collapsed)
+    apply(not collapsed)
+    return group
+
+
+class ControllerTestDialog(QtWidgets.QDialog):
+    """Live pygame controller inspector. It never sends GRBL commands."""
+
+    def __init__(self, gamepad, parent=None):
+        super().__init__(parent)
+        self._gamepad = gamepad
+        self._owns_connection = False
+        self._closing = False
+        self._axis_widgets = {}
+        self._button_widgets = {}
+        self.setWindowTitle("RouterKing Controller Test")
+        self.setMinimumWidth(640)
+        try:
+            self.setWindowFlags(
+                self.windowFlags()
+                | QtCore.Qt.Window
+                | QtCore.Qt.WindowMinimizeButtonHint
+                | QtCore.Qt.WindowCloseButtonHint
+            )
+        except Exception:
+            pass
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self._status = QtWidgets.QLabel("Controller: checking...")
+        layout.addWidget(self._status)
+
+        mapping = QtWidgets.QLabel("Jog mapping: right stick X/Y, L2 Z-, R2 Z+, L1/R1 deadman.")
+        layout.addWidget(mapping)
+
+        axes_group = QtWidgets.QGroupBox("Axes")
+        self._axes_layout = QtWidgets.QGridLayout(axes_group)
+        _make_collapsible(axes_group)
+        layout.addWidget(axes_group)
+
+        buttons_group = QtWidgets.QGroupBox("Buttons")
+        self._buttons_layout = QtWidgets.QGridLayout(buttons_group)
+        _make_collapsible(buttons_group)
+        layout.addWidget(buttons_group)
+
+        close_row = QtWidgets.QHBoxLayout()
+        close_row.addStretch(1)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_row.addWidget(close_btn)
+        layout.addLayout(close_row)
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(self._refresh)
+        self._connect_if_needed()
+
+    def closeEvent(self, event):
+        self._stop()
+        super().closeEvent(event)
+
+    def accept(self):
+        self._stop()
+        super().accept()
+
+    def reject(self):
+        self._stop()
+        super().reject()
+
+    def _connect_if_needed(self):
+        if not self._gamepad.is_available():
+            self._status.setText(f"Controller: pygame unavailable ({self._gamepad.error})")
+            return
+        if not self._gamepad.is_connected():
+            self._owns_connection = bool(self._gamepad.connect())
+        if not self._gamepad.is_connected():
+            self._status.setText(f"Controller: {self._gamepad.error or 'not found'}")
+            return
+        self._timer.start()
+        self._refresh()
+
+    def _stop(self):
+        self._closing = True
+        if getattr(self, "_timer", None) is not None:
+            self._timer.stop()
+        if self._owns_connection:
+            self._gamepad.disconnect()
+            self._owns_connection = False
+
+    def _refresh(self):
+        if self._closing:
+            return
+        try:
+            snapshot = self._gamepad.snapshot()
+            if snapshot is None:
+                self._status.setText(f"Controller: {self._gamepad.error or 'disconnected'}")
+                return
+            self._status.setText(f"Controller: {snapshot.name}")
+            self._refresh_axes(snapshot.axes)
+            self._refresh_buttons(snapshot.buttons)
+        except Exception as exc:
+            self._status.setText(f"Controller test stopped: {exc}")
+            self._timer.stop()
+
+    def _refresh_axes(self, axes):
+        for row, axis in enumerate(axes):
+            if axis.name not in self._axis_widgets:
+                name_label = QtWidgets.QLabel(axis.name)
+                value_label = QtWidgets.QLabel("+0.000")
+                bar = QtWidgets.QProgressBar()
+                bar.setRange(0, 2000)
+                bar.setTextVisible(False)
+                self._axes_layout.addWidget(name_label, row, 0)
+                self._axes_layout.addWidget(bar, row, 1)
+                self._axes_layout.addWidget(value_label, row, 2)
+                self._axis_widgets[axis.name] = (bar, value_label)
+            bar, value_label = self._axis_widgets[axis.name]
+            value = max(-1.0, min(1.0, float(axis.value)))
+            bar.setValue(int((value + 1.0) * 1000))
+            value_label.setText(f"{value:+.3f}")
+
+    def _refresh_buttons(self, buttons):
+        for index, button in enumerate(buttons):
+            if button.name not in self._button_widgets:
+                label = QtWidgets.QLabel(button.name)
+                label.setAlignment(QtCore.Qt.AlignCenter)
+                label.setMinimumWidth(92)
+                label.setAutoFillBackground(True)
+                self._buttons_layout.addWidget(label, index // 4, index % 4)
+                self._button_widgets[button.name] = label
+            label = self._button_widgets[button.name]
+            if button.pressed:
+                label.setStyleSheet("QLabel { background: #2d9c4b; color: white; padding: 6px; border-radius: 4px; }")
+            else:
+                label.setStyleSheet("QLabel { background: #3b3b3b; color: #dddddd; padding: 6px; border-radius: 4px; }")
+
+
+class ControllerBindingCaptureDialog(QtWidgets.QDialog):
+    """Capture one controller input token without sending machine commands."""
+
+    def __init__(self, gamepad, binding_label, callback, parent=None):
+        super().__init__(parent)
+        self._gamepad = gamepad
+        self._binding_label = binding_label
+        self._callback = callback
+        self._owns_connection = False
+        self._closing = False
+        self.setWindowTitle(f"Learn Controller Binding: {binding_label}")
+        self.setMinimumWidth(420)
+        try:
+            self.setWindowFlags(
+                self.windowFlags()
+                | QtCore.Qt.Window
+                | QtCore.Qt.WindowMinimizeButtonHint
+                | QtCore.Qt.WindowCloseButtonHint
+            )
+        except Exception:
+            pass
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self._status = QtWidgets.QLabel(f"Press or move a controller input for: {binding_label}")
+        layout.addWidget(self._status)
+        self._hint = QtWidgets.QLabel("Buttons are captured directly. Axes are captured past 60% deflection.")
+        layout.addWidget(self._hint)
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        button_row.addWidget(cancel)
+        layout.addLayout(button_row)
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(self._refresh)
+        self._connect_if_needed()
+
+    def closeEvent(self, event):
+        self._stop()
+        super().closeEvent(event)
+
+    def accept(self):
+        self._stop()
+        super().accept()
+
+    def reject(self):
+        self._stop()
+        super().reject()
+
+    def _connect_if_needed(self):
+        if not self._gamepad.is_available():
+            self._status.setText(f"Controller unavailable: {self._gamepad.error}")
+            return
+        if not self._gamepad.is_connected():
+            self._owns_connection = bool(self._gamepad.connect())
+        if not self._gamepad.is_connected():
+            self._status.setText(f"Controller not found: {self._gamepad.error}")
+            return
+        self._timer.start()
+
+    def _stop(self):
+        self._closing = True
+        if getattr(self, "_timer", None) is not None:
+            self._timer.stop()
+        if self._owns_connection:
+            self._gamepad.disconnect()
+            self._owns_connection = False
+
+    def _refresh(self):
+        if self._closing:
+            return
+        try:
+            snapshot = self._gamepad.snapshot()
+            if snapshot is None:
+                self._status.setText(f"Controller disconnected: {self._gamepad.error}")
+                return
+            tokens = active_binding_tokens(snapshot)
+            if not tokens:
+                self._status.setText(f"Waiting for input: {self._binding_label}")
+                return
+            token = tokens[0]
+            self._status.setText(f"Captured: {token}")
+            self._callback(token)
+            self.accept()
+        except Exception as exc:
+            self._status.setText(f"Capture stopped: {exc}")
+            self._timer.stop()
 _AI_MODEL_EXCLUDE_SUBSTRINGS = (
     "realtime",
     "audio",
@@ -399,9 +684,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
         self._dxf_import_defaults = {}
+        self._controller = PygameGamepad()
+        self._controller_defaults = {}
+        self._controller_last_jog_at = 0.0
+        self._controller_was_active = False
+        self._controller_manual_xyz_active = False
+        self._controller_test_dialog = None
+        self._controller_binding_capture_dialog = None
 
         self._load_cam_generate_defaults()
         self._load_dxf_import_defaults()
+        self._load_controller_defaults()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -457,6 +750,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._poll_timer = QtCore.QTimer(self)
         self._poll_timer.setInterval(100)
         self._poll_timer.timeout.connect(self._drain_sender)
+        self._controller_timer = QtCore.QTimer(self)
+        self._controller_timer.setInterval(120)
+        self._controller_timer.timeout.connect(self._controller_tick)
 
         self._connect_btn.clicked.connect(self._on_connect)
         self._refresh_ports_btn.clicked.connect(self._refresh_ports)
@@ -487,6 +783,18 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             command_row.addWidget(btn)
         layout.addLayout(command_row)
 
+        mcp_group = QtWidgets.QGroupBox("Agent / MCP")
+        mcp_layout = QtWidgets.QVBoxLayout(mcp_group)
+        self._mcp_status = QtWidgets.QLabel("MCP: idle")
+        mcp_layout.addWidget(self._mcp_status)
+        self._mcp_log = QtWidgets.QPlainTextEdit()
+        self._mcp_log.setReadOnly(True)
+        self._mcp_log.setMaximumHeight(72)
+        self._mcp_log.setPlaceholderText("Shared MCP actions appear here.")
+        mcp_layout.addWidget(self._mcp_log)
+        _make_collapsible(mcp_group)
+        layout.addWidget(mcp_group)
+
         jog_group = QtWidgets.QGroupBox("Jog")
         jog_layout = QtWidgets.QVBoxLayout(jog_group)
 
@@ -516,7 +824,90 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         for btn in [self._jog_xm, self._jog_xp, self._jog_ym, self._jog_yp, self._jog_zm, self._jog_zp]:
             jog_row.addWidget(btn)
         jog_layout.addLayout(jog_row)
+        _make_collapsible(jog_group)
         layout.addWidget(jog_group)
+
+        controller_group = QtWidgets.QGroupBox("Controller Jog")
+        controller_layout = QtWidgets.QVBoxLayout(controller_group)
+        controller_top = QtWidgets.QHBoxLayout()
+        self._controller_connect_btn = QtWidgets.QPushButton("Connect Controller")
+        self._controller_test_btn = QtWidgets.QPushButton("Test Controller")
+        self._controller_enable = QtWidgets.QCheckBox("Enable")
+        self._controller_status = QtWidgets.QLabel("Controller: unavailable")
+        controller_top.addWidget(self._controller_connect_btn)
+        controller_top.addWidget(self._controller_test_btn)
+        controller_top.addWidget(self._controller_enable)
+        controller_top.addWidget(self._controller_status, 1)
+        controller_layout.addLayout(controller_top)
+
+        controller_settings = QtWidgets.QHBoxLayout()
+        controller_settings.addWidget(QtWidgets.QLabel("XY step"))
+        self._controller_xy_step = QtWidgets.QDoubleSpinBox()
+        self._controller_xy_step.setDecimals(3)
+        self._controller_xy_step.setRange(0.001, 10.0)
+        self._controller_xy_step.setValue(float(self._controller_defaults.get("xy_step", 0.5)))
+        controller_settings.addWidget(self._controller_xy_step)
+        controller_settings.addWidget(QtWidgets.QLabel("Z step"))
+        self._controller_z_step = QtWidgets.QDoubleSpinBox()
+        self._controller_z_step.setDecimals(3)
+        self._controller_z_step.setRange(0.001, 5.0)
+        self._controller_z_step.setValue(float(self._controller_defaults.get("z_step", 0.1)))
+        controller_settings.addWidget(self._controller_z_step)
+        controller_settings.addWidget(QtWidgets.QLabel("Feed"))
+        self._controller_feed = QtWidgets.QDoubleSpinBox()
+        self._controller_feed.setDecimals(0)
+        self._controller_feed.setRange(1, 5000)
+        self._controller_feed.setValue(float(self._controller_defaults.get("feed_rate", 600.0)))
+        controller_settings.addWidget(self._controller_feed)
+        controller_settings.addWidget(QtWidgets.QLabel("Deadzone"))
+        self._controller_deadzone = QtWidgets.QDoubleSpinBox()
+        self._controller_deadzone.setDecimals(2)
+        self._controller_deadzone.setRange(0.0, 0.95)
+        self._controller_deadzone.setSingleStep(0.05)
+        self._controller_deadzone.setValue(float(self._controller_defaults.get("deadzone", 0.20)))
+        controller_settings.addWidget(self._controller_deadzone)
+        controller_layout.addLayout(controller_settings)
+
+        bindings_group = QtWidgets.QGroupBox("Controller Bindings")
+        bindings_layout = QtWidgets.QGridLayout(bindings_group)
+        self._controller_binding_edits = {}
+        for row, (key, label) in enumerate(_CONTROLLER_BINDING_FIELDS):
+            bindings_layout.addWidget(QtWidgets.QLabel(label), row, 0)
+            edit = QtWidgets.QLineEdit()
+            edit.setText(str(self._controller_defaults.get(key, DEFAULT_CONTROLLER_BINDINGS.get(key, ""))))
+            edit.setPlaceholderText(DEFAULT_CONTROLLER_BINDINGS.get(key, ""))
+            bindings_layout.addWidget(edit, row, 1)
+            learn_btn = QtWidgets.QPushButton("Learn")
+            clear_btn = QtWidgets.QPushButton("Clear")
+            bindings_layout.addWidget(learn_btn, row, 2)
+            bindings_layout.addWidget(clear_btn, row, 3)
+            learn_btn.clicked.connect(lambda _checked=False, k=key, l=label: self._on_learn_controller_binding(k, l))
+            clear_btn.clicked.connect(lambda _checked=False, e=edit: e.clear())
+            self._controller_binding_edits[key] = edit
+        bindings_help = QtWidgets.QLabel("Comma-separated names. Prefix axes with '-' to invert, e.g. -Right Y.")
+        bindings_layout.addWidget(bindings_help, len(_CONTROLLER_BINDING_FIELDS), 0, 1, 2)
+        _make_collapsible(bindings_group, collapsed=True)
+        controller_layout.addWidget(bindings_group)
+
+        manual_row = QtWidgets.QHBoxLayout()
+        manual_row.addWidget(QtWidgets.QLabel("Manual XYZ Z clearance"))
+        self._controller_manual_clearance = QtWidgets.QDoubleSpinBox()
+        self._controller_manual_clearance.setDecimals(3)
+        self._controller_manual_clearance.setRange(0.0, 50.0)
+        self._controller_manual_clearance.setSingleStep(0.1)
+        self._controller_manual_clearance.setValue(float(self._controller_defaults.get("manual_clearance", 1.5)))
+        manual_row.addWidget(self._controller_manual_clearance)
+        self._controller_manual_prepare_btn = QtWidgets.QPushButton("Prepare Manual XYZ")
+        self._controller_manual_exit_btn = QtWidgets.QPushButton("Exit Manual XYZ")
+        manual_row.addWidget(self._controller_manual_prepare_btn)
+        manual_row.addWidget(self._controller_manual_exit_btn)
+        controller_layout.addLayout(manual_row)
+
+        controller_note = QtWidgets.QLabel("Default: right stick + DPad X/Y, L2 Z-, R2 Z+. Hold L1 or R1 to move.")
+        controller_layout.addWidget(controller_note)
+        self._controller_enable.setChecked(bool(self._controller_defaults.get("enabled", False)))
+        _make_collapsible(controller_group)
+        layout.addWidget(controller_group)
 
         machine_group = QtWidgets.QGroupBox("Machine Limits / Tests")
         machine_layout = QtWidgets.QGridLayout(machine_group)
@@ -574,6 +965,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             1,
             6,
         )
+        _make_collapsible(machine_group, collapsed=True)
         layout.addWidget(machine_group)
 
         console_group = QtWidgets.QGroupBox("Console")
@@ -601,6 +993,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         command_input.addWidget(self._command_line)
         command_input.addWidget(self._send_cmd_btn)
         console_layout.addLayout(command_input)
+        _make_collapsible(console_group, collapsed=True)
         layout.addWidget(console_group, 1)
 
         self._home_btn.clicked.connect(lambda: self._send_command("$H"))
@@ -615,6 +1008,18 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._jog_yp.clicked.connect(lambda: self._jog("Y", 1))
         self._jog_zm.clicked.connect(lambda: self._jog("Z", -1))
         self._jog_zp.clicked.connect(lambda: self._jog("Z", 1))
+        self._controller_connect_btn.clicked.connect(self._on_controller_connect)
+        self._controller_test_btn.clicked.connect(self._on_controller_test)
+        self._controller_enable.toggled.connect(self._on_controller_enabled_changed)
+        self._controller_xy_step.valueChanged.connect(lambda _value: self._save_controller_defaults())
+        self._controller_z_step.valueChanged.connect(lambda _value: self._save_controller_defaults())
+        self._controller_feed.valueChanged.connect(lambda _value: self._save_controller_defaults())
+        self._controller_deadzone.valueChanged.connect(lambda _value: self._save_controller_defaults())
+        self._controller_manual_clearance.valueChanged.connect(lambda _value: self._save_controller_defaults())
+        for edit in self._controller_binding_edits.values():
+            edit.editingFinished.connect(self._save_controller_defaults)
+        self._controller_manual_prepare_btn.clicked.connect(self._on_prepare_manual_xyz)
+        self._controller_manual_exit_btn.clicked.connect(self._on_exit_manual_xyz)
         self._send_cmd_btn.clicked.connect(self._on_send_command)
         self._command_line.returnPressed.connect(self._on_send_command)
         self._clear_console_btn.clicked.connect(self._console.clear)
@@ -937,6 +1342,74 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         params.SetFloat("merge_tolerance", float(defaults.get("merge_tolerance", 1e-6)))
         params.SetBool("prefer_ezdxf", bool(defaults.get("prefer_ezdxf", True)))
         params.SetBool("use_freecad", bool(defaults.get("use_freecad", True)))
+
+    def _load_controller_defaults(self):
+        if App is None:
+            return
+        params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/Controller")
+        manual_clearance = params.GetFloat("manual_clearance", -1.0)
+        if manual_clearance < 0.0:
+            manual_clearance = self._default_manual_xyz_clearance()
+        self._controller_defaults = {
+            "enabled": params.GetBool("enabled", False),
+            "xy_step": params.GetFloat("xy_step", 0.5),
+            "z_step": params.GetFloat("z_step", 0.1),
+            "feed_rate": params.GetFloat("feed_rate", 600.0),
+            "deadzone": params.GetFloat("deadzone", 0.20),
+            "manual_clearance": manual_clearance,
+        }
+        for key, default_value in DEFAULT_CONTROLLER_BINDINGS.items():
+            try:
+                value = params.GetString(key, default_value)
+            except TypeError:
+                value = params.GetString(key) or default_value
+            self._controller_defaults[key] = value
+
+    def _save_controller_defaults(self):
+        if App is None:
+            return
+        params = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing/Controller")
+        enable = getattr(self, "_controller_enable", None)
+        xy_step = getattr(self, "_controller_xy_step", None)
+        z_step = getattr(self, "_controller_z_step", None)
+        feed = getattr(self, "_controller_feed", None)
+        deadzone = getattr(self, "_controller_deadzone", None)
+        manual_clearance = getattr(self, "_controller_manual_clearance", None)
+        binding_edits = getattr(self, "_controller_binding_edits", {})
+        defaults = {
+            "enabled": bool(enable.isChecked()) if enable is not None else False,
+            "xy_step": float(xy_step.value()) if xy_step is not None else 0.5,
+            "z_step": float(z_step.value()) if z_step is not None else 0.1,
+            "feed_rate": float(feed.value()) if feed is not None else 600.0,
+            "deadzone": float(deadzone.value()) if deadzone is not None else 0.20,
+            "manual_clearance": (
+                float(manual_clearance.value()) if manual_clearance is not None else self._default_manual_xyz_clearance()
+            ),
+        }
+        for key, default_value in DEFAULT_CONTROLLER_BINDINGS.items():
+            edit = binding_edits.get(key)
+            defaults[key] = str(edit.text()).strip() if edit is not None else default_value
+        params.SetBool("enabled", defaults["enabled"])
+        params.SetFloat("xy_step", defaults["xy_step"])
+        params.SetFloat("z_step", defaults["z_step"])
+        params.SetFloat("feed_rate", defaults["feed_rate"])
+        params.SetFloat("deadzone", defaults["deadzone"])
+        params.SetFloat("manual_clearance", defaults["manual_clearance"])
+        for key in DEFAULT_CONTROLLER_BINDINGS:
+            params.SetString(key, defaults[key])
+        self._controller_defaults = defaults
+
+    def _default_manual_xyz_clearance(self):
+        try:
+            profile, _profile_path = grbl_load_machine_profile(None)
+        except Exception:
+            profile = {}
+        probe = dict((profile or {}).get("probe") or {})
+        try:
+            block_height = float(probe.get("block_height", 15.0))
+        except (TypeError, ValueError):
+            block_height = 15.0
+        return max(0.0, block_height * 0.10)
 
     def _load_cam_user_presets(self, params=None):
         if App is None:
@@ -2515,6 +2988,64 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._console.appendPlainText(text)
         self._last_console_line = text
 
+    def _record_mcp_action_event(self, event, action_type, message="", errors=None):
+        errors = list(errors or [])
+        label = {
+            "start": "running",
+            "success": "ok",
+            "error": "error",
+        }.get(str(event), str(event))
+        line = f"MCP {label}: {action_type}"
+        if message:
+            line += f" - {message}"
+        if errors:
+            line += f" - {'; '.join(str(error) for error in errors)}"
+        status = getattr(self, "_mcp_status", None)
+        if status is not None:
+            status.setText(line)
+        log = getattr(self, "_mcp_log", None)
+        if log is not None:
+            log.appendPlainText(line)
+        self._append_console(line, force=True)
+        if str(action_type).startswith("machine_"):
+            self._sync_shared_sender_ui(action_type=action_type, event=event)
+
+    def _sync_shared_sender_ui(self, *, action_type="", event=""):
+        connected = self._sender.is_connected()
+        if connected:
+            port = self._sender_port_label()
+            if port:
+                self._connection_status.setText(f"Connection: connected ({port})")
+            else:
+                self._connection_status.setText("Connection: connected")
+            self._connect_btn.setText("Disconnect")
+            self._port.setEnabled(False)
+            self._sender_was_connected = True
+            if getattr(self, "_poll_timer", None) is not None:
+                try:
+                    active = self._poll_timer.isActive()
+                except Exception:
+                    active = False
+                if not active:
+                    self._poll_timer.start()
+            try:
+                self._drain_sender()
+            except Exception:
+                pass
+        elif action_type == "machine_disconnect" and event == "success":
+            self._apply_disconnected_state("MCP disconnected.", unexpected=False)
+            return
+        self._update_job_controls()
+        self._update_machine_controls()
+
+    def _sender_port_label(self):
+        serial_obj = getattr(self._sender, "_serial", None)
+        for attr in ("port", "portstr", "name"):
+            value = getattr(serial_obj, attr, None)
+            if value:
+                return str(value)
+        return ""
+
     def _handle_console_line(self, line):
         if self._parse_setting_line(line):
             if self._console_verbose.isChecked():
@@ -3371,8 +3902,364 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         step = self._jog_step.value()
         feed = self._jog_feed.value()
         value = step * direction
-        command = f"$J=G91 {axis}{value:.3f} F{feed:.0f}"
-        self._send_command(command)
+        kwargs = {"x": 0.0, "y": 0.0, "z": 0.0}
+        kwargs[axis.lower()] = value
+        self._send_jog(feed=feed, source="Jog", **kwargs)
+
+    def _send_jog(self, x=0.0, y=0.0, z=0.0, feed=300.0, source="Jog", log=True):
+        allowed, reason = self._can_jog()
+        if not allowed:
+            if log:
+                self._append_console(f"{source} blocked: {reason}", force=True)
+            return False
+        x, y, z, limit_reason = self._limit_jog_delta(x, y, z)
+        if limit_reason:
+            if log:
+                self._append_console(f"{source} limited: {limit_reason}", force=True)
+            else:
+                status = getattr(self, "_controller_status", None)
+                if status is not None:
+                    prefix = "Manual XYZ" if getattr(self, "_controller_manual_xyz_active", False) else "Controller"
+                    status.setText(f"{prefix}: limited - {limit_reason}")
+            if abs(float(x)) < 0.0005 and abs(float(y)) < 0.0005 and abs(float(z)) < 0.0005:
+                return False
+        parts = []
+        if abs(float(x)) >= 0.0005:
+            parts.append(f"X{float(x):.3f}")
+        if abs(float(y)) >= 0.0005:
+            parts.append(f"Y{float(y):.3f}")
+        if abs(float(z)) >= 0.0005:
+            parts.append(f"Z{float(z):.3f}")
+        if not parts:
+            return False
+        command = "$J=G91 " + " ".join(parts) + f" F{float(feed):.0f}"
+        self._send_command(command, log=log)
+        return True
+
+    def _can_jog(self):
+        if not self._sender.is_connected():
+            return False, "not connected"
+        if self._sender.is_streaming():
+            return False, "sender busy"
+        if self._explore_active:
+            return False, "limit explore active"
+        state = self._machine_state()
+        if state in (None, "", "idle", "jog"):
+            return True, ""
+        return False, f"machine state is {state}"
+
+    def _limit_jog_delta(self, x=0.0, y=0.0, z=0.0):
+        requested = {"x": float(x), "y": float(y), "z": float(z)}
+        limits = self._machine_limits_for_jog()
+        if not limits:
+            self._request_status_for_jog()
+            return 0.0, 0.0, 0.0, "machine limits unknown"
+        position = self._machine_position_for_jog()
+        if not position:
+            self._request_status_for_jog()
+            return 0.0, 0.0, 0.0, "machine position unknown"
+
+        adjusted = dict(requested)
+        limited_axes = []
+        for axis in ("x", "y", "z"):
+            delta = requested[axis]
+            if abs(delta) < 0.0005:
+                continue
+            axis_limits = limits.get(axis)
+            current = position.get(axis)
+            if axis_limits is None or current is None:
+                adjusted[axis] = 0.0
+                limited_axes.append(axis.upper())
+                continue
+            min_limit, max_limit = axis_limits
+            target = current + delta
+            if target < min_limit:
+                adjusted[axis] = max(0.0, min_limit - current) if delta > 0 else min_limit - current
+                limited_axes.append(axis.upper())
+            elif target > max_limit:
+                adjusted[axis] = min(0.0, max_limit - current) if delta < 0 else max_limit - current
+                limited_axes.append(axis.upper())
+
+        reason = ""
+        if limited_axes:
+            reason = " ".join(sorted(set(limited_axes))) + " machine limit"
+        return adjusted["x"], adjusted["y"], adjusted["z"], reason
+
+    def _machine_limits_for_jog(self):
+        values = {}
+        for axis in ("X", "Y", "Z"):
+            value = getattr(self, "_limits", {}).get(axis)
+            if value is not None:
+                try:
+                    travel = abs(float(value))
+                except (TypeError, ValueError):
+                    travel = 0.0
+                if travel > 0.0:
+                    values[axis.lower()] = (-travel, 0.0)
+        if len(values) == 3:
+            return values
+        try:
+            profile, _profile_path = grbl_load_machine_profile(None)
+            settings = dict((profile or {}).get("settings") or {})
+            limits, _source = grbl_resolve_machine_limits(profile, settings)
+            return {
+                axis: (float(axis_limits[0]), float(axis_limits[1]))
+                for axis, axis_limits in limits.items()
+                if axis_limits and len(axis_limits) >= 2
+            }
+        except Exception:
+            return values if len(values) == 3 else None
+
+    def _machine_position_for_jog(self):
+        status = self._sender.get_status() or {}
+        position = grbl_parse_xyz_value(status.get("MPos"))
+        if position is None:
+            return None
+        return {axis: float(position[axis]) for axis in ("x", "y", "z")}
+
+    def _request_status_for_jog(self):
+        try:
+            self._request_status()
+        except Exception:
+            pass
+
+    def _can_prepare_manual_xyz(self):
+        if not self._sender.is_connected():
+            return False, "not connected"
+        if self._sender.is_streaming():
+            return False, "sender busy"
+        if self._explore_active:
+            return False, "limit explore active"
+        state = self._machine_state()
+        if state in (None, "", "idle"):
+            return True, ""
+        return False, f"machine state is {state}"
+
+    def _on_prepare_manual_xyz(self):
+        allowed, reason = self._can_prepare_manual_xyz()
+        if not allowed:
+            self._append_console(f"Manual XYZ blocked: {reason}", force=True)
+            return
+        self._controller_manual_xyz_active = True
+        self._append_console(
+            "Manual XYZ ready: no automatic move sent. "
+            "Controller jog is guarded by homed machine limits.",
+            force=True,
+        )
+        if self._controller.is_connected():
+            self._controller_enable.setChecked(True)
+            self._controller_timer.start()
+        else:
+            self._append_console("Manual XYZ ready, but no controller is connected.", force=True)
+        self._request_status()
+        self._update_machine_controls()
+
+    def _on_exit_manual_xyz(self):
+        self._controller_manual_xyz_active = False
+        if self._controller_enable.isChecked():
+            self._controller_enable.setChecked(False)
+        else:
+            self._controller_stop()
+            self._update_machine_controls()
+        self._append_console("Manual XYZ mode stopped.", force=True)
+
+    def _send_checked_command(self, command, timeout=5.0):
+        try:
+            if hasattr(self._sender, "send_and_collect"):
+                self._append_console(f"> {command}")
+                lines = self._sender.send_and_collect(command, timeout=timeout)
+                error = next(
+                    (
+                        str(line).strip()
+                        for line in lines
+                        if str(line).strip().lower().startswith(("error", "alarm"))
+                    ),
+                    "",
+                )
+                if error:
+                    self._append_console(f"Manual XYZ failed: {error}", force=True)
+                    return False
+            else:
+                self._send_command(command)
+        except Exception as exc:
+            self._append_console(f"Manual XYZ failed while sending {command}: {exc}", force=True)
+            _status_message(f"RouterKing Manual XYZ failed ({exc})\n", error=True)
+            return False
+        return True
+
+    def _on_controller_connect(self):
+        if self._controller.is_connected():
+            self._controller_stop()
+            name = self._controller.name()
+            self._controller.disconnect()
+            self._controller_manual_xyz_active = False
+            self._controller_status.setText("Controller: disconnected")
+            self._controller_connect_btn.setText("Connect Controller")
+            _controller_log(f"disconnected: {name or 'controller'}")
+            self._update_machine_controls()
+            return
+        if not self._controller.is_available():
+            self._controller_status.setText("Controller: pygame missing")
+            self._append_console(
+                "Controller unavailable: install pygame into FreeCAD's Python environment.",
+                force=True,
+            )
+            _controller_log(f"unavailable: {self._controller.error or 'pygame missing'}")
+            return
+        if not self._controller.connect():
+            self._controller_status.setText(f"Controller: {self._controller.error or 'not found'}")
+            _controller_log(f"connect failed: {self._controller.error or 'not found'}")
+            return
+        self._controller_status.setText(f"Controller: {self._controller.name()}")
+        self._controller_connect_btn.setText("Disconnect Controller")
+        _controller_log(f"connected: {self._controller.name()}")
+        if self._controller_enable.isChecked():
+            self._controller_timer.start()
+        self._update_machine_controls()
+
+    def _on_controller_test(self):
+        if self._controller_enable.isChecked():
+            self._controller_enable.setChecked(False)
+        else:
+            self._controller_stop()
+        existing = getattr(self, "_controller_test_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        gamepad = self._controller if self._controller.is_connected() else PygameGamepad()
+        dialog = ControllerTestDialog(gamepad, self)
+        self._controller_test_dialog = dialog
+        _controller_log("test dialog opened")
+        try:
+            dialog.finished.connect(lambda _result, dlg=dialog: self._on_controller_test_closed(dlg))
+        except Exception:
+            pass
+        dialog.show()
+
+    def _on_controller_test_closed(self, dialog):
+        if getattr(self, "_controller_test_dialog", None) is dialog:
+            self._controller_test_dialog = None
+        if self._controller.is_connected():
+            self._controller_status.setText(f"Controller: {self._controller.name()}")
+            self._controller_connect_btn.setText("Disconnect Controller")
+        self._update_machine_controls()
+
+    def _on_learn_controller_binding(self, key, label):
+        if self._controller_enable.isChecked():
+            self._controller_enable.setChecked(False)
+        else:
+            self._controller_stop()
+        existing = getattr(self, "_controller_binding_capture_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        gamepad = self._controller if self._controller.is_connected() else PygameGamepad()
+        dialog = ControllerBindingCaptureDialog(
+            gamepad,
+            label,
+            lambda token, k=key: self._append_controller_binding_token(k, token),
+            self,
+        )
+        self._controller_binding_capture_dialog = dialog
+        try:
+            dialog.finished.connect(lambda _result, dlg=dialog: self._on_controller_binding_capture_closed(dlg))
+        except Exception:
+            pass
+        dialog.show()
+
+    def _on_controller_binding_capture_closed(self, dialog):
+        if getattr(self, "_controller_binding_capture_dialog", None) is dialog:
+            self._controller_binding_capture_dialog = None
+        if self._controller.is_connected():
+            self._controller_status.setText(f"Controller: {self._controller.name()}")
+            self._controller_connect_btn.setText("Disconnect Controller")
+        self._update_machine_controls()
+
+    def _append_controller_binding_token(self, key, token):
+        edit = getattr(self, "_controller_binding_edits", {}).get(key)
+        if edit is None:
+            return
+        existing = [part.strip() for part in edit.text().split(",") if part.strip()]
+        if token not in existing:
+            existing.append(token)
+        edit.setText(", ".join(existing))
+        self._save_controller_defaults()
+
+    def _on_controller_enabled_changed(self, _checked):
+        self._save_controller_defaults()
+        if self._controller_enable.isChecked() and self._controller.is_connected():
+            self._controller_timer.start()
+        else:
+            self._controller_manual_xyz_active = False
+            self._controller_stop()
+        self._update_machine_controls()
+
+    def _controller_tick(self):
+        if not self._controller_enable.isChecked() or not self._controller.is_connected():
+            self._controller_stop()
+            return
+        state = self._controller.poll_mapped(self._controller_binding_strings())
+        if state is None:
+            self._controller_stop()
+            self._controller_status.setText(f"Controller: {self._controller.error or 'disconnected'}")
+            self._controller_connect_btn.setText("Connect Controller")
+            self._update_machine_controls()
+            return
+        if not state.deadman:
+            if self._controller_was_active:
+                self._controller_cancel_jog()
+            self._controller_was_active = False
+            prefix = "Manual XYZ" if self._controller_manual_xyz_active else "Controller"
+            self._controller_status.setText(f"{prefix}: {state.name}")
+            return
+        x, y, z = make_jog_vector(
+            state,
+            deadzone=self._controller_deadzone.value(),
+            xy_step=self._controller_xy_step.value(),
+            z_step=self._controller_z_step.value(),
+        )
+        if x == 0.0 and y == 0.0 and z == 0.0:
+            if self._controller_was_active:
+                self._controller_cancel_jog()
+            self._controller_was_active = False
+            return
+        now = time.time()
+        if now - self._controller_last_jog_at < 0.12:
+            return
+        if self._send_jog(x=x, y=y, z=z, feed=self._controller_feed.value(), source="Controller", log=False):
+            self._controller_last_jog_at = now
+            self._controller_was_active = True
+            prefix = "Manual XYZ" if self._controller_manual_xyz_active else "Controller"
+            self._controller_status.setText(f"{prefix}: {state.name} | X{x:+.3f} Y{y:+.3f} Z{z:+.3f}")
+        elif self._controller_was_active:
+            self._controller_cancel_jog()
+            self._controller_was_active = False
+
+    def _controller_binding_strings(self):
+        edits = getattr(self, "_controller_binding_edits", {})
+        bindings = {}
+        for key, default_value in DEFAULT_CONTROLLER_BINDINGS.items():
+            edit = edits.get(key)
+            bindings[key] = str(edit.text()).strip() if edit is not None else str(default_value)
+        return bindings
+
+    def _controller_stop(self):
+        if getattr(self, "_controller_timer", None) is not None:
+            self._controller_timer.stop()
+        if getattr(self, "_controller_was_active", False):
+            self._controller_cancel_jog()
+        self._controller_was_active = False
+
+    def _controller_cancel_jog(self):
+        try:
+            if hasattr(self._sender, "cancel_jog"):
+                self._sender.cancel_jog()
+            else:
+                self._sender.send_realtime_command(b"\x85")
+        except Exception:
+            pass
 
     def _on_send_command(self):
         command = self._command_line.text().strip()
@@ -3494,6 +4381,29 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         explore_action_enabled = connected and not streaming and not self._explore_active
         self._explore_z_btn.setEnabled(explore_action_enabled)
         self._z_speed_test_btn.setEnabled(explore_action_enabled)
+        controller_enable = getattr(self, "_controller_enable", None)
+        if controller_enable is not None:
+            controller_enable.setEnabled(
+                connected
+                and not streaming
+                and not self._explore_active
+                and getattr(self, "_controller", None) is not None
+                and self._controller.is_connected()
+                and not alarm_active
+            )
+        manual_prepare = getattr(self, "_controller_manual_prepare_btn", None)
+        if manual_prepare is not None:
+            state = self._machine_state()
+            manual_prepare.setEnabled(
+                connected
+                and not streaming
+                and not self._explore_active
+                and not alarm_active
+                and state in (None, "", "idle")
+            )
+        manual_exit = getattr(self, "_controller_manual_exit_btn", None)
+        if manual_exit is not None:
+            manual_exit.setEnabled(bool(getattr(self, "_controller_manual_xyz_active", False)))
         if self._explore_active:
             self._explore_limits_btn.setText("Stop Explore")
             self._read_limits_btn.setEnabled(False)
@@ -3508,6 +4418,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _apply_disconnected_state(self, message=None, unexpected=False):
         self._poll_timer.stop()
+        self._controller_stop()
+        self._controller_manual_xyz_active = False
         self._status_tick = 0
         self._sender_was_connected = False
         self._reset_explore_state()

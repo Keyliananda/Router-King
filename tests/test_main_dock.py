@@ -17,12 +17,58 @@ class _DummyWidget:
         self.enabled = enabled
 
 
+class _DummyLog:
+    def __init__(self):
+        self.lines = []
+
+    def appendPlainText(self, text):
+        self.lines.append(text)
+
+
+class _DummyCheckBox(_DummyWidget):
+    def __init__(self, checked=False):
+        super().__init__()
+        self._checked = checked
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, checked):
+        self._checked = bool(checked)
+
+
+class _DummySpin:
+    def __init__(self, value):
+        self._value = value
+
+    def value(self):
+        return self._value
+
+
+class _DummyLineEdit:
+    def __init__(self, text=""):
+        self._text = text
+
+    def text(self):
+        return self._text
+
+    def setText(self, text):
+        self._text = str(text)
+
+
 class _DummyTimer:
     def __init__(self):
         self.stopped = False
+        self.started = False
 
     def stop(self):
         self.stopped = True
+
+    def start(self):
+        self.started = True
+
+    def isActive(self):
+        return self.started and not self.stopped
 
 
 class _FakeDisconnectedSender:
@@ -59,6 +105,33 @@ class _FakeDisconnectedSender:
         return False
 
 
+class _FakeConnectedSender:
+    def __init__(self, status=None, streaming=False):
+        self.commands = []
+        self.cancelled = False
+        self._status = status if status is not None else {"state": "Idle"}
+        self._streaming = streaming
+
+    def send_line(self, command):
+        self.commands.append(command)
+
+    def send_and_collect(self, command, timeout=5.0):
+        self.commands.append(command)
+        return ["ok"]
+
+    def cancel_jog(self):
+        self.cancelled = True
+
+    def is_connected(self):
+        return True
+
+    def is_streaming(self):
+        return self._streaming
+
+    def get_status(self):
+        return self._status
+
+
 def _load_main_dock_module():
     sys.modules.pop("RouterKing.ui.main_dock", None)
 
@@ -70,6 +143,7 @@ def _load_main_dock_module():
     )
     qtwidgets = types.SimpleNamespace(
         QWidget=type("QWidget", (), {}),
+        QDialog=type("QDialog", (), {}),
         QDockWidget=type("QDockWidget", (), {}),
         QApplication=type(
             "QApplication",
@@ -257,6 +331,121 @@ class TestMainDock(unittest.TestCase):
             "RouterKing: disconnected unexpectedly ([serial error] serial lost)\n",
             error=True,
         )
+
+    def test_send_jog_builds_guarded_grbl_jog_command(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-150.000,-190.000,-25.000"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 300.0, "Y": 380.0, "Z": 50.0}
+        widget._append_console = mock.Mock()
+        widget._send_jog(x=0.5, y=-0.25, z=0.0, feed=600, source="test")
+
+        self.assertEqual(sender.commands, ["$J=G91 X0.500 Y-0.250 F600"])
+
+    def test_send_jog_blocks_machine_limit_overrun(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-0.000,-190.000,-25.000"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 300.0, "Y": 380.0, "Z": 50.0}
+        widget._append_console = mock.Mock()
+
+        result = widget._send_jog(x=0.5, feed=600, source="test")
+
+        self.assertFalse(result)
+        self.assertEqual(sender.commands, [])
+        widget._append_console.assert_called_once()
+
+    def test_send_jog_blocks_when_sender_streaming(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(streaming=True)
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._append_console = mock.Mock()
+        result = widget._send_jog(x=0.5, feed=600, source="test")
+
+        self.assertFalse(result)
+        self.assertEqual(sender.commands, [])
+        widget._append_console.assert_called_once()
+
+    def test_prepare_manual_xyz_enables_controller_without_motion(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._controller_manual_xyz_active = False
+        widget._controller_enable = _DummyCheckBox(False)
+        widget._controller_timer = _DummyTimer()
+        widget._controller = types.SimpleNamespace(is_connected=lambda: True)
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        widget._update_machine_controls = mock.Mock()
+
+        widget._on_prepare_manual_xyz()
+
+        self.assertEqual(sender.commands, [])
+        self.assertTrue(widget._controller_manual_xyz_active)
+        self.assertTrue(widget._controller_enable.isChecked())
+        self.assertTrue(widget._controller_timer.started)
+        widget._request_status.assert_called_once_with()
+
+    def test_prepare_manual_xyz_blocks_when_machine_not_idle(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Run"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._append_console = mock.Mock()
+
+        widget._on_prepare_manual_xyz()
+
+        self.assertEqual(sender.commands, [])
+        widget._append_console.assert_called_once()
+
+    def test_mcp_machine_event_updates_visible_shared_sender_state(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender()
+        sender._serial = types.SimpleNamespace(port="/dev/cu.test")
+        widget = self._make_widget(main_dock, sender=sender)
+        widget._explore_active = False
+        widget._poll_timer = _DummyTimer()
+        widget._mcp_status = _DummyWidget()
+        widget._mcp_log = _DummyLog()
+        widget._console_verbose = _DummyCheckBox(False)
+        widget._console = _DummyLog()
+        widget._last_console_line = None
+        widget._drain_sender = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+        widget._update_machine_controls = mock.Mock()
+
+        widget._record_mcp_action_event("success", "machine_request_status", message="State: Idle")
+
+        self.assertEqual(widget._mcp_status.text, "MCP ok: machine_request_status - State: Idle")
+        self.assertEqual(widget._mcp_log.lines[-1], "MCP ok: machine_request_status - State: Idle")
+        self.assertEqual(widget._connection_status.text, "Connection: connected (/dev/cu.test)")
+        self.assertEqual(widget._connect_btn.text, "Disconnect")
+        self.assertFalse(widget._port.enabled)
+        self.assertTrue(widget._poll_timer.started)
+        widget._drain_sender.assert_called_once_with()
+
+    def test_append_controller_binding_token_deduplicates_and_saves(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        edit = _DummyLineEdit("Right X, DPad Right")
+        widget._controller_binding_edits = {"x_axes": edit}
+        widget._save_controller_defaults = mock.Mock()
+
+        widget._append_controller_binding_token("x_axes", "Right X")
+        widget._append_controller_binding_token("x_axes", "DPad Left")
+
+        self.assertEqual(edit.text(), "Right X, DPad Right, DPad Left")
+        self.assertEqual(widget._save_controller_defaults.call_count, 2)
 
 
 if __name__ == "__main__":

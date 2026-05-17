@@ -79,6 +79,10 @@ _FREECAD_ACTIONS = frozenset({
 })
 
 
+def _runs_on_main_thread(action_type: str) -> bool:
+    return action_type in _FREECAD_ACTIONS or str(action_type).startswith("machine_")
+
+
 _ACTION_HELP: Dict[str, str] = {
     "create_part_box": "Create Part::Box (length, width, height, name?)",
     "create_part_cylinder": "Create Part::Cylinder (radius, height, name?)",
@@ -150,7 +154,7 @@ def execute_actions(actions: List[Dict]) -> Tuple[List[str], List[str]]:
             errors.append(f"Unsupported action: {action_type}")
             continue
         try:
-            if action_type in _FREECAD_ACTIONS:
+            if _runs_on_main_thread(action_type):
                 raw_result = run_on_main_thread(lambda h=handler, a=action, p=params: h(a, p))
             else:
                 raw_result = handler(action, params)
@@ -182,8 +186,9 @@ def execute_actions_for_bridge(actions: List[Dict]) -> Dict[str, Any]:
         if handler is None:
             errors.append(f"Unsupported action: {action_type}")
             continue
+        _notify_mcp_action_event("start", action_type)
         try:
-            if action_type in _FREECAD_ACTIONS:
+            if _runs_on_main_thread(action_type):
                 raw_result = run_on_main_thread(lambda h=handler, a=action, p=params: h(a, p))
             else:
                 raw_result = handler(action, params)
@@ -194,9 +199,43 @@ def execute_actions_for_bridge(actions: List[Dict]) -> Dict[str, Any]:
                 errors.extend(action_errors)
             if action_data is not None:
                 data = action_data
+            _notify_mcp_action_event(
+                "error" if action_errors else "success",
+                action_type,
+                message=message,
+                errors=action_errors,
+            )
         except Exception as exc:
-            errors.append(f"{action_type} failed: {exc}")
+            error = f"{action_type} failed: {exc}"
+            errors.append(error)
+            _notify_mcp_action_event("error", action_type, errors=[error])
     return {"messages": messages, "errors": errors, "data": data}
+
+
+def _notify_mcp_action_event(event: str, action_type: str, *, message: str = "", errors: List[str] | None = None) -> None:
+    try:
+        from ..ui import main_dock
+    except Exception:
+        try:
+            from ui import main_dock
+        except Exception:
+            return
+    dock = getattr(main_dock, "_dock", None)
+    if dock is None:
+        return
+    try:
+        widget = dock.widget()
+    except Exception:
+        widget = None
+    if widget is None:
+        return
+    handler = getattr(widget, "_record_mcp_action_event", None)
+    if handler is None:
+        return
+    try:
+        handler(event, action_type, message=message, errors=errors or [])
+    except Exception:
+        pass
 
 
 def _coerce_action_handler_result(result: Any) -> tuple[str, List[str], Any]:
