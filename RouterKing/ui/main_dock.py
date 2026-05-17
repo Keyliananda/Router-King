@@ -124,7 +124,8 @@ _CONTROLLER_BINDING_FIELDS = (
     ("y_pos_buttons", "Y+ buttons"),
     ("z_neg_buttons", "Z- buttons"),
     ("z_pos_buttons", "Z+ buttons"),
-    ("deadman_buttons", "Deadman"),
+    ("slow_buttons", "Slow speed"),
+    ("medium_buttons", "Medium speed"),
 )
 
 
@@ -179,7 +180,7 @@ class ControllerTestDialog(QtWidgets.QDialog):
         self._status = QtWidgets.QLabel("Controller: checking...")
         layout.addWidget(self._status)
 
-        mapping = QtWidgets.QLabel("Jog mapping: right stick X/Y, L2 Z-, R2 Z+, L1/R1 deadman.")
+        mapping = QtWidgets.QLabel("Jog mapping: right stick X/Y, L2 Z-, R2 Z+. L1 slow, R1 medium, no shoulder fast.")
         layout.addWidget(mapping)
 
         axes_group = QtWidgets.QGroupBox("Axes")
@@ -688,6 +689,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_defaults = {}
         self._controller_last_jog_at = 0.0
         self._controller_was_active = False
+        self._controller_guard_mpos = None
+        self._controller_guard_mpos_at = 0.0
         self._controller_manual_xyz_active = False
         self._controller_test_dialog = None
         self._controller_binding_capture_dialog = None
@@ -903,7 +906,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         manual_row.addWidget(self._controller_manual_exit_btn)
         controller_layout.addLayout(manual_row)
 
-        controller_note = QtWidgets.QLabel("Default: right stick + DPad X/Y, L2 Z-, R2 Z+. Hold L1 or R1 to move.")
+        controller_note = QtWidgets.QLabel("Default: right stick + DPad X/Y, L2 Z-, R2 Z+. L1 slow, R1 medium, no shoulder fast.")
         controller_layout.addWidget(controller_note)
         self._controller_enable.setChecked(bool(self._controller_defaults.get("enabled", False)))
         _make_collapsible(controller_group)
@@ -2968,6 +2971,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         status = self._sender.get_status()
         if status:
+            self._update_controller_guard_position(status)
             state = status.get("state", "?")
             pos = status.get("WPos") or status.get("MPos")
             if pos:
@@ -3934,6 +3938,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return False
         command = "$J=G91 " + " ".join(parts) + f" F{float(feed):.0f}"
         self._send_command(command, log=log)
+        self._advance_controller_guard_position(x=x, y=y, z=z)
         return True
 
     def _can_jog(self):
@@ -4011,11 +4016,34 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return values if len(values) == 3 else None
 
     def _machine_position_for_jog(self):
+        guard_position = getattr(self, "_controller_guard_mpos", None)
+        if guard_position:
+            return dict(guard_position)
         status = self._sender.get_status() or {}
         position = grbl_parse_xyz_value(status.get("MPos"))
         if position is None:
             return None
-        return {axis: float(position[axis]) for axis in ("x", "y", "z")}
+        position = {axis: float(position[axis]) for axis in ("x", "y", "z")}
+        self._controller_guard_mpos = dict(position)
+        self._controller_guard_mpos_at = time.time()
+        return position
+
+    def _update_controller_guard_position(self, status):
+        position = grbl_parse_xyz_value((status or {}).get("MPos"))
+        if position is None:
+            return
+        self._controller_guard_mpos = {axis: float(position[axis]) for axis in ("x", "y", "z")}
+        self._controller_guard_mpos_at = time.time()
+
+    def _advance_controller_guard_position(self, x=0.0, y=0.0, z=0.0):
+        position = getattr(self, "_controller_guard_mpos", None)
+        if not position:
+            return
+        updated = dict(position)
+        for axis, delta in (("x", x), ("y", y), ("z", z)):
+            updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
+        self._controller_guard_mpos = updated
+        self._controller_guard_mpos_at = time.time()
 
     def _request_status_for_jog(self):
         try:
@@ -4039,6 +4067,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         allowed, reason = self._can_prepare_manual_xyz()
         if not allowed:
             self._append_console(f"Manual XYZ blocked: {reason}", force=True)
+            _controller_log(f"manual xyz blocked: {reason}")
             return
         self._controller_manual_xyz_active = True
         self._append_console(
@@ -4046,6 +4075,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             "Controller jog is guarded by homed machine limits.",
             force=True,
         )
+        status = self._sender.get_status() or {}
+        self._update_controller_guard_position(status)
+        _controller_log(f"manual xyz prepared: no automatic move; mpos={status.get('MPos', 'unknown')}")
         if self._controller.is_connected():
             self._controller_enable.setChecked(True)
             self._controller_timer.start()
@@ -4207,13 +4239,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._controller_connect_btn.setText("Connect Controller")
             self._update_machine_controls()
             return
-        if not state.deadman:
-            if self._controller_was_active:
-                self._controller_cancel_jog()
-            self._controller_was_active = False
-            prefix = "Manual XYZ" if self._controller_manual_xyz_active else "Controller"
-            self._controller_status.setText(f"{prefix}: {state.name}")
-            return
         x, y, z = make_jog_vector(
             state,
             deadzone=self._controller_deadzone.value(),
@@ -4228,11 +4253,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         now = time.time()
         if now - self._controller_last_jog_at < 0.12:
             return
-        if self._send_jog(x=x, y=y, z=z, feed=self._controller_feed.value(), source="Controller", log=False):
+        speed_multiplier = max(1.0, float(getattr(state, "speed_multiplier", 1.0) or 1.0))
+        feed = min(5000.0, float(self._controller_feed.value()) * speed_multiplier)
+        if self._send_jog(x=x, y=y, z=z, feed=feed, source="Controller", log=False):
             self._controller_last_jog_at = now
             self._controller_was_active = True
             prefix = "Manual XYZ" if self._controller_manual_xyz_active else "Controller"
-            self._controller_status.setText(f"{prefix}: {state.name} | X{x:+.3f} Y{y:+.3f} Z{z:+.3f}")
+            speed_label = getattr(state, "speed_label", "slow")
+            self._controller_status.setText(
+                f"{prefix}: {state.name} [{speed_label}] | X{x:+.3f} Y{y:+.3f} Z{z:+.3f}"
+            )
         elif self._controller_was_active:
             self._controller_cancel_jog()
             self._controller_was_active = False

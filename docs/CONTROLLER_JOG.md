@@ -9,7 +9,6 @@ following are true:
 - Limit exploration is not running.
 - The machine state is Idle or Jog.
 - Controller jogging is enabled in the UI.
-- The controller deadman button is held.
 
 ## macOS + DualShock 4
 
@@ -41,10 +40,12 @@ that pygame is missing.
 - Right stick and DPad: X/Y
 - L2: Z-
 - R2: Z+
-- L1 or R1: deadman
+- L1: slow speed
+- R1: medium speed
+- no shoulder button: fast speed
 
 RouterKing sends short `$J=G91 ...` jog segments and throttles output to avoid
-flooding GRBL. Releasing the deadman sends GRBL jog cancel.
+flooding GRBL. Machine-limit checks still run before every jog segment.
 
 The `Controller Bindings` section can assign multiple controls to the same
 action. Entries are comma-separated names from `Test Controller`, for example

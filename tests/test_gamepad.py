@@ -67,6 +67,8 @@ class TestGamepadHelpers(unittest.TestCase):
         self.assertAlmostEqual(state.y, 0.5)
         self.assertAlmostEqual(state.z, 0.75)
         self.assertTrue(state.deadman)
+        self.assertEqual(state.speed_label, "slow")
+        self.assertEqual(state.speed_multiplier, 1.0)
 
     def test_snapshot_reports_controller_axes_and_buttons(self):
         axes = {
@@ -132,6 +134,45 @@ class TestGamepadHelpers(unittest.TestCase):
         self.assertEqual(state.y, 1.0)
         self.assertAlmostEqual(state.z, 0.4)
         self.assertTrue(state.deadman)
+        self.assertEqual(state.speed_label, "slow")
+        self.assertEqual(state.speed_multiplier, 1.0)
+
+    def test_state_from_snapshot_uses_speed_buttons_not_deadman_gate(self):
+        fast = state_from_snapshot(
+            GamepadSnapshot(
+                name="Pad",
+                axes=(GamepadAxis("Right X", 1.0),),
+                buttons=(GamepadButton("L1", False), GamepadButton("R1", False)),
+            )
+        )
+        medium = state_from_snapshot(
+            GamepadSnapshot(
+                name="Pad",
+                axes=(GamepadAxis("Right X", 1.0),),
+                buttons=(GamepadButton("L1", False), GamepadButton("R1", True)),
+            )
+        )
+        slow = state_from_snapshot(
+            GamepadSnapshot(
+                name="Pad",
+                axes=(GamepadAxis("Right X", 1.0),),
+                buttons=(GamepadButton("L1", True), GamepadButton("R1", True)),
+            )
+        )
+
+        self.assertTrue(fast.deadman)
+        self.assertEqual((fast.speed_label, fast.speed_multiplier), ("fast", 3.0))
+        self.assertEqual((medium.speed_label, medium.speed_multiplier), ("medium", 2.0))
+        self.assertEqual((slow.speed_label, slow.speed_multiplier), ("slow", 1.0))
+
+    def test_make_jog_vector_applies_speed_multiplier(self):
+        state = GamepadState(name="Pad", x=1.0, y=0.0, z=1.0, speed_multiplier=3.0)
+
+        x, y, z = make_jog_vector(state, deadzone=0.2, xy_step=0.5, z_step=0.1)
+
+        self.assertAlmostEqual(x, 1.5)
+        self.assertEqual(y, 0.0)
+        self.assertAlmostEqual(z, 0.3)
 
     def test_state_from_snapshot_allows_custom_button_rebinding(self):
         snapshot = GamepadSnapshot(
@@ -150,12 +191,13 @@ class TestGamepadHelpers(unittest.TestCase):
                 "y_axes": "",
                 "z_axes": "",
                 "x_pos_buttons": "Cross / A, DPad Right",
-                "deadman_buttons": "Square / X",
+                "slow_buttons": "Square / X",
             },
         )
 
         self.assertEqual(state.x, 1.0)
         self.assertTrue(state.deadman)
+        self.assertEqual(state.speed_label, "slow")
 
     def test_active_binding_tokens_prefers_buttons_and_thresholded_axes(self):
         snapshot = GamepadSnapshot(

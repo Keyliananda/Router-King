@@ -16,6 +16,8 @@ class GamepadState:
     y: float = 0.0
     z: float = 0.0
     deadman: bool = False
+    speed_multiplier: float = 1.0
+    speed_label: str = "slow"
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,8 @@ DEFAULT_CONTROLLER_BINDINGS = {
     "y_pos_buttons": "DPad Up",
     "z_neg_buttons": "",
     "z_pos_buttons": "",
-    "deadman_buttons": "L1, R1",
+    "slow_buttons": "L1",
+    "medium_buttons": "R1",
 }
 
 
@@ -216,14 +219,18 @@ class PygameGamepad:
             controller,
             pygame.CONTROLLER_AXIS_TRIGGERLEFT,
         )
-        deadman = any(
-            _controller_button(controller, index)
-            for index in (
-                pygame.CONTROLLER_BUTTON_LEFTSHOULDER,
-                pygame.CONTROLLER_BUTTON_RIGHTSHOULDER,
-            )
+        slow = _controller_button(controller, pygame.CONTROLLER_BUTTON_LEFTSHOULDER)
+        medium = _controller_button(controller, pygame.CONTROLLER_BUTTON_RIGHTSHOULDER)
+        multiplier, label = _speed_mode(slow=slow, medium=medium)
+        return GamepadState(
+            name=self._name,
+            x=x,
+            y=y,
+            z=z,
+            deadman=True,
+            speed_multiplier=multiplier,
+            speed_label=label,
         )
-        return GamepadState(name=self._name, x=x, y=y, z=z, deadman=deadman)
 
     def _snapshot_controller(self, pygame) -> GamepadSnapshot:
         controller = self._controller
@@ -285,9 +292,10 @@ def make_jog_vector(
     xy_step: float,
     z_step: float,
 ) -> tuple[float, float, float]:
-    x = apply_deadzone(state.x, deadzone) * float(xy_step)
-    y = apply_deadzone(state.y, deadzone) * float(xy_step)
-    z = apply_deadzone(state.z, deadzone) * float(z_step)
+    multiplier = max(0.0, float(getattr(state, "speed_multiplier", 1.0) or 1.0))
+    x = apply_deadzone(state.x, deadzone) * float(xy_step) * multiplier
+    y = apply_deadzone(state.y, deadzone) * float(xy_step) * multiplier
+    z = apply_deadzone(state.z, deadzone) * float(z_step) * multiplier
     return (_round_zero(x), _round_zero(y), _round_zero(z))
 
 
@@ -301,14 +309,26 @@ def state_from_snapshot(snapshot: GamepadSnapshot, bindings: dict[str, str] | No
     y += _button_value(buttons, bindings.get("y_pos_buttons", ""))
     z = _binding_axis_value(axes, bindings.get("z_axes", "")) - _button_value(buttons, bindings.get("z_neg_buttons", ""))
     z += _button_value(buttons, bindings.get("z_pos_buttons", ""))
-    deadman = _button_value(buttons, bindings.get("deadman_buttons", "")) > 0.0
+    slow = _button_value(buttons, bindings.get("slow_buttons", bindings.get("deadman_buttons", ""))) > 0.0
+    medium = _button_value(buttons, bindings.get("medium_buttons", "")) > 0.0
+    speed_multiplier, speed_label = _speed_mode(slow=slow, medium=medium)
     return GamepadState(
         name=snapshot.name,
         x=_round_zero(max(-1.0, min(1.0, x))),
         y=_round_zero(max(-1.0, min(1.0, y))),
         z=_round_zero(max(-1.0, min(1.0, z))),
-        deadman=deadman,
+        deadman=True,
+        speed_multiplier=speed_multiplier,
+        speed_label=speed_label,
     )
+
+
+def _speed_mode(*, slow: bool, medium: bool) -> tuple[float, str]:
+    if slow:
+        return 1.0, "slow"
+    if medium:
+        return 2.0, "medium"
+    return 3.0, "fast"
 
 
 def _binding_axis_value(axes: dict[str, float], binding_text: str) -> float:
