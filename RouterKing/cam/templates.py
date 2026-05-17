@@ -25,6 +25,10 @@ class TemplateSpec:
     start_x: float = 0.0
     start_y: float = 0.0
     swap_xy: bool = False
+    pass_axis: str = "x"
+    path_direction: str = "forward"
+    final_contour: bool = False
+    contour_direction: str = "cw"
     cut_start_x: Optional[float] = None
     cut_start_y: Optional[float] = None
     source_document: Optional[str] = None
@@ -102,17 +106,21 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
     _validate_spec(spec)
 
     local_paths = _orient_paths(_raster_paths(spec), spec)
+    if _normalize_path_direction(spec.path_direction) == "reverse":
+        local_paths = list(reversed(local_paths))
     paths = _offset_paths(local_paths, spec.start_x, spec.start_y)
     if spec.cut_start_x is not None and spec.cut_start_y is not None:
         paths = _prefer_start_near(paths, spec.cut_start_x, spec.cut_start_y)
     depths = _depth_levels(spec.start_z, spec.depth, spec.step_down)
     first_x, first_y = paths[0]
+    contour_paths = _offset_paths(_orient_paths(_contour_path(spec), spec), spec.start_x, spec.start_y)
 
     lines = [
         _template_header("rectangle pocket", spec),
         f"; size: {_fmt(spec.width)} x {_fmt(spec.height)} x {_fmt(spec.depth)} mm",
         f"; tool: {_fmt(spec.tool_diameter)} mm",
-        f"; axes: {'swapped' if spec.swap_xy else 'normal'}",
+        f"; axes: {_axis_mapping_label(spec)}",
+        f"; raster: pass_axis={_normalize_pass_axis(spec.pass_axis)}, path={_normalize_path_direction(spec.path_direction)}, final_contour={_contour_label(spec)}",
         f"; start: X{_fmt(spec.start_x)} Y{_fmt(spec.start_y)}",
         "G21",
         "G90",
@@ -130,6 +138,8 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
         lines.append(f"G0 X{_fmt(first_x)} Y{_fmt(first_y)}")
         lines.append(f"G1 Z{_fmt(depth)} F{_fmt(spec.plunge_rate)}")
         _append_raster_moves(lines, paths, spec.feed_rate)
+        if spec.final_contour and depth == depths[-1]:
+            _append_contour_moves(lines, contour_paths, spec.feed_rate, spec.contour_direction)
         lines.append(f"G0 Z{_fmt(spec.safe_z)}")
 
     lines.append(f"G0 X{_fmt(spec.start_x)} Y{_fmt(spec.start_y)}")
@@ -212,6 +222,12 @@ def _validate_spec(spec: TemplateSpec) -> None:
 
     if _normalize_origin(spec.origin) not in {"center", "lower_left"}:
         raise ValueError("origin must be 'center' or 'lower_left'.")
+    if _normalize_pass_axis(spec.pass_axis) not in {"x", "y"}:
+        raise ValueError("pass_axis must be 'x' or 'y'.")
+    if _normalize_path_direction(spec.path_direction) not in {"forward", "reverse"}:
+        raise ValueError("path_direction must be 'forward' or 'reverse'.")
+    if _normalize_contour_direction(spec.contour_direction) not in {"cw", "ccw"}:
+        raise ValueError("contour_direction must be 'cw' or 'ccw'.")
 
     for name in ("start_x", "start_y"):
         value = getattr(spec, name)
@@ -244,8 +260,14 @@ def _depth_levels(start_z: float, depth: float, step_down: float) -> list[float]
 def _raster_paths(spec: TemplateSpec) -> list[Point2D]:
     radius = spec.tool_diameter / 2.0
     x_min, x_max, y_min, y_max = _bounds(spec, radius)
-    y_values = _axis_values(y_min, y_max, spec.step_over)
+    pass_axis = _normalize_pass_axis(spec.pass_axis)
+    if pass_axis == "y":
+        return _dedupe_points(_raster_y_passes(x_min, x_max, y_min, y_max, spec.step_over))
+    return _dedupe_points(_raster_x_passes(x_min, x_max, y_min, y_max, spec.step_over))
 
+
+def _raster_x_passes(x_min: float, x_max: float, y_min: float, y_max: float, step: float) -> list[Point2D]:
+    y_values = _axis_values(y_min, y_max, step)
     points = []
     for index, y_val in enumerate(y_values):
         if index % 2 == 0:
@@ -254,7 +276,28 @@ def _raster_paths(spec: TemplateSpec) -> list[Point2D]:
         else:
             points.append((x_max, y_val))
             points.append((x_min, y_val))
-    return _dedupe_points(points)
+    return points
+
+
+def _raster_y_passes(x_min: float, x_max: float, y_min: float, y_max: float, step: float) -> list[Point2D]:
+    x_values = _axis_values(x_min, x_max, step)
+    points = []
+    for index, x_val in enumerate(x_values):
+        if index % 2 == 0:
+            points.append((x_val, y_min))
+            points.append((x_val, y_max))
+        else:
+            points.append((x_val, y_max))
+            points.append((x_val, y_min))
+    return points
+
+
+def _contour_path(spec: TemplateSpec) -> list[Point2D]:
+    radius = spec.tool_diameter / 2.0
+    x_min, x_max, y_min, y_max = _bounds(spec, radius)
+    if _normalize_contour_direction(spec.contour_direction) == "ccw":
+        return [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max), (x_min, y_min)]
+    return [(x_min, y_min), (x_min, y_max), (x_max, y_max), (x_max, y_min), (x_min, y_min)]
 
 
 def _offset_paths(points: Sequence[Point2D], start_x: float, start_y: float) -> list[Point2D]:
@@ -351,6 +394,20 @@ def _append_raster_moves(lines: list[str], paths: Sequence[Point2D], feed_rate: 
         lines.append(f"G1 X{_fmt(x_val)} Y{_fmt(y_val)}{feed}")
 
 
+def _append_contour_moves(
+    lines: list[str],
+    paths: Sequence[Point2D],
+    feed_rate: float,
+    contour_direction: str,
+) -> None:
+    if not paths:
+        return
+    feed = f" F{_fmt(feed_rate)}"
+    lines.append(f"; final contour {_normalize_contour_direction(contour_direction)}")
+    for x_val, y_val in paths:
+        lines.append(f"G1 X{_fmt(x_val)} Y{_fmt(y_val)}{feed}")
+
+
 def _dedupe_points(points: Iterable[Point2D]) -> list[Point2D]:
     result = []
     for point in points:
@@ -369,6 +426,57 @@ def _normalize_origin(origin: str) -> str:
         "corner": "lower_left",
     }
     return aliases.get(value, value)
+
+
+def _normalize_pass_axis(pass_axis: str) -> str:
+    value = str(pass_axis or "").strip().lower()
+    aliases = {
+        "x-axis": "x",
+        "x_axis": "x",
+        "along_x": "x",
+        "long_x": "x",
+        "y-axis": "y",
+        "y_axis": "y",
+        "along_y": "y",
+        "long_y": "y",
+    }
+    return aliases.get(value, value)
+
+
+def _normalize_path_direction(path_direction: str) -> str:
+    value = str(path_direction or "").strip().lower()
+    aliases = {
+        "normal": "forward",
+        "forwards": "forward",
+        "reverse": "reverse",
+        "reversed": "reverse",
+        "backward": "reverse",
+        "backwards": "reverse",
+    }
+    return aliases.get(value, value)
+
+
+def _normalize_contour_direction(contour_direction: str) -> str:
+    value = str(contour_direction or "").strip().lower()
+    aliases = {
+        "clockwise": "cw",
+        "counterclockwise": "ccw",
+        "counter_clockwise": "ccw",
+        "counter-clockwise": "ccw",
+    }
+    return aliases.get(value, value)
+
+
+def _axis_mapping_label(spec: TemplateSpec) -> str:
+    if spec.swap_xy:
+        return "swapped (CAD X->machine Y, CAD Y->machine X)"
+    return "normal (CAD X->machine X, CAD Y->machine Y)"
+
+
+def _contour_label(spec: TemplateSpec) -> str:
+    if not spec.final_contour:
+        return "off"
+    return _normalize_contour_direction(spec.contour_direction)
 
 
 def _normalize_preset_name(name: str) -> str:

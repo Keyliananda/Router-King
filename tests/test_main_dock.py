@@ -715,6 +715,10 @@ class TestMainDock(unittest.TestCase):
             "start_y": _DummySpin(2.0),
             "origin": _DummyCombo("center"),
             "swap_xy": _DummyCheckBox(True),
+            "pass_axis": _DummyCombo("y"),
+            "path_direction": _DummyCombo("reverse"),
+            "final_contour": _DummyCheckBox(True),
+            "contour_direction": _DummyCombo("ccw"),
         }
         widget._selected_template_source = mock.Mock(
             return_value={"document": "tee-tablett", "object": "Body", "feature": "Pocket002"}
@@ -725,6 +729,10 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(spec.name, "CAD Pocket")
         self.assertEqual(spec.width, 230.0)
         self.assertTrue(spec.swap_xy)
+        self.assertEqual(spec.pass_axis, "y")
+        self.assertEqual(spec.path_direction, "reverse")
+        self.assertTrue(spec.final_contour)
+        self.assertEqual(spec.contour_direction, "ccw")
         self.assertEqual(spec.cut_start_x, 4.0)
         self.assertEqual(spec.cut_start_y, 5.0)
         self.assertEqual(spec.source_document, "tee-tablett")

@@ -189,6 +189,17 @@ def _make_collapsible(group, *, collapsed=False):
     return group
 
 
+def _property_float(value):
+    if value is None:
+        return None
+    if hasattr(value, "Value"):
+        value = value.Value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class ControllerTestDialog(QtWidgets.QDialog):
     """Live pygame controller inspector. It never sends GRBL commands."""
 
@@ -866,6 +877,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._template_group = None
         self._template_source_combo = None
         self._template_source_summary = None
+        self._template_cad_tool_summary = None
         self._template_snap_active = False
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
@@ -1228,7 +1240,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._import_dxf_btn = QtWidgets.QPushButton("Import DXF")
         self._template_btn = QtWidgets.QPushButton("Template")
         self._preview_btn = QtWidgets.QPushButton("Preview")
-        self._cam_generate_btn = QtWidgets.QPushButton("Generate CAM")
+        self._cam_generate_btn = QtWidgets.QPushButton("FreeCAD CAM")
+        self._cam_generate_btn.setToolTip("Open the FreeCAD CAM generator. Rectangle templates use Apply Template below.")
         file_row.addWidget(self._load_btn)
         file_row.addWidget(self._save_btn)
         file_row.addWidget(self._import_dxf_btn)
@@ -1349,15 +1362,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._template_source_combo.setMinimumWidth(240)
         self._template_source_summary = QtWidgets.QLabel("No CAD source selected")
         self._template_source_summary.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self._template_cad_tool_summary = QtWidgets.QLabel("CAD tool: unknown")
+        self._template_cad_tool_summary.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         refresh_source_btn = QtWidgets.QPushButton("Refresh CAD Sources")
         source_row.addWidget(self._template_source_combo, 1)
         source_row.addWidget(refresh_source_btn)
-        source_row.addWidget(self._template_source_summary, 2)
         layout.addLayout(source_row)
 
-        form = QtWidgets.QGridLayout()
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(4)
         default = self._default_rectangle_template_spec()
         controls = {
             "name": QtWidgets.QLineEdit(default.name or ""),
@@ -1375,27 +1386,65 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             "start_y": self._template_spin(default.start_y, -10000.0, 10000.0),
             "origin": QtWidgets.QComboBox(),
             "swap_xy": QtWidgets.QCheckBox("Swap X/Y machining direction"),
+            "pass_axis": QtWidgets.QComboBox(),
+            "path_direction": QtWidgets.QComboBox(),
+            "final_contour": QtWidgets.QCheckBox("Add final contour pass at full depth"),
+            "contour_direction": QtWidgets.QComboBox(),
         }
         controls["origin"].addItems(["center", "lower_left"])
         controls["origin"].setCurrentText(default.origin)
         controls["swap_xy"].setChecked(bool(default.swap_xy))
+        controls["pass_axis"].addItems(["x", "y"])
+        controls["pass_axis"].setCurrentText(default.pass_axis)
+        controls["pass_axis"].setToolTip("Raster pass direction: X means long cutting moves along X, stepping in Y.")
+        controls["path_direction"].addItems(["forward", "reverse"])
+        controls["path_direction"].setCurrentText(default.path_direction)
+        controls["final_contour"].setChecked(bool(default.final_contour))
+        controls["contour_direction"].addItems(["cw", "ccw"])
+        controls["contour_direction"].setCurrentText(default.contour_direction)
         self._template_controls = controls
 
-        rows = [
-            ("Name", "name", "Width (mm)", "width", "Length (mm)", "height"),
-            ("Depth (mm)", "depth", "Cutter diameter (mm)", "tool_diameter", "Step down (mm)", "step_down"),
-            ("Step over (mm)", "step_over", "Feed (mm/min)", "feed_rate", "Plunge (mm/min)", "plunge_rate"),
-            ("Safe Z (mm)", "safe_z", "Start Z (mm)", "start_z", "Origin", "origin"),
-            ("Start X (mm)", "start_x", "Start Y (mm)", "start_y", "", "swap_xy"),
-        ]
-        for row_index, row in enumerate(rows):
-            for col_index in range(0, len(row), 2):
-                label = row[col_index]
-                key = row[col_index + 1]
-                if label:
-                    form.addWidget(QtWidgets.QLabel(label), row_index, col_index)
-                form.addWidget(controls[key], row_index, col_index + 1)
-        layout.addLayout(form)
+        tabs = QtWidgets.QTabWidget()
+        geometry_tab = QtWidgets.QWidget()
+        geometry_form = QtWidgets.QFormLayout(geometry_tab)
+        geometry_form.addRow("Name", controls["name"])
+        geometry_form.addRow("Width (mm)", controls["width"])
+        geometry_form.addRow("Length (mm)", controls["height"])
+        geometry_form.addRow("Depth (mm)", controls["depth"])
+        geometry_form.addRow("Origin", controls["origin"])
+        geometry_form.addRow("Start X (mm)", controls["start_x"])
+        geometry_form.addRow("Start Y (mm)", controls["start_y"])
+        geometry_form.addRow("Start Z (mm)", controls["start_z"])
+        geometry_form.addRow("Safe Z (mm)", controls["safe_z"])
+        tabs.addTab(geometry_tab, "Geometry")
+
+        tool_tab = QtWidgets.QWidget()
+        tool_form = QtWidgets.QFormLayout(tool_tab)
+        tool_form.addRow("Template cutter diameter (mm)", controls["tool_diameter"])
+        tool_form.addRow("Step down (mm)", controls["step_down"])
+        tool_form.addRow("Step over (mm)", controls["step_over"])
+        tool_form.addRow("Feed (mm/min)", controls["feed_rate"])
+        tool_form.addRow("Plunge (mm/min)", controls["plunge_rate"])
+        tabs.addTab(tool_tab, "Tool & Feeds")
+
+        axes_tab = QtWidgets.QWidget()
+        axes_form = QtWidgets.QFormLayout(axes_tab)
+        axes_form.addRow(controls["swap_xy"])
+        axes_form.addRow("Raster pass axis", controls["pass_axis"])
+        axes_form.addRow("Path order", controls["path_direction"])
+        axes_form.addRow(controls["final_contour"])
+        axes_form.addRow("Contour direction", controls["contour_direction"])
+        tabs.addTab(axes_tab, "Axes & Path")
+
+        cad_tab = QtWidgets.QWidget()
+        cad_layout = QtWidgets.QVBoxLayout(cad_tab)
+        cad_layout.addWidget(QtWidgets.QLabel("Header source"))
+        cad_layout.addWidget(self._template_source_summary)
+        cad_layout.addWidget(QtWidgets.QLabel("CAD tool"))
+        cad_layout.addWidget(self._template_cad_tool_summary)
+        cad_layout.addStretch(1)
+        tabs.addTab(cad_tab, "CAD Link")
+        layout.addWidget(tabs)
 
         button_row = QtWidgets.QHBoxLayout()
         self._template_apply_btn = QtWidgets.QPushButton("Apply Template")
@@ -4705,6 +4754,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             start_x=controls["start_x"].value(),
             start_y=controls["start_y"].value(),
             swap_xy=controls["swap_xy"].isChecked(),
+            pass_axis=controls["pass_axis"].currentText(),
+            path_direction=controls["path_direction"].currentText(),
+            final_contour=controls["final_contour"].isChecked(),
+            contour_direction=controls["contour_direction"].currentText(),
             cut_start_x=cut_start_x,
             cut_start_y=cut_start_y,
             source_document=source.get("document"),
@@ -4734,6 +4787,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             controls[key].setValue(float(getattr(spec, key)))
         controls["origin"].setCurrentText(spec.origin)
         controls["swap_xy"].setChecked(bool(spec.swap_xy))
+        controls["pass_axis"].setCurrentText(spec.pass_axis)
+        controls["path_direction"].setCurrentText(spec.path_direction)
+        controls["final_contour"].setChecked(bool(spec.final_contour))
+        controls["contour_direction"].setCurrentText(spec.contour_direction)
         self._select_template_source(spec)
 
     def _on_reset_rectangle_template_controls(self):
@@ -4846,12 +4903,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         combo.blockSignals(False)
         self._select_template_source_data(current)
         self._update_template_source_summary()
+        self._update_template_cad_tool_summary()
 
     def _template_cad_sources(self):
         document = getattr(App, "ActiveDocument", None)
         if document is None:
             return []
-        document_name = getattr(document, "Name", "") or getattr(document, "Label", "") or "ActiveDocument"
+        document_name = getattr(document, "Label", "") or getattr(document, "Name", "") or "ActiveDocument"
         objects = list(getattr(document, "Objects", []) or [])
         sources = []
         seen = set()
@@ -4925,6 +4983,58 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         parts = [source.get("document"), source.get("object"), source.get("feature")]
         label.setText("G-code header: " + " / ".join(part for part in parts if part))
+
+    def _update_template_cad_tool_summary(self):
+        label = getattr(self, "_template_cad_tool_summary", None)
+        if label is None:
+            return
+        tool = self._active_cad_tool_values()
+        if not tool:
+            label.setText("CAD tool: none detected")
+            return
+        parts = [tool.get("label") or tool.get("name") or "tool"]
+        if tool.get("diameter") is not None:
+            parts.append(f"diameter {tool['diameter']:g} mm")
+        if tool.get("shank_diameter") is not None:
+            parts.append(f"shank {tool['shank_diameter']:g} mm")
+        if tool.get("horiz_feed") is not None:
+            parts.append(f"CAD feed {tool['horiz_feed']:g}")
+        if tool.get("vert_feed") is not None:
+            parts.append(f"CAD plunge {tool['vert_feed']:g}")
+        label.setText("CAD tool: " + ", ".join(parts))
+
+    def _active_cad_tool_values(self):
+        document = getattr(App, "ActiveDocument", None)
+        if document is None:
+            return {}
+        objects = list(getattr(document, "Objects", []) or [])
+        tool = {}
+        for obj in objects:
+            diameter = _property_float(getattr(obj, "Diameter", None))
+            if diameter is None:
+                continue
+            name = getattr(obj, "Name", "") or ""
+            label = getattr(obj, "Label", "") or name
+            tool = {
+                "name": name,
+                "label": label,
+                "diameter": diameter,
+                "shank_diameter": _property_float(getattr(obj, "ShankDiameter", None)),
+            }
+            break
+        for obj in objects:
+            name = getattr(obj, "Name", "") or ""
+            if "TC" not in name and "Tool" not in name:
+                continue
+            horiz = _property_float(getattr(obj, "HorizFeed", None))
+            vert = _property_float(getattr(obj, "VertFeed", None))
+            if horiz is not None:
+                tool["horiz_feed"] = horiz
+            if vert is not None:
+                tool["vert_feed"] = vert
+            if tool:
+                break
+        return tool
 
     def _template_spin(self, value, minimum, maximum, decimals=3):
         spin = QtWidgets.QDoubleSpinBox()

@@ -35,11 +35,12 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIsInstance(program, GcodeProgram)
         self.assertEqual(program.template, "rectangle_pocket")
         self.assertEqual(program.spec, spec)
-        self.assertEqual(program.lines[:9], [
+        self.assertEqual(program.lines[:10], [
             "; RouterKing rectangle pocket template",
             "; size: 40 x 40 x 5 mm",
             "; tool: 3 mm",
-            "; axes: normal",
+            "; axes: normal (CAD X->machine X, CAD Y->machine Y)",
+            "; raster: pass_axis=x, path=forward, final_contour=off",
             "; start: X0 Y0",
             "G21",
             "G90",
@@ -79,9 +80,33 @@ class TestPocketTemplates(unittest.TestCase):
 
         program = rectangle_pocket(spec)
 
-        self.assertIn("; axes: swapped", program.lines)
+        self.assertIn("; axes: swapped (CAD X->machine Y, CAD Y->machine X)", program.lines)
         self.assertIn("G0 X-8.5 Y-13.5", program.lines)
         self.assertIn("G1 X-8.5 Y13.5 F500", program.lines)
+
+    def test_rectangle_pocket_can_choose_y_axis_passes_and_reverse_order(self):
+        spec = self._forty_mm_spec()
+        spec.pass_axis = "y"
+        spec.path_direction = "reverse"
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; raster: pass_axis=y, path=reverse, final_contour=off", program.lines)
+        self.assertIn("G0 X18.5 Y-18.5", program.lines[:14])
+        self.assertIn("G1 X18.5 Y18.5 F500", program.lines)
+
+    def test_rectangle_pocket_can_add_final_contour_pass(self):
+        spec = self._forty_mm_spec()
+        spec.final_contour = True
+        spec.contour_direction = "ccw"
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; raster: pass_axis=x, path=forward, final_contour=ccw", program.lines)
+        contour_index = program.lines.index("; final contour ccw")
+        self.assertGreater(contour_index, program.lines.index("; depth -5"))
+        self.assertIn("G1 X-18.5 Y-18.5 F500", program.lines[contour_index + 1:])
+        self.assertIn("G1 X18.5 Y18.5 F500", program.lines[contour_index + 1:])
 
     def test_rectangle_pocket_can_prefer_cut_start_without_moving_geometry(self):
         spec = self._forty_mm_spec()
@@ -210,6 +235,9 @@ class TestPocketTemplates(unittest.TestCase):
             {"safe_z": 0.0},
             {"tool_diameter": 41.0},
             {"origin": "g54"},
+            {"pass_axis": "z"},
+            {"path_direction": "sideways"},
+            {"contour_direction": "inside"},
             {"start_x": "left"},
             {"start_y": None},
             {"cut_start_x": "left", "cut_start_y": 1.0},
