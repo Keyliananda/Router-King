@@ -56,6 +56,14 @@ class _DummyLineEdit:
         self._text = str(text)
 
 
+class _DummyCombo:
+    def __init__(self, text="Iso"):
+        self._text = text
+
+    def currentText(self):
+        return self._text
+
+
 class _DummyPlainTextEdit:
     def __init__(self, text=""):
         self._text = text
@@ -594,6 +602,35 @@ class TestMainDock(unittest.TestCase):
 
         self.assertIsNone(sender.started_lines)
         widget._append_console.assert_called()
+
+    def test_open_gcode_preview_reuses_existing_dialog(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        existing = mock.Mock()
+        widget._preview_dialog = existing
+
+        widget._on_open_gcode_preview()
+
+        existing.refresh.assert_called_once_with()
+        existing.show.assert_called_once_with()
+        existing.raise_.assert_called_once_with()
+        existing.activateWindow.assert_called_once_with()
+
+    def test_update_preview_refreshes_visible_detached_preview(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._gcode_preview_projection = _DummyCombo("Top")
+        widget._preview_scene = mock.Mock()
+        widget._preview_view = mock.Mock()
+        dialog = mock.Mock()
+        dialog.isVisible.return_value = True
+        widget._preview_dialog = dialog
+
+        with mock.patch.object(widget, "_render_gcode_preview") as render:
+            widget._update_preview()
+
+        render.assert_called_once_with(widget._preview_scene, widget._preview_view, "top")
+        dialog.refresh.assert_called_once_with()
 
     def test_mcp_machine_event_updates_visible_shared_sender_state(self):
         main_dock = _load_main_dock_module()

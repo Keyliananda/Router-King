@@ -635,6 +635,45 @@ def show_panel():
     _dock.raise_()
 
 
+class GcodePreviewDialog(QtWidgets.QDialog):
+    def __init__(self, dock, parent=None):
+        super().__init__(parent)
+        self._dock = dock
+        self.setWindowTitle("RouterKing G-code Preview")
+        self.resize(900, 700)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.addWidget(QtWidgets.QLabel("Projection"))
+        self._projection = QtWidgets.QComboBox()
+        self._projection.addItems(["Iso", "Top", "Side", "Front"])
+        current_projection = dock._preview_projection_name().capitalize()
+        index = self._projection.findText(current_projection)
+        if index >= 0:
+            self._projection.setCurrentIndex(index)
+        self._refresh_btn = QtWidgets.QPushButton("Refresh")
+        toolbar.addWidget(self._projection)
+        toolbar.addWidget(self._refresh_btn)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+
+        self._scene = QtWidgets.QGraphicsScene(self)
+        self._view = QtWidgets.QGraphicsView(self._scene)
+        self._view.setRenderHint(QtGui.QPainter.Antialiasing)
+        layout.addWidget(self._view, 1)
+
+        self._projection.currentTextChanged.connect(self.refresh)
+        self._refresh_btn.clicked.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self):
+        projection = str(self._projection.currentText() or "Iso").lower()
+        self._dock._render_gcode_preview(self._scene, self._view, projection)
+
+
 class RouterKingDockWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -713,6 +752,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._import_dxf_btn = None
         self._gcode_preview_projection = None
         self._preview_refresh_timer = None
+        self._preview_dialog = None
         self._cam_generate_defaults = {}
         self._cam_user_presets = []
         self._dxf_import_defaults = {}
@@ -1128,7 +1168,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_preview_projection = QtWidgets.QComboBox()
         self._gcode_preview_projection.addItems(["Iso", "Top", "Side", "Front"])
         self._gcode_preview_projection.setToolTip("Choose the G-code preview projection.")
+        self._open_preview_btn = QtWidgets.QPushButton("Open Preview")
         preview_row.addWidget(self._gcode_preview_projection)
+        preview_row.addWidget(self._open_preview_btn)
         preview_row.addStretch(1)
         layout.addLayout(preview_row)
 
@@ -1166,6 +1208,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_edit.textChanged.connect(self._update_job_controls)
         self._gcode_edit.textChanged.connect(self._schedule_preview_update)
         self._gcode_preview_projection.currentTextChanged.connect(self._update_preview)
+        self._open_preview_btn.clicked.connect(self._on_open_gcode_preview)
 
         self._preview_refresh_timer = QtCore.QTimer(self)
         self._preview_refresh_timer.setSingleShot(True)
@@ -4850,19 +4893,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return measured < self._explore_step * 2.0
 
     def _update_preview(self):
-        text = self._gcode_edit.toPlainText()
-        projection = "iso"
+        projection = self._preview_projection_name()
+        self._render_gcode_preview(self._preview_scene, self._preview_view, projection)
+        self._refresh_detached_preview()
+
+    def _preview_projection_name(self):
         projection_widget = getattr(self, "_gcode_preview_projection", None)
         if projection_widget is not None:
-            projection = str(projection_widget.currentText() or "Iso").lower()
+            return str(projection_widget.currentText() or "Iso").lower()
+        return "iso"
+
+    def _render_gcode_preview(self, scene, view, projection):
+        text = self._gcode_edit.toPlainText()
         path = parse_gcode_preview(text)
-        self._preview_scene.clear()
-        bounds = render_preview_scene(self._preview_scene, path, projection=projection, clear=False)
+        scene.clear()
+        bounds = render_preview_scene(scene, path, projection=projection, clear=False)
         if bounds is None:
             return
-        bounds = self._preview_scene.itemsBoundingRect()
+        bounds = scene.itemsBoundingRect()
         if not bounds.isNull():
-            self._preview_view.fitInView(bounds, QtCore.Qt.KeepAspectRatio)
+            view.fitInView(bounds, QtCore.Qt.KeepAspectRatio)
 
     def _schedule_preview_update(self):
         timer = getattr(self, "_preview_refresh_timer", None)
@@ -4870,3 +4920,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._update_preview()
             return
         timer.start()
+
+    def _on_open_gcode_preview(self):
+        dialog = getattr(self, "_preview_dialog", None)
+        if dialog is None:
+            dialog = GcodePreviewDialog(self, self)
+            self._preview_dialog = dialog
+        else:
+            dialog.refresh()
+        dialog.show()
+        dialog.raise_()
+        if hasattr(dialog, "activateWindow"):
+            dialog.activateWindow()
+
+    def _refresh_detached_preview(self):
+        dialog = getattr(self, "_preview_dialog", None)
+        if dialog is None:
+            return
+        try:
+            visible = dialog.isVisible()
+        except Exception:
+            visible = True
+        if visible:
+            dialog.refresh()
