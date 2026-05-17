@@ -4,3 +4,7 @@ args = [
     "mcp.server.stdio_server",
 ]
 command = "python3"
+[mcp_servers.routerking.env]
+ROUTERKING_MCP_MODE = "socket"
+ROUTERKING_MCP_HOST = "127.0.0.1"
+ROUTERKING_MCP_PORT = "4400"
