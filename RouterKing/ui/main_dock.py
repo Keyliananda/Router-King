@@ -46,6 +46,7 @@ try:
         make_jog_vector,
     )
     from .gcode_preview import (
+        PreviewBounds,
         PreviewPath,
         PreviewPoint,
         PreviewSnapCandidate,
@@ -76,6 +77,7 @@ except ImportError:
         make_jog_vector,
     )
     from ui.gcode_preview import (
+        PreviewBounds,
         PreviewPath,
         PreviewPoint,
         PreviewSnapCandidate,
@@ -862,6 +864,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_manual_start_wco = None
         self._gcode_manual_start_at = 0.0
         self._manual_xyz_preview_wpos = None
+        self._manual_xyz_preview_origin_wpos = None
+        self._manual_xyz_prepare_mpos = None
+        self._manual_xyz_prepare_wpos = None
         self._manual_xyz_preview_last_at = 0.0
         self._gcode_last_validation = None
         self._status_tick = 0
@@ -944,6 +949,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_last_jog_at = 0.0
         self._controller_was_active = False
         self._controller_guard_mpos = None
+        self._controller_guard_wpos = None
         self._controller_guard_mpos_at = 0.0
         self._controller_manual_xyz_active = False
         self._controller_test_dialog = None
@@ -3732,6 +3738,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._explore_unlocked = True
             self._explore_pending = False
         if lower.startswith("error:"):
+            self._invalidate_controller_guard_position()
+            self._controller_was_active = False
+            self._request_status_for_jog()
             self._append_console(line, force=True)
             return
         if lower == "ok" and not self._console_verbose.isChecked():
@@ -4073,31 +4082,56 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if status and str(status.get("state", "")).lower() == "alarm":
             self._append_console("Travel test blocked: alarm active. Unlock and home first.")
             return
-        max_x = self._limits.get("X")
-        max_y = self._limits.get("Y")
-        if max_x is None or max_y is None:
-            self._append_console("Travel test failed: read limits first.")
+        limits = self._current_machine_limits(require_complete=False)
+        if not limits or limits.get("x") is None or limits.get("y") is None:
+            self._append_console("Travel test failed: machine X/Y limits unavailable.")
             return
         margin = self._travel_margin.value()
-        target_x = max_x - margin
-        target_y = max_y - margin
-        if target_x <= 0 or target_y <= 0:
+        x_start, x_target = self._travel_test_axis_targets(limits["x"], margin)
+        y_start, y_target = self._travel_test_axis_targets(limits["y"], margin)
+        if x_start is None or x_target is None or y_start is None or y_target is None:
             self._append_console("Travel test failed: margin too large for limits.")
             return
         feed = self._travel_feed.value()
-        if not self._confirm_travel_test(max_x, max_y, target_x, target_y, margin, feed):
+        x_travel = abs(float(limits["x"][1]) - float(limits["x"][0]))
+        y_travel = abs(float(limits["y"][1]) - float(limits["y"][0]))
+        if not self._confirm_travel_test(x_travel, y_travel, x_target, y_target, margin, feed):
             return
         lines = [
             "G90",
             "G21",
-            f"G53 G1 X0 Y0 F{feed:.0f}",
-            f"G53 G1 X{target_x:.3f} F{feed:.0f}",
-            "G53 G1 X0",
-            f"G53 G1 Y{target_y:.3f} F{feed:.0f}",
-            "G53 G1 Y0",
+            f"G53 G1 X{x_start:.3f} Y{y_start:.3f} F{feed:.0f}",
+            f"G53 G1 X{x_target:.3f} F{feed:.0f}",
+            f"G53 G1 X{x_start:.3f}",
+            f"G53 G1 Y{y_target:.3f} F{feed:.0f}",
+            f"G53 G1 Y{y_start:.3f}",
         ]
         self._sender.start_stream(lines)
         self._append_console("Travel test started.")
+
+    def _travel_test_axis_targets(self, axis_limits, margin):
+        try:
+            low = min(float(axis_limits[0]), float(axis_limits[1]))
+            high = max(float(axis_limits[0]), float(axis_limits[1]))
+            margin = max(float(margin), 0.0)
+        except (TypeError, ValueError, IndexError):
+            return None, None
+        if high - low <= margin * 2.0:
+            return None, None
+        start_endpoint = "low" if abs(low) < abs(high) else "high"
+        target_endpoint = "high" if start_endpoint == "low" else "low"
+        return (
+            self._guarded_axis_endpoint(axis_limits, margin, start_endpoint),
+            self._guarded_axis_endpoint(axis_limits, margin, target_endpoint),
+        )
+
+    def _guarded_axis_endpoint(self, axis_limits, margin, endpoint):
+        low = min(float(axis_limits[0]), float(axis_limits[1]))
+        high = max(float(axis_limits[0]), float(axis_limits[1]))
+        margin = max(float(margin), 0.0)
+        if endpoint == "low":
+            return min(low + margin, high)
+        return max(high - margin, low)
 
     def _on_explore_limits(self):
         if self._explore_active:
@@ -4626,74 +4660,291 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             if guarded_min < guarded_max:
                 min_limit = guarded_min
                 max_limit = guarded_max
-            target = current + delta
-            if target < min_limit:
-                allowed_delta = min_limit - current
-                adjusted[axis] = allowed_delta if delta < 0.0 and allowed_delta < 0.0 else 0.0
+            clamped_delta, limited = self._clamp_jog_axis_delta(current, delta, min_limit, max_limit)
+            if limited:
+                adjusted[axis] = clamped_delta
                 limited_axes.append(axis.upper())
-            elif target > max_limit:
-                allowed_delta = max_limit - current
-                adjusted[axis] = allowed_delta if delta > 0.0 and allowed_delta > 0.0 else 0.0
-                limited_axes.append(axis.upper())
+
+        work_position = self._work_position_for_jog()
+        work_limits = self._milling_work_limits_for_jog(self._work_limits_for_jog(limits, position, work_position))
+        if work_position and work_limits:
+            for axis in ("x", "y"):
+                delta = adjusted[axis]
+                if abs(delta) < 0.0005:
+                    continue
+                axis_limits = work_limits.get(axis)
+                current = work_position.get(axis)
+                if axis_limits is None or current is None:
+                    adjusted[axis] = 0.0
+                    limited_axes.append(axis.upper())
+                    continue
+                min_limit, max_limit = axis_limits
+                margin = _CONTROLLER_LIMIT_MARGIN_MM
+                guarded_min = min_limit + margin
+                guarded_max = max_limit - margin
+                if guarded_min < guarded_max:
+                    min_limit = guarded_min
+                    max_limit = guarded_max
+                clamped_delta, limited = self._clamp_jog_axis_delta(current, delta, min_limit, max_limit)
+                if limited:
+                    adjusted[axis] = clamped_delta
+                    limited_axes.append(axis.upper())
 
         reason = ""
         if limited_axes:
             reason = " ".join(sorted(set(limited_axes))) + " machine limit"
         return adjusted["x"], adjusted["y"], adjusted["z"], reason
 
+    @staticmethod
+    def _clamp_jog_axis_delta(current, delta, min_limit, max_limit):
+        current = float(current)
+        delta = float(delta)
+        min_limit = float(min_limit)
+        max_limit = float(max_limit)
+        if min_limit > max_limit:
+            min_limit, max_limit = max_limit, min_limit
+        target = current + delta
+        if delta < 0.0:
+            if current <= min_limit:
+                return 0.0, True
+            if target < min_limit:
+                return min_limit - current, True
+        elif delta > 0.0:
+            if current >= max_limit:
+                return 0.0, True
+            if target > max_limit:
+                return max_limit - current, True
+        return delta, False
+
     def _machine_limits_for_jog(self):
+        return self._current_machine_limits()
+
+    def _current_machine_limits(self, profile=None, *, require_complete=True):
+        values = self._machine_limits_from_current_values()
+        if profile is None:
+            try:
+                profile, _profile_path = grbl_load_machine_profile(None)
+            except Exception:
+                profile = {}
+        profile_values = self._machine_limits_from_profile(profile)
+        merged = dict(profile_values or {})
+        merged.update(values)
+        if require_complete and any(axis not in merged for axis in ("x", "y", "z")):
+            return None
+        return merged or None
+
+    def _machine_limits_from_current_values(self):
         values = {}
         for axis in ("X", "Y", "Z"):
             value = getattr(self, "_limits", {}).get(axis)
-            if value is not None:
-                try:
-                    travel = abs(float(value))
-                except (TypeError, ValueError):
-                    travel = 0.0
-                if travel > 0.0:
-                    values[axis.lower()] = (-travel, 0.0)
-        if len(values) == 3:
-            return values
+            limits = self._machine_limits_from_travel(value)
+            if limits is not None:
+                values[axis.lower()] = limits
+        return values
+
+    def _machine_limits_from_profile(self, profile):
+        if not isinstance(profile, dict):
+            return {}
+        field_values = self._machine_limits_from_profile_fields(profile)
         try:
-            profile, _profile_path = grbl_load_machine_profile(None)
             settings = dict((profile or {}).get("settings") or {})
             limits, _source = grbl_resolve_machine_limits(profile, settings)
-            return {
-                axis: (float(axis_limits[0]), float(axis_limits[1]))
+            resolved = {
+                axis: self._machine_limits_oriented_like(axis_limits, field_values.get(axis))
                 for axis, axis_limits in limits.items()
                 if axis_limits and len(axis_limits) >= 2
             }
+            for axis, axis_limits in field_values.items():
+                resolved.setdefault(axis, axis_limits)
+            return resolved
         except Exception:
-            return values if len(values) == 3 else None
+            return field_values
+
+    def _machine_limits_from_profile_fields(self, profile):
+        values = {}
+        explicit = profile.get("machine_limits")
+        if isinstance(explicit, dict):
+            for axis in ("x", "y", "z"):
+                limits = self._machine_limits_from_axis_pair(explicit.get(axis) or explicit.get(axis.upper()))
+                if limits is not None:
+                    values[axis] = limits
+        envelope = profile.get("work_envelope_mm")
+        if isinstance(envelope, dict):
+            for axis in ("x", "y", "z"):
+                if axis in values:
+                    continue
+                limits = self._machine_limits_from_travel(envelope.get(axis) or envelope.get(axis.upper()))
+                if limits is not None:
+                    values[axis] = limits
+        settings = profile.get("settings")
+        if isinstance(settings, dict):
+            for axis, setting_key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
+                if axis in values:
+                    continue
+                limits = self._machine_limits_from_travel(
+                    settings.get(setting_key) or settings.get(setting_key.lstrip("$"))
+                )
+                if limits is not None:
+                    values[axis] = limits
+        return values
+
+    @staticmethod
+    def _machine_limits_from_axis_pair(value):
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return None
+        try:
+            low = float(value[0])
+            high = float(value[1])
+        except (TypeError, ValueError):
+            return None
+        if low == high:
+            return None
+        return (min(low, high), max(low, high))
+
+    @staticmethod
+    def _machine_limits_from_travel(value):
+        try:
+            travel = abs(float(value))
+        except (TypeError, ValueError):
+            return None
+        if travel <= 0.0:
+            return None
+        return (-travel, 0.0)
+
+    @staticmethod
+    def _machine_limits_oriented_like(axis_limits, reference_limits):
+        try:
+            travel = abs(float(axis_limits[1]) - float(axis_limits[0]))
+        except (TypeError, ValueError, IndexError):
+            return None
+        if travel <= 0.0:
+            return None
+        if reference_limits is None:
+            return (
+                min(float(axis_limits[0]), float(axis_limits[1])),
+                max(float(axis_limits[0]), float(axis_limits[1])),
+            )
+        ref_min, ref_max = float(reference_limits[0]), float(reference_limits[1])
+        if ref_min >= 0.0 and ref_max > 0.0:
+            return (0.0, travel)
+        if ref_max <= 0.0 and ref_min < 0.0:
+            return (-travel, 0.0)
+        span = abs(ref_max - ref_min)
+        if span <= 0.0:
+            return (
+                min(float(axis_limits[0]), float(axis_limits[1])),
+                max(float(axis_limits[0]), float(axis_limits[1])),
+            )
+        scale = travel / span
+        return (ref_min * scale, ref_max * scale)
 
     def _machine_position_for_jog(self):
         guard_position = getattr(self, "_controller_guard_mpos", None)
         if guard_position:
             return dict(guard_position)
         status = self._sender.get_status() or {}
-        position = grbl_parse_xyz_value(status.get("MPos"))
+        position = self._status_machine_position(status)
         if position is None:
             return None
-        position = {axis: float(position[axis]) for axis in ("x", "y", "z")}
         self._controller_guard_mpos = dict(position)
         self._controller_guard_mpos_at = time.time()
         return position
 
+    def _work_position_for_jog(self):
+        guard_position = getattr(self, "_controller_guard_wpos", None)
+        if guard_position:
+            return dict(guard_position)
+        status = self._sender.get_status() or {}
+        position = self._status_work_position(status)
+        if position is None:
+            return None
+        self._controller_guard_wpos = dict(position)
+        return position
+
     def _update_controller_guard_position(self, status):
-        position = grbl_parse_xyz_value((status or {}).get("MPos"))
+        position = self._status_machine_position(status or {})
         if position is None:
             return
-        self._controller_guard_mpos = {axis: float(position[axis]) for axis in ("x", "y", "z")}
+        self._controller_guard_mpos = dict(position)
+        work_position = self._status_work_position(status or {})
+        if work_position is not None:
+            self._controller_guard_wpos = dict(work_position)
         self._controller_guard_mpos_at = time.time()
+
+    def _status_machine_position(self, status):
+        mpos = grbl_parse_xyz_value((status or {}).get("MPos"))
+        if mpos is not None:
+            return {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
+        wpos = grbl_parse_xyz_value((status or {}).get("WPos"))
+        wco = grbl_parse_xyz_value((status or {}).get("WCO"))
+        if wpos is None or wco is None:
+            return None
+        return {axis: float(wpos[axis]) + float(wco[axis]) for axis in ("x", "y", "z")}
+
+    def _status_work_position(self, status):
+        wpos = grbl_parse_xyz_value((status or {}).get("WPos"))
+        if wpos is not None:
+            return {axis: float(wpos[axis]) for axis in ("x", "y", "z")}
+        mpos = grbl_parse_xyz_value((status or {}).get("MPos"))
+        wco = grbl_parse_xyz_value((status or {}).get("WCO"))
+        if mpos is None or wco is None:
+            return None
+        return {axis: float(mpos[axis]) - float(wco[axis]) for axis in ("x", "y", "z")}
+
+    def _work_limits_for_jog(self, machine_limits, machine_position, work_position):
+        if not machine_limits or not machine_position or not work_position:
+            return None
+        try:
+            wco = {
+                axis: float(machine_position[axis]) - float(work_position[axis])
+                for axis in ("x", "y", "z")
+            }
+            return {
+                axis: (
+                    float(axis_limits[0]) - wco[axis],
+                    float(axis_limits[1]) - wco[axis],
+                )
+                for axis, axis_limits in machine_limits.items()
+                if axis_limits and len(axis_limits) >= 2 and axis in wco
+            }
+        except (TypeError, ValueError, KeyError, IndexError):
+            return None
+
+    def _milling_work_limits_for_jog(self, work_limits):
+        if not work_limits:
+            return None
+        adjusted = dict(work_limits)
+        for axis in ("x", "y"):
+            axis_limits = adjusted.get(axis)
+            if axis_limits is None:
+                continue
+            try:
+                low = min(float(axis_limits[0]), float(axis_limits[1]))
+                high = max(float(axis_limits[0]), float(axis_limits[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if low < 0.0 < high:
+                adjusted[axis] = (0.0, high)
+        return adjusted
+
+    def _invalidate_controller_guard_position(self):
+        self._controller_guard_mpos = None
+        self._controller_guard_wpos = None
+        self._controller_guard_mpos_at = 0.0
 
     def _advance_controller_guard_position(self, x=0.0, y=0.0, z=0.0):
         position = getattr(self, "_controller_guard_mpos", None)
-        if not position:
-            return
-        updated = dict(position)
-        for axis, delta in (("x", x), ("y", y), ("z", z)):
-            updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
-        self._controller_guard_mpos = updated
+        if position:
+            updated = dict(position)
+            for axis, delta in (("x", x), ("y", y), ("z", z)):
+                updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
+            self._controller_guard_mpos = updated
+        work_position = getattr(self, "_controller_guard_wpos", None)
+        if work_position:
+            updated = dict(work_position)
+            for axis, delta in (("x", x), ("y", y), ("z", z)):
+                updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
+            self._controller_guard_wpos = updated
         self._controller_guard_mpos_at = time.time()
 
     def _request_status_for_jog(self):
@@ -4728,6 +4979,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         status = self._sender.get_status() or {}
         self._update_controller_guard_position(status)
+        self._prepare_manual_xyz_preview_baseline(status)
         self._update_manual_xyz_preview_position(status, force=True)
         _controller_log(f"manual xyz prepared: no automatic move; mpos={status.get('MPos', 'unknown')}")
         if self._controller.is_connected():
@@ -4741,6 +4993,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _on_exit_manual_xyz(self):
         self._controller_manual_xyz_active = False
         self._manual_xyz_preview_wpos = None
+        self._manual_xyz_preview_origin_wpos = None
+        self._manual_xyz_prepare_mpos = None
+        self._manual_xyz_prepare_wpos = None
         if self._controller_enable.isChecked():
             self._controller_enable.setChecked(False)
         else:
@@ -4749,13 +5004,48 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._append_console("Manual XYZ mode stopped.", force=True)
         self._update_preview()
 
+    def _prepare_manual_xyz_preview_baseline(self, status):
+        live = self._extract_live_xyz(status or {})
+        if live is None:
+            return
+        self._manual_xyz_prepare_mpos = {axis: float(live["mpos"][axis]) for axis in ("x", "y", "z")}
+        self._manual_xyz_prepare_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
+        self._manual_xyz_preview_origin_wpos = self._current_preview_cut_start_reference(live["wpos"])
+
+    def _current_preview_cut_start_reference(self, fallback_wpos):
+        try:
+            path = self._preview_path_from_current_state(self._gcode_edit.toPlainText())
+            cut = self._first_cut_point(path)
+            if cut is not None:
+                return {"x": float(cut.x), "y": float(cut.y), "z": float(cut.z)}
+        except Exception:
+            pass
+        if getattr(self, "_gcode_manual_start_wpos", None):
+            start = self._gcode_manual_start_wpos
+            return {axis: float(start[axis]) for axis in ("x", "y", "z")}
+        return {axis: float(fallback_wpos[axis]) for axis in ("x", "y", "z")}
+
     def _update_manual_xyz_preview_position(self, status, force=False):
         if not getattr(self, "_controller_manual_xyz_active", False):
             return
         live = self._extract_live_xyz(status or {})
         if live is None:
             return
-        next_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
+        origin = getattr(self, "_manual_xyz_preview_origin_wpos", None)
+        base_mpos = getattr(self, "_manual_xyz_prepare_mpos", None)
+        base_wpos = getattr(self, "_manual_xyz_prepare_wpos", None)
+        if origin and base_mpos:
+            next_wpos = {
+                axis: float(origin[axis]) + float(live["mpos"][axis]) - float(base_mpos[axis])
+                for axis in ("x", "y", "z")
+            }
+        elif origin and base_wpos:
+            next_wpos = {
+                axis: float(origin[axis]) + float(live["wpos"][axis]) - float(base_wpos[axis])
+                for axis in ("x", "y", "z")
+            }
+        else:
+            next_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
         previous = getattr(self, "_manual_xyz_preview_wpos", None)
         if not force and previous is not None and self._xyz_close(previous, next_wpos, tolerance=0.001):
             return
@@ -4921,6 +5211,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 z_step=self._controller_z_step.value(),
             )
             interval = _CONTROLLER_FAST_INTERVAL_S
+            if x == 0.0 and y == 0.0 and z != 0.0:
+                interval = _CONTROLLER_STEP_INTERVAL_S
         else:
             x, y, z = make_jog_vector(
                 state,
@@ -5955,7 +6247,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._preview_view_rotation_degrees() if rotation_z is None else rotation_z
         )
         text = self._gcode_edit.toPlainText()
-        path = self._preview_path_from_current_state(text)
+        source_path = self._preview_path_from_current_state(text)
+        path = self._preview_path_for_display(source_path)
         display_path = self._preview_display_path(path, rotation_z=rotation_z)
         scene.clear()
         if hasattr(view, "set_projection_name"):
@@ -5984,6 +6277,51 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             except ValueError:
                 pass
         return parse_gcode_preview(text)
+
+    def _preview_path_for_display(self, path):
+        home = self._preview_home_point()
+        if home is None:
+            return path
+        segments = list(getattr(path, "segments", ()) or ())
+        if not segments:
+            return path
+        first_cut_index = next((index for index, segment in enumerate(segments) if not segment.rapid), None)
+        if first_cut_index is None:
+            return path
+        first_cut = segments[first_cut_index].start
+        display_segments = list(segments[first_cut_index:])
+        if not self._xyz_points_close(home, first_cut, tolerance=0.001):
+            display_segments.insert(
+                0,
+                PreviewSegment(
+                    start=home,
+                    end=first_cut,
+                    rapid=True,
+                    line_no=0,
+                    motion="HOME",
+                ),
+            )
+        return PreviewPath(segments=tuple(display_segments), bounds=self._bounds_for_segments(display_segments))
+
+    def _bounds_for_segments(self, segments):
+        points = [point for segment in segments for point in (segment.start, segment.end)]
+        if not points:
+            return None
+        return PreviewBounds(
+            min_x=min(point.x for point in points),
+            min_y=min(point.y for point in points),
+            min_z=min(point.z for point in points),
+            max_x=max(point.x for point in points),
+            max_y=max(point.y for point in points),
+            max_z=max(point.z for point in points),
+        )
+
+    def _xyz_points_close(self, left, right, tolerance=0.001):
+        return (
+            abs(float(left.x) - float(right.x)) <= tolerance
+            and abs(float(left.y) - float(right.y)) <= tolerance
+            and abs(float(left.z) - float(right.z)) <= tolerance
+        )
 
     def _manual_xyz_preview_template_spec(self):
         if not getattr(self, "_controller_manual_xyz_active", False):
@@ -6307,7 +6645,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         try:
             home_x = self._home_axis_machine_position(limits["x"], directions.get("x"), pull_off)
             home_y = self._home_axis_machine_position(limits["y"], directions.get("y"), pull_off)
-            home_z = self._home_axis_machine_position(limits.get("z", (-60.0, 0.0)), directions.get("z"), pull_off)
+            home_z = self._home_axis_machine_position(limits["z"], directions.get("z"), pull_off)
             wco = self._preview_work_offset(profile)
             if wco is None:
                 return None
@@ -6316,28 +6654,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return None
 
     def _preview_machine_limits(self, profile):
-        if not isinstance(profile, dict):
-            return None
-        try:
-            settings = dict(profile.get("settings") or {})
-            limits, _source = grbl_resolve_machine_limits(profile, settings)
-            return {
-                axis: (float(axis_limits[0]), float(axis_limits[1]))
-                for axis, axis_limits in limits.items()
-                if axis_limits and len(axis_limits) >= 2
-            }
-        except Exception:
-            limits = profile.get("machine_limits")
-            if not isinstance(limits, dict):
-                return None
-            try:
-                return {
-                    "x": (float(limits["x"][0]), float(limits["x"][1])),
-                    "y": (float(limits["y"][0]), float(limits["y"][1])),
-                    "z": (float(limits["z"][0]), float(limits["z"][1])) if limits.get("z") else (-50.0, 0.0),
-                }
-            except (TypeError, ValueError, KeyError, IndexError):
-                return None
+        return self._current_machine_limits(profile)
 
     def _home_axis_machine_position(self, axis_limits, direction, pull_off):
         min_value = min(float(axis_limits[0]), float(axis_limits[1]))
@@ -6378,7 +6695,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return {
                 "x": self._home_axis_machine_position(limits["x"], directions.get("x"), pull_off),
                 "y": self._home_axis_machine_position(limits["y"], directions.get("y"), pull_off),
-                "z": self._home_axis_machine_position(limits.get("z", (-50.0, 0.0)), directions.get("z"), pull_off),
+                "z": self._home_axis_machine_position(limits["z"], directions.get("z"), pull_off),
             }
         except (TypeError, ValueError, IndexError, KeyError):
             return None
@@ -6445,10 +6762,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "x_max": float(limits["x"][1]) - wco["x"],
                 "y_min": float(limits["y"][0]) - wco["y"],
                 "y_max": float(limits["y"][1]) - wco["y"],
-                "z_min": float(limits.get("z", (-60.0, 0.0))[0]) - wco["z"],
-                "z_max": float(limits.get("z", (-60.0, 0.0))[1]) - wco["z"],
+                "z_min": float(limits["z"][0]) - wco["z"],
+                "z_max": float(limits["z"][1]) - wco["z"],
             }
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError, KeyError):
             return None
 
     def _preview_work_offset(self, profile):

@@ -422,6 +422,30 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(sender.commands, [])
         widget._append_console.assert_called_once()
 
+    def test_send_jog_recovers_guard_from_idle_wpos_wco_status_after_limit_block(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "WPos": "-150.000,-190.000,-25.000",
+                "WCO": "0.000,0.000,0.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 300.0, "Y": 380.0, "Z": 50.0}
+        widget._controller_guard_mpos = {"x": -2.0, "y": -190.0, "z": -25.0}
+        widget._append_console = mock.Mock()
+
+        blocked = widget._send_jog(x=0.5, feed=600, source="test")
+        widget._update_controller_guard_position(sender.get_status())
+        recovered = widget._send_jog(x=0.5, feed=600, source="test")
+
+        self.assertFalse(blocked)
+        self.assertTrue(recovered)
+        self.assertEqual(sender.commands, ["$J=G91 X0.500 F600"])
+
     def test_send_jog_uses_margin_before_machine_limit(self):
         main_dock = _load_main_dock_module()
         sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-297.500,-190.000,-25.000"})
@@ -438,6 +462,92 @@ class TestMainDock(unittest.TestCase):
         self.assertFalse(second)
         self.assertEqual(sender.commands, ["$J=G91 X-0.500 F600"])
 
+    def test_current_machine_limits_uses_settings_travel_with_profile_orientation(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._limits = {"X": None, "Y": None, "Z": None}
+        profile = {
+            "machine_limits": {"x": [0.0, 500.0], "y": [10.0, 210.0], "z": [-80.0, 20.0]},
+            "settings": {"$130": "400.000", "$131": "400.000", "$132": "60.000"},
+        }
+
+        limits = widget._current_machine_limits(profile)
+
+        self.assertEqual(limits, {"x": (0.0, 400.0), "y": (0.0, 400.0), "z": (-48.0, 12.0)})
+
+    def test_send_jog_blocks_below_positive_oriented_dynamic_limits(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={"state": "Idle", "MPos": "0.000,200.000,25.000", "WPos": "0.000,200.000,25.000"}
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {}
+        widget._append_console = mock.Mock()
+        profile = {
+            "machine_limits": {"x": [0.0, 300.0], "y": [0.0, 300.0], "z": [0.0, 50.0]},
+            "settings": {"$130": "400.000", "$131": "400.000", "$132": "60.000"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            result = widget._send_jog(x=-0.5, feed=600, source="test")
+
+        self.assertFalse(result)
+        self.assertEqual(sender.commands, [])
+        widget._append_console.assert_called_once()
+
+    def test_send_jog_blocks_below_zero_at_negative_home_work_origin(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-297.000,-377.000,-3.000",
+                "WPos": "0.000,0.000,0.000",
+                "WCO": "-297.000,-377.000,-3.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {}
+        widget._append_console = mock.Mock()
+        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]}}
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            negative = widget._send_jog(x=-0.5, feed=600, source="test")
+            positive = widget._send_jog(x=0.5, feed=600, source="test")
+
+        self.assertFalse(negative)
+        self.assertTrue(positive)
+        self.assertEqual(sender.commands, ["$J=G91 X0.500 F600"])
+
+    def test_travel_test_uses_dynamic_machine_limit_interval(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._limits = {"X": 400.0, "Y": 300.0, "Z": 60.0}
+        widget._travel_margin = _DummySpin(3.0)
+        widget._travel_feed = _DummySpin(500.0)
+        widget._confirm_travel_test = mock.Mock(return_value=True)
+        widget._append_console = mock.Mock()
+
+        widget._on_travel_test()
+
+        self.assertEqual(
+            sender.started_lines,
+            [
+                "G90",
+                "G21",
+                "G53 G1 X-3.000 Y-3.000 F500",
+                "G53 G1 X-397.000 F500",
+                "G53 G1 X-3.000",
+                "G53 G1 Y-297.000 F500",
+                "G53 G1 Y-3.000",
+            ],
+        )
+
     def test_send_jog_blocks_when_sender_streaming(self):
         main_dock = _load_main_dock_module()
         sender = _FakeConnectedSender(streaming=True)
@@ -450,6 +560,25 @@ class TestMainDock(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(sender.commands, [])
         widget._append_console.assert_called_once()
+
+    def test_jog_error_invalidates_guard_and_requests_status(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_guard_mpos = {"x": -2.0, "y": -190.0, "z": -25.0}
+        widget._controller_guard_mpos_at = 123.0
+        widget._controller_was_active = True
+        widget._explore_active = False
+        widget._console_verbose = _DummyCheckBox(False)
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+
+        widget._handle_console_line("error:15")
+
+        self.assertIsNone(widget._controller_guard_mpos)
+        self.assertEqual(widget._controller_guard_mpos_at, 0.0)
+        self.assertFalse(widget._controller_was_active)
+        widget._request_status.assert_called_once_with()
+        widget._append_console.assert_called_once_with("error:15", force=True)
 
     def test_prepare_manual_xyz_enables_controller_without_motion(self):
         main_dock = _load_main_dock_module()
@@ -505,6 +634,33 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 10.0, "y": 10.0, "z": 1.0})
         self.assertIsNone(getattr(widget, "_gcode_manual_start_wpos", None))
         widget._schedule_preview_update.assert_called_once_with()
+
+    def test_manual_xyz_preview_uses_delta_from_prepare_baseline(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = None
+        widget._manual_xyz_preview_last_at = 0.0
+        widget._schedule_preview_update = mock.Mock()
+        widget._gcode_edit = _DummyPlainTextEdit("G90\nG0 X80 Y100 Z6\nG1 Z-1 F300")
+        widget._last_template_spec = None
+        prepare_status = {
+            "MPos": "-140.000,-180.000,-39.000",
+            "WPos": "10.000,10.000,1.000",
+            "WCO": "-150.000,-190.000,-40.000",
+        }
+        moved_status = {
+            "MPos": "-135.000,-178.000,-39.000",
+            "WPos": "15.000,12.000,1.000",
+            "WCO": "-150.000,-190.000,-40.000",
+        }
+
+        widget._prepare_manual_xyz_preview_baseline(prepare_status)
+        widget._update_manual_xyz_preview_position(prepare_status, force=True)
+        widget._update_manual_xyz_preview_position(moved_status, force=True)
+
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 80.0, "y": 100.0, "z": 6.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 85.0, "y": 102.0, "z": 6.0})
 
     def test_manual_xyz_preview_moves_template_path_to_live_cut_start(self):
         main_dock = _load_main_dock_module()
@@ -983,7 +1139,7 @@ class TestMainDock(unittest.TestCase):
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._sender = _FakeConnectedSender(status={"WCO": "10.000,20.000,0.000"})
         widget._gcode_manual_start_wco = None
-        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]}}
+        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]}}
 
         with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
             area = widget._preview_work_area()
@@ -993,12 +1149,41 @@ class TestMainDock(unittest.TestCase):
             {"x_min": -310.0, "x_max": -10.0, "y_min": -400.0, "y_max": -20.0, "z_min": -50.0, "z_max": 0.0},
         )
 
+    def test_preview_work_area_uses_current_z_limit_without_profile_z_default(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status={"WCO": "0.000,0.000,0.000"})
+        widget._gcode_manual_start_wco = None
+        widget._limits = {"X": None, "Y": None, "Z": 72.0}
+        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]}}
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            area = widget._preview_work_area()
+
+        self.assertEqual(
+            area,
+            {"x_min": -300.0, "x_max": 0.0, "y_min": -380.0, "y_max": 0.0, "z_min": -72.0, "z_max": 0.0},
+        )
+
+    def test_preview_work_area_requires_dynamic_z_limit(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status={"WCO": "0.000,0.000,0.000"})
+        widget._gcode_manual_start_wco = None
+        widget._limits = {"X": None, "Y": None, "Z": None}
+        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]}}
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            area = widget._preview_work_area()
+
+        self.assertIsNone(area)
+
     def test_preview_work_area_uses_live_negative_home_wco_without_shrinking_envelope(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._sender = _FakeConnectedSender(status={"WCO": "-297.000,-377.000,-3.000"})
         widget._gcode_manual_start_wco = {"x": 0.0, "y": 0.0, "z": 0.0}
-        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]}}
+        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]}}
 
         with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
             area = widget._preview_work_area()
@@ -1018,7 +1203,7 @@ class TestMainDock(unittest.TestCase):
             status={"MPos": "-297.000,-377.000,-3.000", "WPos": "0.000,0.000,0.000"}
         )
         widget._gcode_manual_start_wco = {"x": 100.0, "y": 100.0, "z": 0.0}
-        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]}}
+        profile = {"machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]}}
 
         with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
             area = widget._preview_work_area()
@@ -1116,6 +1301,21 @@ class TestMainDock(unittest.TestCase):
         point = widget._preview_cut_start_point(path)
 
         self.assertEqual((point.x, point.y, point.z), (4.0, 5.0, 2.0))
+
+    def test_preview_display_path_reanchors_leading_rapid_to_home(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        path = main_dock.parse_gcode_preview("G90\nG0 X100 Y100 Z6\nG1 Z-1 F300\nG1 X110 Y100 F400")
+        widget._preview_home_point = mock.Mock(return_value=main_dock.PreviewPoint(10.0, 20.0, 0.0))
+
+        display_path = widget._preview_path_for_display(path)
+
+        self.assertEqual(len(display_path.segments), 3)
+        self.assertTrue(display_path.segments[0].rapid)
+        self.assertEqual(display_path.segments[0].motion, "HOME")
+        self.assertEqual((display_path.segments[0].start.x, display_path.segments[0].start.y), (10.0, 20.0))
+        self.assertEqual((display_path.segments[0].end.x, display_path.segments[0].end.y), (100.0, 100.0))
+        self.assertFalse(display_path.segments[1].rapid)
 
     def test_machine_profile_from_controls_persists_foxalien_travel_settings(self):
         main_dock = _load_main_dock_module()
@@ -1308,7 +1508,7 @@ class TestMainDock(unittest.TestCase):
         widget._gcode_manual_start_wco = None
         widget._last_template_spec = None
         profile = {
-            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]},
+            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]},
             "homing": {"directions": {"x": "positive", "y": "positive"}, "pull_off_mm": 0.0},
         }
 
@@ -1325,7 +1525,7 @@ class TestMainDock(unittest.TestCase):
         widget._gcode_manual_start_wco = None
         widget._last_template_spec = None
         profile = {
-            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]},
+            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]},
             "settings": {"$23": "3", "$27": "3"},
             "homing": {"directions": {"x": "positive", "y": "positive"}},
         }
@@ -1345,7 +1545,7 @@ class TestMainDock(unittest.TestCase):
         widget._controller_manual_xyz_active = True
         widget._manual_xyz_preview_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
         profile = {
-            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]},
+            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]},
             "settings": {"$23": "3", "$27": "3"},
         }
 
@@ -1364,7 +1564,7 @@ class TestMainDock(unittest.TestCase):
         widget._gcode_manual_start_wco = None
         widget._last_template_spec = None
         profile = {
-            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]},
+            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]},
             "settings": {"$23": "3", "$27": "3"},
             "homing": {"directions": {"x": "positive", "y": "positive"}},
         }
@@ -1558,6 +1758,79 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(edit.text(), "Right X, DPad Right, DPad Left")
         self.assertEqual(widget._save_controller_defaults.call_count, 2)
+
+    def test_controller_tick_fast_z_only_uses_step_interval_without_shoulders(self):
+        main_dock = _load_main_dock_module()
+        state = types.SimpleNamespace(
+            name="Pad",
+            x=0.0,
+            y=0.0,
+            z=1.0,
+            speed_label="fast",
+            speed_multiplier=3.0,
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_enable = _DummyCheckBox(True)
+        widget._controller = types.SimpleNamespace(
+            is_connected=lambda: True,
+            poll_mapped=mock.Mock(return_value=state),
+            error="",
+        )
+        widget._controller_feed = _DummySpin(600.0)
+        widget._controller_deadzone = _DummySpin(0.2)
+        widget._controller_z_step = _DummySpin(0.1)
+        widget._controller_xy_step = _DummySpin(0.5)
+        widget._controller_last_jog_at = 100.0
+        widget._controller_was_active = False
+        widget._controller_manual_xyz_active = False
+        widget._controller_status = _DummyWidget()
+        widget._controller_binding_strings = mock.Mock(return_value={})
+        widget._send_jog = mock.Mock(return_value=True)
+
+        with mock.patch.object(main_dock.time, "time", return_value=100.13):
+            widget._controller_tick()
+
+        widget._send_jog.assert_called_once_with(
+            x=0.0,
+            y=0.0,
+            z=0.30000000000000004,
+            feed=1800.0,
+            source="Controller",
+            log=False,
+        )
+
+    def test_controller_tick_fast_xy_still_uses_fast_interval(self):
+        main_dock = _load_main_dock_module()
+        state = types.SimpleNamespace(
+            name="Pad",
+            x=1.0,
+            y=0.0,
+            z=0.0,
+            speed_label="fast",
+            speed_multiplier=3.0,
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_enable = _DummyCheckBox(True)
+        widget._controller = types.SimpleNamespace(
+            is_connected=lambda: True,
+            poll_mapped=mock.Mock(return_value=state),
+            error="",
+        )
+        widget._controller_feed = _DummySpin(600.0)
+        widget._controller_deadzone = _DummySpin(0.2)
+        widget._controller_z_step = _DummySpin(0.1)
+        widget._controller_xy_step = _DummySpin(0.5)
+        widget._controller_last_jog_at = 100.0
+        widget._controller_was_active = False
+        widget._controller_manual_xyz_active = False
+        widget._controller_status = _DummyWidget()
+        widget._controller_binding_strings = mock.Mock(return_value={})
+        widget._send_jog = mock.Mock(return_value=True)
+
+        with mock.patch.object(main_dock.time, "time", return_value=100.13):
+            widget._controller_tick()
+
+        widget._send_jog.assert_not_called()
 
 
 if __name__ == "__main__":
