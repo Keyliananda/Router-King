@@ -569,6 +569,9 @@ class TestMainDock(unittest.TestCase):
         widget._limits = {"X": 400.0, "Y": 400.0, "Z": 60.0}
         widget._controller_manual_xyz_active = True
         widget._manual_xyz_prepare_mpos = {"x": -297.0, "y": -377.0, "z": -3.0}
+        widget._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+        widget._manual_xyz_work_origin_fallback = True
+        widget._controller_guard_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
         widget._append_console = mock.Mock()
         widget._request_status = mock.Mock()
         profile = {
@@ -583,6 +586,32 @@ class TestMainDock(unittest.TestCase):
 
         self.assertFalse(negative_x)
         self.assertFalse(negative_y)
+        self.assertTrue(positive_x)
+        self.assertEqual(sender.commands, ["$J=G91 X0.500 F600"])
+
+    def test_manual_xyz_fallback_uses_work_envelope_when_machine_position_starts_at_zero(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "0.000,0.000,0.000"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 400.0, "Y": 400.0, "Z": 60.0}
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+        widget._manual_xyz_work_origin_fallback = True
+        widget._controller_guard_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        profile = {
+            "machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]},
+            "settings": {"$23": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            negative_x = widget._send_jog(x=-0.5, feed=600, source="test")
+            positive_x = widget._send_jog(x=0.5, feed=600, source="test")
+
+        self.assertFalse(negative_x)
         self.assertTrue(positive_x)
         self.assertEqual(sender.commands, ["$J=G91 X0.500 F600"])
 

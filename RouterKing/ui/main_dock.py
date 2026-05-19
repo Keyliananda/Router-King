@@ -867,6 +867,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._manual_xyz_preview_origin_wpos = None
         self._manual_xyz_prepare_mpos = None
         self._manual_xyz_prepare_wpos = None
+        self._manual_xyz_work_origin_fallback = False
         self._manual_xyz_preview_last_at = 0.0
         self._gcode_last_validation = None
         self._status_tick = 0
@@ -4649,6 +4650,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             delta = requested[axis]
             if abs(delta) < 0.0005:
                 continue
+            if axis in ("x", "y") and getattr(self, "_manual_xyz_work_origin_fallback", False):
+                continue
             axis_limits = limits.get(axis)
             current = position.get(axis)
             if axis_limits is None or current is None:
@@ -4671,6 +4674,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         work_limits = self._milling_work_limits_for_jog(
             self._work_limits_for_jog(limits, position, work_position),
             work_position,
+            limits,
         )
         if work_position and work_limits:
             for axis in ("x", "y"):
@@ -4880,6 +4884,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         guard_position = getattr(self, "_controller_guard_wpos", None)
         if guard_position:
             return dict(guard_position)
+        if getattr(self, "_manual_xyz_work_origin_fallback", False):
+            fallback = getattr(self, "_manual_xyz_prepare_wpos", None)
+            if fallback:
+                self._controller_guard_wpos = dict(fallback)
+                return dict(fallback)
         status = self._sender.get_status() or {}
         position = self._status_work_position(status)
         if position is None:
@@ -4936,7 +4945,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         except (TypeError, ValueError, KeyError, IndexError):
             return None
 
-    def _milling_work_limits_for_jog(self, work_limits, work_position=None):
+    def _milling_work_limits_for_jog(self, work_limits, work_position=None, machine_limits=None):
         if not work_limits:
             return None
         adjusted = dict(work_limits)
@@ -4958,6 +4967,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 continue
             if low < high <= 0.0 and current >= 0.0:
                 adjusted[axis] = (0.0, high - low)
+        if getattr(self, "_manual_xyz_work_origin_fallback", False):
+            for axis in ("x", "y"):
+                axis_limits = (machine_limits or {}).get(axis)
+                if axis_limits is None:
+                    continue
+                try:
+                    travel = abs(float(axis_limits[1]) - float(axis_limits[0]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if travel > 0.0:
+                    adjusted[axis] = (0.0, travel)
         return adjusted
 
     def _manual_xy_origin_limits_for_jog(self):
@@ -5034,7 +5054,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             force=True,
         )
         status = self._sender.get_status() or {}
-        self._update_controller_guard_position(status)
+        self._invalidate_controller_guard_position()
         self._prepare_manual_xyz_preview_baseline(status)
         self._update_manual_xyz_preview_position(status, force=True)
         _controller_log(f"manual xyz prepared: no automatic move; mpos={status.get('MPos', 'unknown')}")
@@ -5052,6 +5072,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._manual_xyz_preview_origin_wpos = None
         self._manual_xyz_prepare_mpos = None
         self._manual_xyz_prepare_wpos = None
+        self._manual_xyz_work_origin_fallback = False
         if self._controller_enable.isChecked():
             self._controller_enable.setChecked(False)
         else:
@@ -5063,9 +5084,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _prepare_manual_xyz_preview_baseline(self, status):
         live = self._extract_live_xyz(status or {})
         if live is None:
+            mpos = grbl_parse_xyz_value((status or {}).get("MPos"))
+            if mpos is not None:
+                self._manual_xyz_prepare_mpos = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
+                self._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+                self._controller_guard_wpos = dict(self._manual_xyz_prepare_wpos)
+                self._manual_xyz_work_origin_fallback = True
             return
         self._manual_xyz_prepare_mpos = {axis: float(live["mpos"][axis]) for axis in ("x", "y", "z")}
         self._manual_xyz_prepare_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
+        self._manual_xyz_work_origin_fallback = False
         self._manual_xyz_preview_origin_wpos = self._current_preview_cut_start_reference(live["wpos"])
 
     def _current_preview_cut_start_reference(self, fallback_wpos):
