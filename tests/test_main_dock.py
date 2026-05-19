@@ -397,7 +397,14 @@ class TestMainDock(unittest.TestCase):
 
     def test_send_jog_builds_guarded_grbl_jog_command(self):
         main_dock = _load_main_dock_module()
-        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-150.000,-190.000,-25.000"})
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-150.000,-190.000,-25.000",
+                "WPos": "-150.000,-190.000,-25.000",
+                "WCO": "0.000,0.000,0.000",
+            }
+        )
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._sender = sender
         widget._explore_active = False
@@ -409,7 +416,14 @@ class TestMainDock(unittest.TestCase):
 
     def test_send_jog_blocks_machine_limit_overrun(self):
         main_dock = _load_main_dock_module()
-        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-0.000,-190.000,-25.000"})
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-0.000,-190.000,-25.000",
+                "WPos": "-0.000,-190.000,-25.000",
+                "WCO": "0.000,0.000,0.000",
+            }
+        )
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._sender = sender
         widget._explore_active = False
@@ -448,7 +462,14 @@ class TestMainDock(unittest.TestCase):
 
     def test_send_jog_uses_margin_before_machine_limit(self):
         main_dock = _load_main_dock_module()
-        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-297.500,-190.000,-25.000"})
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-297.500,-190.000,-25.000",
+                "WPos": "-297.500,-190.000,-25.000",
+                "WCO": "0.000,0.000,0.000",
+            }
+        )
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._sender = sender
         widget._explore_active = False
@@ -683,6 +704,50 @@ class TestMainDock(unittest.TestCase):
         self.assertFalse(negative_x)
         self.assertTrue(positive_x)
         self.assertEqual(sender.commands, ["$J=G91 X0.500 F600"])
+
+    def test_jog_without_explicit_wpos_uses_current_mpos_as_work_origin(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-297.000,-377.000,-3.000"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 400.0, "Y": 400.0, "Z": 60.0}
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        profile = {
+            "machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]},
+            "settings": {"$23": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            negative_x = widget._send_jog(x=-1.0, feed=600, source="test")
+            positive_x = widget._send_jog(x=1.0, feed=600, source="test")
+
+        self.assertFalse(negative_x)
+        self.assertTrue(positive_x)
+        self.assertEqual(sender.commands, ["$J=G91 X1.000 F600"])
+
+    def test_jog_wco_without_wpos_still_uses_work_origin_fallback(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={"state": "Idle", "MPos": "-298.000,-377.000,-3.000", "WCO": "0.000,0.000,1.000"}
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 400.0, "Y": 400.0, "Z": 60.0}
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        profile = {
+            "machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]},
+            "settings": {"$23": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            result = widget._send_jog(x=-1.0, feed=600, source="test")
+
+        self.assertFalse(result)
+        self.assertEqual(sender.commands, [])
 
     def test_travel_test_uses_dynamic_machine_limit_interval(self):
         main_dock = _load_main_dock_module()
