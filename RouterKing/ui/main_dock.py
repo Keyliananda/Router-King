@@ -4790,20 +4790,39 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             except Exception:
                 profile = {}
         profile_values = self._machine_limits_from_profile(profile)
-        values = self._machine_limits_from_current_values(profile_values)
+        prefer_profile_limits = bool(
+            isinstance(profile, dict)
+            and (
+                profile.get("prefer_profile_limits")
+                or profile.get("machine_profile_authoritative")
+            )
+        )
+        values = self._machine_limits_from_current_values(
+            profile_values,
+            prefer_reference_when_smaller=prefer_profile_limits,
+        )
         merged = dict(profile_values or {})
         merged.update(values)
         if require_complete and any(axis not in merged for axis in ("x", "y", "z")):
             return None
         return merged or None
 
-    def _machine_limits_from_current_values(self, reference_values=None):
+    def _machine_limits_from_current_values(self, reference_values=None, *, prefer_reference_when_smaller=False):
         values = {}
         for axis in ("X", "Y", "Z"):
             value = getattr(self, "_limits", {}).get(axis)
             limits = self._machine_limits_from_travel(value)
             if limits is not None:
                 axis_key = axis.lower()
+                reference = (reference_values or {}).get(axis_key)
+                if prefer_reference_when_smaller and reference is not None:
+                    try:
+                        live_travel = abs(float(limits[1]) - float(limits[0]))
+                        reference_travel = abs(float(reference[1]) - float(reference[0]))
+                    except (TypeError, ValueError, IndexError):
+                        live_travel = reference_travel = 0.0
+                    if 0.0 < live_travel < reference_travel:
+                        continue
                 values[axis_key] = self._machine_limits_oriented_like(limits, (reference_values or {}).get(axis_key))
         return values
 

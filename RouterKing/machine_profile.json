@@ -9,11 +9,6 @@
     "spindle_supported": true
   },
   "created_at": "2026-03-15T17:39:46.985227+00:00",
-  "home_position_mpos": {
-    "x": -215.2,
-    "y": -295.675,
-    "z": -48.144
-  },
   "homing": {
     "dir_mask": 3,
     "directions": {
@@ -38,17 +33,13 @@
       0.0
     ]
   },
-  "machine_position": {
-    "x": -215.2,
-    "y": -295.675,
-    "z": -48.144
-  },
   "max_feeds_mm_min": {
     "x": 2000.0,
     "y": 2000.0,
     "z": 500.0
   },
   "model": "FoxAlien Masuter Pro",
+  "prefer_profile_limits": true,
   "probe": {
     "block_height": 15.0,
     "probe_feed": 50.0,
@@ -90,14 +81,6 @@
     "$5": "0",
     "$6": "0"
   },
-  "status": {
-    "Bf": "35,254",
-    "FS": "0,0",
-    "MPos": "-215.200,-295.675,-48.144",
-    "WCO": "0.000,0.000,1.000",
-    "WCOSource": "$#.G54",
-    "state": "Idle"
-  },
   "steps_per_mm": {
     "x": 80.0,
     "y": 80.0,
@@ -113,10 +96,5 @@
     "x": 0.0,
     "y": 0.0,
     "z": 1.0
-  },
-  "work_position": {
-    "x": 0.0,
-    "y": 0.0,
-    "z": 0.0
   }
 }

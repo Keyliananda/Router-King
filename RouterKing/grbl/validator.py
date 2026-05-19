@@ -204,7 +204,15 @@ def merge_machine_profile(
     if settings_map:
         merged["settings"] = settings_map
     if status_map:
-        merged["status"] = status_map
+        persistent_status = {
+            key: value
+            for key, value in status_map.items()
+            if key not in {"MPos", "WPos", "Bf", "FS"}
+        }
+        if persistent_status:
+            merged["status"] = persistent_status
+        else:
+            merged.pop("status", None)
 
     work_envelope = {
         "x": abs(_first_number(settings_map.get("$130"), _nested_number(merged, "work_envelope_mm", "x"), 0.0)),
@@ -249,11 +257,8 @@ def merge_machine_profile(
             "y": mpos["y"] - wpos["y"],
             "z": mpos["z"] - wpos["z"],
         }
-    if mpos is not None:
-        merged["machine_position"] = mpos
-        merged["home_position_mpos"] = mpos
-    if wpos is not None:
-        merged["work_position"] = wpos
+    for runtime_key in ("machine_position", "home_position_mpos", "work_position"):
+        merged.pop(runtime_key, None)
     if wco is not None:
         merged["work_offset"] = wco
 

@@ -90,6 +90,30 @@ class TestGrblValidator(unittest.TestCase):
         self.assertEqual(profile["homing"]["directions"]["y"], "negative")
         self.assertEqual(profile["homing"]["directions"]["z"], "positive")
 
+    def test_merge_machine_profile_does_not_persist_runtime_positions(self):
+        profile = merge_machine_profile(
+            {
+                "home_position_mpos": {"x": -215.2, "y": -295.675, "z": -48.144},
+                "machine_position": {"x": -215.2, "y": -295.675, "z": -48.144},
+                "work_position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "settings": {"$130": "400", "$131": "400", "$132": "60"},
+            },
+            settings={"$22": "1", "$23": "3", "$27": "3", "$130": "400", "$131": "400", "$132": "60"},
+            status={
+                "state": "Idle",
+                "MPos": "-297.000,-377.000,-3.000",
+                "WPos": "0.000,0.000,0.000",
+                "WCO": "-297.000,-377.000,-3.000",
+                "FS": "0,0",
+            },
+        )
+
+        self.assertNotIn("home_position_mpos", profile)
+        self.assertNotIn("machine_position", profile)
+        self.assertNotIn("work_position", profile)
+        self.assertEqual(profile["status"], {"state": "Idle", "WCO": "-297.000,-377.000,-3.000"})
+        self.assertEqual(profile["work_offset"], {"x": -297.0, "y": -377.0, "z": -3.0})
+
     def test_resolve_machine_limits_prefers_current_settings_over_stale_profile_limits(self):
         profile = {
             "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]},
