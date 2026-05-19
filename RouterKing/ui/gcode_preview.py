@@ -70,6 +70,50 @@ class PreviewSnapMatch:
     distance: float
 
 
+@dataclass(frozen=True)
+class PreviewTransform:
+    """Machine-space to preview-world transform shared by every preview layer."""
+
+    swap_xy: bool = False
+    flip_x: bool = False
+    flip_y: bool = False
+    rotation_z: int = 0
+
+    def point(self, point: PreviewPoint) -> PreviewPoint:
+        x_value = float(point.x)
+        y_value = float(point.y)
+        if self.swap_xy:
+            x_value, y_value = y_value, x_value
+        if self.flip_x:
+            x_value = -x_value
+        if self.flip_y:
+            y_value = -y_value
+        rotation = _normalize_right_angle(self.rotation_z)
+        if rotation == 90:
+            x_value, y_value = -y_value, x_value
+        elif rotation == 180:
+            x_value, y_value = -x_value, -y_value
+        elif rotation == 270:
+            x_value, y_value = y_value, -x_value
+        return PreviewPoint(x_value, y_value, float(point.z))
+
+    def segment(self, segment: PreviewSegment) -> PreviewSegment:
+        return PreviewSegment(
+            start=self.point(segment.start),
+            end=self.point(segment.end),
+            rapid=segment.rapid,
+            line_no=segment.line_no,
+            motion=segment.motion,
+        )
+
+    def path(self, path: PreviewPath) -> PreviewPath:
+        segments = tuple(self.segment(segment) for segment in getattr(path, "segments", ()) or ())
+        return PreviewPath(segments=segments, bounds=_bounds_for_segments(segments))
+
+    def project(self, point: PreviewPoint, projection: str = "top") -> tuple[float, float]:
+        return project_point(self.point(point), projection)
+
+
 def parse_gcode_preview(gcode: str | Iterable[str], arc_step_radians: float = math.pi / 24.0) -> PreviewPath:
     """Parse G0/G1/G2/G3 moves into 3D preview segments.
 
@@ -165,9 +209,32 @@ def preview_items(path: PreviewPath, projection: str = "top") -> list[dict]:
     return items
 
 
+def _normalize_right_angle(rotation_z: int | float | str | None) -> int:
+    try:
+        rotation = int(float(rotation_z)) % 360
+    except (TypeError, ValueError):
+        return 0
+    return rotation if rotation in {0, 90, 180, 270} else 0
+
+
+def _bounds_for_segments(segments: Sequence[PreviewSegment]) -> PreviewBounds | None:
+    points = [point for segment in segments for point in (segment.start, segment.end)]
+    if not points:
+        return None
+    return PreviewBounds(
+        min_x=min(point.x for point in points),
+        min_y=min(point.y for point in points),
+        min_z=min(point.z for point in points),
+        max_x=max(point.x for point in points),
+        max_y=max(point.y for point in points),
+        max_z=max(point.z for point in points),
+    )
+
+
 def preview_snap_candidates(
     path: PreviewPath,
     projection: str = "top",
+    transform: PreviewTransform | None = None,
 ) -> tuple[PreviewSnapCandidate, ...]:
     """Return projected snap points derived from preview segment topology.
 
@@ -180,6 +247,7 @@ def preview_snap_candidates(
             builders,
             segment.start,
             projection,
+            transform,
             "segment_start",
             index,
             segment.line_no,
@@ -188,6 +256,7 @@ def preview_snap_candidates(
             builders,
             segment.end,
             projection,
+            transform,
             "segment_end",
             index,
             segment.line_no,
@@ -212,6 +281,7 @@ def preview_snap_candidates(
                 builders,
                 current.start,
                 projection,
+                transform,
                 "direction_change",
                 current_index,
                 current.line_no,
@@ -313,11 +383,12 @@ def _add_snap_candidate(
     builders: dict[tuple[float, float, float, float, float], _SnapCandidateBuilder],
     point: PreviewPoint,
     projection: str,
+    transform: PreviewTransform | None,
     reason: str,
     segment_index: int,
     line_no: int,
 ) -> None:
-    projected = project_point(point, projection)
+    projected = transform.project(point, projection) if transform is not None else project_point(point, projection)
     key = _snap_candidate_key(point, projected)
     builder = builders.get(key)
     if builder is None:

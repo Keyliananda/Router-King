@@ -51,6 +51,7 @@ try:
         PreviewPoint,
         PreviewSnapCandidate,
         PreviewSegment,
+        PreviewTransform,
         nearest_preview_snap,
         parse_gcode_preview,
         project_point,
@@ -82,6 +83,7 @@ except ImportError:
         PreviewPoint,
         PreviewSnapCandidate,
         PreviewSegment,
+        PreviewTransform,
         nearest_preview_snap,
         parse_gcode_preview,
         project_point,
@@ -5236,13 +5238,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             if mpos is not None:
                 self._manual_xyz_prepare_mpos = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
                 self._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+                self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
                 self._controller_guard_wpos = dict(self._manual_xyz_prepare_wpos)
                 self._manual_xyz_work_origin_fallback = True
             return
         self._manual_xyz_prepare_mpos = {axis: float(live["mpos"][axis]) for axis in ("x", "y", "z")}
         self._manual_xyz_prepare_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
         self._manual_xyz_work_origin_fallback = False
-        self._manual_xyz_preview_origin_wpos = self._current_preview_cut_start_reference(live["wpos"])
+        self._manual_xyz_preview_origin_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
 
     def _current_preview_cut_start_reference(self, fallback_wpos):
         try:
@@ -6542,6 +6545,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return 0
         return rotation if rotation in {0, 90, 180, 270} else 0
 
+    def _preview_transform(self, rotation_z=None):
+        return PreviewTransform(
+            swap_xy=_PREVIEW_MACHINE_SWAP_XY,
+            flip_x=_PREVIEW_MACHINE_FLIP_X,
+            flip_y=_PREVIEW_MACHINE_FLIP_Y,
+            rotation_z=self._normalize_preview_rotation(
+                self._preview_view_rotation_degrees() if rotation_z is None else rotation_z
+            ),
+        )
+
     def _render_gcode_preview(self, scene, view, projection, rotation_z=None):
         rotation_z = self._normalize_preview_rotation(
             self._preview_view_rotation_degrees() if rotation_z is None else rotation_z
@@ -6549,18 +6562,19 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         text = self._gcode_edit.toPlainText()
         source_path = self._preview_path_from_current_state(text)
         path = self._preview_path_for_display(source_path)
-        display_path = self._preview_display_path(path, rotation_z=rotation_z)
+        transform = self._preview_transform(rotation_z)
+        display_path = transform.path(path)
         scene.clear()
         if hasattr(view, "set_projection_name"):
             view.set_projection_name(projection)
         if hasattr(view, "set_rotation_z"):
             view.set_rotation_z(rotation_z)
         bounds = render_preview_scene(scene, display_path, projection=projection, clear=False)
-        self._render_preview_tool_area_overlay(scene, projection, path, rotation_z=rotation_z)
-        candidates = self._preview_snap_candidates(path, projection, rotation_z=rotation_z)
+        self._render_preview_tool_area_overlay(scene, projection, path, transform=transform)
+        candidates = self._preview_snap_candidates(path, projection, transform=transform)
         if hasattr(view, "set_snap_candidates"):
             if getattr(self, "_template_fit_pick_active", False):
-                view.set_snap_candidates(self._template_fit_pick_candidates(projection, rotation_z=rotation_z))
+                view.set_snap_candidates(self._template_fit_pick_candidates(projection, transform=transform))
             else:
                 view.set_snap_candidates(candidates)
         scene_bounds = scene.itemsBoundingRect()
@@ -6590,7 +6604,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return path
         first_cut = segments[first_cut_index].start
         display_segments = list(segments[first_cut_index:])
-        if not self._xyz_points_close(home, first_cut, tolerance=0.001):
+        if not self._xy_points_close(home, first_cut, tolerance=0.001):
             display_segments.insert(
                 0,
                 PreviewSegment(
@@ -6621,6 +6635,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             abs(float(left.x) - float(right.x)) <= tolerance
             and abs(float(left.y) - float(right.y)) <= tolerance
             and abs(float(left.z) - float(right.z)) <= tolerance
+        )
+
+    def _xy_points_close(self, left, right, tolerance=0.001):
+        return (
+            abs(float(left.x) - float(right.x)) <= tolerance
+            and abs(float(left.y) - float(right.y)) <= tolerance
         )
 
     def _manual_xyz_preview_template_spec(self):
@@ -6670,73 +6690,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return PreviewPoint(float(spec.start_x), float(spec.start_y), float(spec.start_z))
 
     def _preview_display_point(self, point, rotation_z=None):
-        x_value = float(point.x)
-        y_value = float(point.y)
-        if _PREVIEW_MACHINE_SWAP_XY:
-            x_value, y_value = y_value, x_value
-        if _PREVIEW_MACHINE_FLIP_X:
-            x_value = -x_value
-        if _PREVIEW_MACHINE_FLIP_Y:
-            y_value = -y_value
-        rotation_z = self._normalize_preview_rotation(rotation_z)
-        if rotation_z == 90:
-            x_value, y_value = -y_value, x_value
-        elif rotation_z == 180:
-            x_value, y_value = -x_value, -y_value
-        elif rotation_z == 270:
-            x_value, y_value = y_value, -x_value
-        return PreviewPoint(x_value, y_value, float(point.z))
+        return self._preview_transform(rotation_z).point(point)
 
     def _preview_project_point(self, point, projection, rotation_z=None):
-        return project_point(self._preview_display_point(point, rotation_z=rotation_z), projection)
+        return self._preview_transform(rotation_z).project(point, projection)
 
     def _preview_display_path(self, path, rotation_z=None):
-        segments = tuple(
-            PreviewSegment(
-                start=self._preview_display_point(segment.start, rotation_z=rotation_z),
-                end=self._preview_display_point(segment.end, rotation_z=rotation_z),
-                rapid=segment.rapid,
-                line_no=segment.line_no,
-                motion=segment.motion,
-            )
-            for segment in getattr(path, "segments", ()) or ()
-        )
-        bounds = None
-        if getattr(path, "bounds", None) is not None and segments:
-            xs = [point.x for segment in segments for point in (segment.start, segment.end)]
-            ys = [point.y for segment in segments for point in (segment.start, segment.end)]
-            zs = [point.z for segment in segments for point in (segment.start, segment.end)]
-            bounds = type(path.bounds)(
-                min_x=min(xs),
-                min_y=min(ys),
-                min_z=min(zs),
-                max_x=max(xs),
-                max_y=max(ys),
-                max_z=max(zs),
-        )
-        return PreviewPath(segments=segments, bounds=bounds)
+        return self._preview_transform(rotation_z).path(path)
 
-    def _preview_snap_candidates(self, path, projection, rotation_z=None):
-        candidates = []
-        for candidate in preview_snap_candidates(path, projection):
-            candidates.append(
-                PreviewSnapCandidate(
-                    point=candidate.point,
-                    projected=self._preview_project_point(candidate.point, projection, rotation_z=rotation_z),
-                    reasons=candidate.reasons,
-                    segment_indices=candidate.segment_indices,
-                    line_nos=candidate.line_nos,
-                )
-            )
-        return tuple(candidates)
+    def _preview_snap_candidates(self, path, projection, rotation_z=None, transform=None):
+        transform = transform or self._preview_transform(rotation_z)
+        return preview_snap_candidates(path, projection, transform=transform)
 
-    def _render_preview_tool_area_overlay(self, scene, projection, path, rotation_z=None):
+    def _render_preview_tool_area_overlay(self, scene, projection, path, rotation_z=None, transform=None):
         if not self._preview_tool_area_enabled():
             return
-        self._add_preview_machine_area(scene, projection, rotation_z=rotation_z)
-        self._add_preview_template_fit_candidates(scene, projection, rotation_z=rotation_z)
-        self._add_preview_manual_tool_dummy(scene, projection, rotation_z=rotation_z)
-        self._add_preview_reference_markers(scene, projection, path, rotation_z=rotation_z)
+        transform = transform or self._preview_transform(rotation_z)
+        self._add_preview_machine_area(scene, projection, transform=transform)
+        self._add_preview_template_fit_candidates(scene, projection, transform=transform)
+        self._add_preview_manual_tool_dummy(scene, projection, transform=transform)
+        self._add_preview_reference_markers(scene, projection, path, transform=transform)
 
     def _preview_tool_area_enabled(self):
         checkbox = getattr(self, "_preview_tool_area_check", None)
@@ -6747,10 +6720,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         except Exception:
             return True
 
-    def _add_preview_machine_area(self, scene, projection, rotation_z=None):
+    def _add_preview_machine_area(self, scene, projection, rotation_z=None, transform=None):
         area = self._preview_work_area()
         if area is None:
             return
+        transform = transform or self._preview_transform(rotation_z)
         qt_gui = QtGui
         top_pen = qt_gui.QPen(qt_gui.QColor(80, 220, 130, 185), 0)
         bottom_pen = qt_gui.QPen(qt_gui.QColor(80, 180, 110, 70), 0)
@@ -6772,37 +6746,38 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         ]
         for start, end in zip(top, top[1:] + top[:1]):
             scene.addLine(
-                *self._preview_project_point(start, projection, rotation_z=rotation_z),
-                *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                *transform.project(start, projection),
+                *transform.project(end, projection),
                 top_pen,
             )
         for start, end in zip(bottom, bottom[1:] + bottom[:1]):
             scene.addLine(
-                *self._preview_project_point(start, projection, rotation_z=rotation_z),
-                *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                *transform.project(start, projection),
+                *transform.project(end, projection),
                 bottom_pen,
             )
         for start, end in zip(bottom, top):
             scene.addLine(
-                *self._preview_project_point(start, projection, rotation_z=rotation_z),
-                *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                *transform.project(start, projection),
+                *transform.project(end, projection),
                 side_pen,
             )
         corner_pen = qt_gui.QPen(qt_gui.QColor(80, 220, 130, 210), 0)
         corner_brush = qt_gui.QBrush(qt_gui.QColor(80, 220, 130, 55))
         radius = max(self._preview_marker_radius() * 0.45, 2.0)
         for corner in top:
-            x_val, y_val = self._preview_project_point(corner, projection, rotation_z=rotation_z)
+            x_val, y_val = transform.project(corner, projection)
             item = scene.addEllipse(x_val - radius, y_val - radius, radius * 2.0, radius * 2.0, corner_pen, corner_brush)
             try:
                 item.setZValue(1000)
             except Exception:
                 pass
 
-    def _add_preview_template_fit_candidates(self, scene, projection, rotation_z=None):
+    def _add_preview_template_fit_candidates(self, scene, projection, rotation_z=None, transform=None):
         candidates = getattr(self, "_template_fit_candidates", None) or []
         if not candidates:
             return
+        transform = transform or self._preview_transform(rotation_z)
         selected = getattr(self, "_template_fit_index", None)
         z_value = self._preview_overlay_z()
         qt_gui = QtGui
@@ -6821,12 +6796,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             ]
             for start, end in zip(corners, corners[1:] + corners[:1]):
                 scene.addLine(
-                    *self._preview_project_point(start, projection, rotation_z=rotation_z),
-                    *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                    *transform.project(start, projection),
+                    *transform.project(end, projection),
                     pen,
                 )
 
-    def _add_preview_manual_tool_dummy(self, scene, projection, rotation_z=None):
+    def _add_preview_manual_tool_dummy(self, scene, projection, rotation_z=None, transform=None):
         start = (
             getattr(self, "_manual_xyz_preview_wpos", None)
             if getattr(self, "_controller_manual_xyz_active", False)
@@ -6836,8 +6811,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             start = getattr(self, "_gcode_manual_start_wpos", None)
         if not start:
             return
+        transform = transform or self._preview_transform(rotation_z)
         point = PreviewPoint(float(start["x"]), float(start["y"]), float(start.get("z", 0.0)))
-        x_val, y_val = self._preview_project_point(point, projection, rotation_z=rotation_z)
+        x_val, y_val = transform.project(point, projection)
         radius = self._preview_tool_radius()
         qt_gui = QtGui
         pen = qt_gui.QPen(qt_gui.QColor(255, 210, 0), 0)
@@ -6847,7 +6823,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         scene.addLine(x_val - cross, y_val, x_val + cross, y_val, pen)
         scene.addLine(x_val, y_val - cross, x_val, y_val + cross, pen)
 
-    def _add_preview_reference_markers(self, scene, projection, path, rotation_z=None):
+    def _add_preview_reference_markers(self, scene, projection, path, rotation_z=None, transform=None):
+        transform = transform or self._preview_transform(rotation_z)
         home_point = self._preview_home_point()
         if home_point is not None:
             self._add_preview_marker(
@@ -6857,7 +6834,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "HOME",
                 QtGui.QColor(180, 120, 255, 235),
                 square=True,
-                rotation_z=rotation_z,
+                transform=transform,
             )
         cut_start = self._preview_cut_start_point(path)
         if cut_start is not None:
@@ -6868,11 +6845,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "CUT START",
                 QtGui.QColor(255, 70, 70, 240),
                 square=False,
-                rotation_z=rotation_z,
+                transform=transform,
             )
 
-    def _add_preview_marker(self, scene, projection, point, label, color, *, square=False, rotation_z=None):
-        x_val, y_val = self._preview_project_point(point, projection, rotation_z=rotation_z)
+    def _add_preview_marker(self, scene, projection, point, label, color, *, square=False, rotation_z=None, transform=None):
+        transform = transform or self._preview_transform(rotation_z)
+        x_val, y_val = transform.project(point, projection)
         radius = self._preview_marker_radius()
         pen = QtGui.QPen(color, 0)
         brush = QtGui.QBrush(QtGui.QColor(color.red(), color.green(), color.blue(), 65))
@@ -7159,10 +7137,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         self._update_job_controls()
 
-    def _template_fit_pick_candidates(self, projection, rotation_z=None):
+    def _template_fit_pick_candidates(self, projection, rotation_z=None, transform=None):
         area = self._preview_work_area()
         if area is None:
             return ()
+        transform = transform or self._preview_transform(rotation_z)
         z_value = area.get("z_max", self._preview_overlay_z())
         points = (
             PreviewPoint(area["x_min"], area["y_min"], z_value),
@@ -7173,7 +7152,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return tuple(
             PreviewSnapCandidate(
                 point=point,
-                projected=self._preview_project_point(point, projection, rotation_z=rotation_z),
+                projected=transform.project(point, projection),
                 reasons=("work_area_corner",),
                 segment_indices=(),
                 line_nos=(),

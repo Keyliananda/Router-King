@@ -887,8 +887,33 @@ class TestMainDock(unittest.TestCase):
         widget._update_manual_xyz_preview_position(prepare_status, force=True)
         widget._update_manual_xyz_preview_position(moved_status, force=True)
 
-        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 80.0, "y": 100.0, "z": 6.0})
-        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 85.0, "y": 102.0, "z": 6.0})
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 10.0, "y": 10.0, "z": 1.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 15.0, "y": 12.0, "z": 1.0})
+
+    def test_manual_xyz_preview_delta_is_one_to_one_machine_mm(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = None
+        widget._manual_xyz_preview_last_at = 0.0
+        widget._schedule_preview_update = mock.Mock()
+        widget._gcode_edit = _DummyPlainTextEdit("G90\nG1 X0 Y0 Z0")
+        widget._last_template_spec = None
+        prepare_status = {
+            "MPos": "-297.000,-377.000,-3.000",
+            "WPos": "0.000,0.000,0.000",
+            "WCO": "-297.000,-377.000,-3.000",
+        }
+        moved_status = {
+            "MPos": "-287.000,-372.000,-3.000",
+            "WPos": "10.000,5.000,0.000",
+            "WCO": "-297.000,-377.000,-3.000",
+        }
+
+        widget._prepare_manual_xyz_preview_baseline(prepare_status)
+        widget._update_manual_xyz_preview_position(moved_status, force=True)
+
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 10.0, "y": 5.0, "z": 0.0})
 
     def test_manual_xyz_preview_moves_template_path_to_live_cut_start(self):
         main_dock = _load_main_dock_module()
@@ -1424,6 +1449,26 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(area["y_max"] - area["y_min"], 380.0)
         self.assertEqual(area["z_max"] - area["z_min"], 50.0)
 
+    def test_preview_work_area_keeps_foxalien_profile_dimensions_with_live_wco(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status={"WCO": "-397.000,-397.000,-3.000"})
+        widget._gcode_manual_start_wco = None
+        profile = {
+            "machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]},
+            "settings": {"$23": "3", "$27": "3"},
+            "prefer_profile_limits": True,
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            area = widget._preview_work_area()
+            home = widget._preview_home_point()
+
+        self.assertEqual(area["x_max"] - area["x_min"], 400.0)
+        self.assertEqual(area["y_max"] - area["y_min"], 400.0)
+        self.assertEqual(area["z_max"] - area["z_min"], 60.0)
+        self.assertEqual((home.x, home.y, home.z), (0.0, 0.0, 0.0))
+
     def test_preview_work_area_derives_wco_from_mpos_and_wpos_when_status_lacks_wco(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -1545,6 +1590,17 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual((display_path.segments[0].end.x, display_path.segments[0].end.y), (100.0, 100.0))
         self.assertFalse(display_path.segments[1].rapid)
 
+    def test_preview_display_path_does_not_add_home_lead_when_xy_start_matches_home(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        path = main_dock.parse_gcode_preview("G90\nG0 X10 Y20 Z6\nG1 Z-1 F300\nG1 X15 Y20 F400")
+        widget._preview_home_point = mock.Mock(return_value=main_dock.PreviewPoint(10.0, 20.0, 0.0))
+
+        display_path = widget._preview_path_for_display(path)
+
+        self.assertEqual(len(display_path.segments), 2)
+        self.assertFalse(display_path.segments[0].rapid)
+
     def test_machine_profile_from_controls_persists_foxalien_travel_settings(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -1578,6 +1634,27 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(projected, (4.0, -2.0))
         rotated = widget._preview_display_point(point, rotation_z=90)
         self.assertEqual((rotated.x, rotated.y, rotated.z), (-2.0, 4.0, -1.0))
+
+    def test_preview_transform_is_shared_by_top_and_iso_projection(self):
+        main_dock = _load_main_dock_module()
+        transform = main_dock.PreviewTransform(swap_xy=True, rotation_z=180)
+        point = main_dock.PreviewPoint(10.0, 40.0, -3.0)
+
+        world = transform.point(point)
+
+        self.assertEqual((world.x, world.y, world.z), (-40.0, -10.0, -3.0))
+        self.assertEqual(transform.project(point, "top"), main_dock.project_point(world, "top"))
+        self.assertEqual(transform.project(point, "iso"), main_dock.project_point(world, "iso"))
+
+    def test_preview_snap_candidates_use_same_transform_as_rendered_iso_path(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        path = main_dock.parse_gcode_preview("G90\nG1 X10 Y5 Z-1")
+
+        display_path = widget._preview_display_path(path, rotation_z=90)
+        candidates = widget._preview_snap_candidates(path, "iso", rotation_z=90)
+
+        self.assertEqual(candidates[-1].projected, main_dock.project_point(display_path.segments[-1].end, "iso"))
 
     def test_preview_snap_candidates_keep_machine_coordinates_but_project_machine_view(self):
         main_dock = _load_main_dock_module()
@@ -1784,6 +1861,8 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual((home.x, home.y), (0.0, 0.0))
         self.assertEqual((cut_start.x, cut_start.y), (0.0, 0.0))
         self.assertEqual(widget._preview_project_point(home, "top"), widget._preview_project_point(cut_start, "top"))
+        self.assertEqual(widget._preview_project_point(home, "iso"), widget._preview_project_point(cut_start, "iso"))
+        self.assertEqual(widget._preview_project_point(home, "iso", rotation_z=180), widget._preview_project_point(cut_start, "iso", rotation_z=180))
 
     def test_preview_home_point_prefers_grbl_homing_mask_over_stale_direction_labels(self):
         main_dock = _load_main_dock_module()
