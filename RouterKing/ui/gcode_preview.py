@@ -141,7 +141,7 @@ def project_point(point: PreviewPoint, projection: str = "top") -> tuple[float, 
     if projection_key == "front":
         return (point.y, -point.z)
     if projection_key == "iso":
-        return (point.x - point.y, (point.x + point.y) * 0.5 - point.z)
+        return (point.x + point.y, (point.x - point.y) * 0.5 - point.z)
     raise ValueError(f"Unsupported projection: {projection!r}")
 
 

@@ -1,6 +1,7 @@
 import unittest
 
 from RouterKing.ui.gcode_preview import (
+    PreviewPoint,
     nearest_preview_snap,
     parse_gcode_preview,
     preview_items,
@@ -76,8 +77,35 @@ class TestGcodePreview(unittest.TestCase):
         self.assertEqual(project_point(point, "top"), (2.0, -4.0))
         self.assertEqual(project_point(point, "side"), (2.0, 1.0))
         self.assertEqual(project_point(point, "front"), (4.0, 1.0))
-        self.assertEqual(project_point(point, "iso"), (-2.0, 4.0))
+        self.assertEqual(project_point(point, "iso"), (6.0, 0.0))
         self.assertEqual(projected_bounds(path, "top"), (0.0, -4.0, 2.0, -0.0))
+
+    def test_iso_projection_keeps_same_y_orientation_as_top_view(self):
+        origin = project_point(PreviewPoint(0.0, 0.0, 0.0), "iso")
+        y_positive = project_point(PreviewPoint(0.0, 10.0, 0.0), "iso")
+
+        self.assertLess(y_positive[1], origin[1])
+
+    def test_iso_projection_uses_top_view_xy_basis(self):
+        origin = PreviewPoint(0.0, 0.0, 0.0)
+        x_positive = PreviewPoint(10.0, 0.0, 0.0)
+        y_positive = PreviewPoint(0.0, 10.0, 0.0)
+        top_origin = project_point(origin, "top")
+        top_x = project_point(x_positive, "top")
+        top_y = project_point(y_positive, "top")
+        iso_origin = project_point(origin, "iso")
+        iso_x = project_point(x_positive, "iso")
+        iso_y = project_point(y_positive, "iso")
+
+        top_x_delta = (top_x[0] - top_origin[0], top_x[1] - top_origin[1])
+        top_y_delta = (top_y[0] - top_origin[0], top_y[1] - top_origin[1])
+        iso_x_delta = (iso_x[0] - iso_origin[0], iso_x[1] - iso_origin[1])
+        iso_y_delta = (iso_y[0] - iso_origin[0], iso_y[1] - iso_origin[1])
+
+        self.assertEqual(top_x_delta, (10.0, -0.0))
+        self.assertEqual(top_y_delta, (0.0, -10.0))
+        self.assertEqual(iso_x_delta, (10.0, 5.0))
+        self.assertEqual(iso_y_delta, (10.0, -5.0))
 
     def test_preview_items_include_projection_color_and_motion_metadata(self):
         path = parse_gcode_preview("G90\nG0 X0 Y0 Z2\nG1 X1 Y0 Z-2")
