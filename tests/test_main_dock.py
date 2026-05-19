@@ -2060,6 +2060,59 @@ class TestMainDock(unittest.TestCase):
 
         widget._send_jog.assert_not_called()
 
+    def test_controller_tick_slows_fast_xy_near_work_edge(self):
+        main_dock = _load_main_dock_module()
+        state = types.SimpleNamespace(
+            name="Pad",
+            x=1.0,
+            y=0.0,
+            z=0.0,
+            speed_label="fast",
+            speed_multiplier=3.0,
+        )
+        sender = _FakeConnectedSender(status={"state": "Jog", "MPos": "-40.000,-200.000,-3.000"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._controller_enable = _DummyCheckBox(True)
+        widget._controller = types.SimpleNamespace(
+            is_connected=lambda: True,
+            poll_mapped=mock.Mock(return_value=state),
+            error="",
+        )
+        widget._controller_feed = _DummySpin(600.0)
+        widget._controller_deadzone = _DummySpin(0.2)
+        widget._controller_z_step = _DummySpin(0.1)
+        widget._controller_xy_step = _DummySpin(0.5)
+        widget._controller_last_jog_at = 100.0
+        widget._controller_was_active = False
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_prepare_mpos = {"x": -400.0, "y": -200.0, "z": -3.0}
+        widget._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+        widget._manual_xyz_work_origin_fallback = True
+        widget._controller_status = _DummyWidget()
+        widget._controller_binding_strings = mock.Mock(return_value={})
+        widget._send_jog = mock.Mock(return_value=True)
+        widget._limits = {"X": 400.0, "Y": 400.0, "Z": 60.0}
+        widget._explore_active = False
+        profile = {
+            "machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]},
+            "settings": {"$23": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            with mock.patch.object(main_dock.time, "time", return_value=100.13):
+                widget._controller_tick()
+
+        widget._send_jog.assert_called_once_with(
+            x=0.5,
+            y=0.0,
+            z=0.0,
+            feed=600.0,
+            source="Controller",
+            log=False,
+        )
+        self.assertIn("[edge]", widget._controller_status.text)
+
 
 if __name__ == "__main__":
     unittest.main()

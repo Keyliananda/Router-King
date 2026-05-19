@@ -120,6 +120,7 @@ def _controller_log(text):
 
 _PREFS = App.ParamGet("User parameter:BaseApp/Preferences/RouterKing")
 _CONTROLLER_LIMIT_MARGIN_MM = 2.0
+_CONTROLLER_FAST_EDGE_SLOWDOWN_MM = 50.0
 _CONTROLLER_FAST_LOOKAHEAD_S = 0.28
 _CONTROLLER_FAST_INTERVAL_S = 0.22
 _CONTROLLER_STEP_INTERVAL_S = 0.12
@@ -953,6 +954,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_guard_mpos = None
         self._controller_guard_wpos = None
         self._controller_guard_mpos_at = 0.0
+        self._controller_guard_last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
         self._controller_manual_xyz_active = False
         self._controller_test_dialog = None
         self._controller_binding_capture_dialog = None
@@ -4962,8 +4964,32 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_guard_mpos = dict(position)
         work_position = self._fallback_work_position_from_status(status or {}) or self._status_work_position(status or {})
         if work_position is not None:
-            self._controller_guard_wpos = dict(work_position)
+            self._controller_guard_wpos = self._merge_controller_guard_wpos(work_position, status or {})
         self._controller_guard_mpos_at = time.time()
+
+    def _merge_controller_guard_wpos(self, work_position, status):
+        current = getattr(self, "_controller_guard_wpos", None)
+        if not current:
+            return dict(work_position)
+        if not self._work_origin_fallback_active(status or {}):
+            return dict(work_position)
+        state = str((status or {}).get("state", "")).strip().lower()
+        if state != "jog":
+            return dict(work_position)
+        last_delta = getattr(self, "_controller_guard_last_delta", {}) or {}
+        merged = dict(work_position)
+        for axis in ("x", "y", "z"):
+            try:
+                delta = float(last_delta.get(axis, 0.0))
+                current_value = float(current[axis])
+                next_value = float(work_position[axis])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if delta > 0.0:
+                merged[axis] = max(current_value, next_value)
+            elif delta < 0.0:
+                merged[axis] = min(current_value, next_value)
+        return merged
 
     def _status_machine_position(self, status):
         mpos = grbl_parse_xyz_value((status or {}).get("MPos"))
@@ -5124,21 +5150,24 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_guard_mpos = None
         self._controller_guard_wpos = None
         self._controller_guard_mpos_at = 0.0
+        self._controller_guard_last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
         self._jog_work_origin_mpos = None
 
     def _advance_controller_guard_position(self, x=0.0, y=0.0, z=0.0):
+        deltas = {"x": float(x), "y": float(y), "z": float(z)}
         position = getattr(self, "_controller_guard_mpos", None)
         if position:
             updated = dict(position)
-            for axis, delta in (("x", x), ("y", y), ("z", z)):
-                updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
+            for axis, delta in deltas.items():
+                updated[axis] = float(updated.get(axis, 0.0)) + delta
             self._controller_guard_mpos = updated
         work_position = getattr(self, "_controller_guard_wpos", None)
-        if work_position and not self._manual_work_fallback_active():
+        if work_position:
             updated = dict(work_position)
-            for axis, delta in (("x", x), ("y", y), ("z", z)):
-                updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
+            for axis, delta in deltas.items():
+                updated[axis] = float(updated.get(axis, 0.0)) + delta
             self._controller_guard_wpos = updated
+        self._controller_guard_last_delta = dict(deltas)
         self._controller_guard_mpos_at = time.time()
 
     def _request_status_for_jog(self):
@@ -5404,7 +5433,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         speed_label = getattr(state, "speed_label", "slow")
         speed_multiplier = max(1.0, float(getattr(state, "speed_multiplier", 1.0) or 1.0))
-        feed = min(5000.0, float(self._controller_feed.value()) * speed_multiplier)
+        base_feed = float(self._controller_feed.value())
+        feed = min(5000.0, base_feed * speed_multiplier)
+        effective_speed_label = speed_label
         if speed_label == "fast":
             x, y, z = make_fast_xy_jog_vector(
                 state,
@@ -5413,9 +5444,21 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 lookahead_s=_CONTROLLER_FAST_LOOKAHEAD_S,
                 z_step=self._controller_z_step.value(),
             )
-            interval = _CONTROLLER_FAST_INTERVAL_S
             if x == 0.0 and y == 0.0 and z != 0.0:
                 interval = _CONTROLLER_STEP_INTERVAL_S
+            elif not self._controller_fast_xy_allowed(x, y):
+                slow_state = self._controller_slow_state(state)
+                x, y, z = make_jog_vector(
+                    slow_state,
+                    deadzone=self._controller_deadzone.value(),
+                    xy_step=self._controller_xy_step.value(),
+                    z_step=self._controller_z_step.value(),
+                )
+                feed = min(5000.0, base_feed)
+                effective_speed_label = "edge"
+                interval = _CONTROLLER_STEP_INTERVAL_S
+            else:
+                interval = _CONTROLLER_FAST_INTERVAL_S
         else:
             x, y, z = make_jog_vector(
                 state,
@@ -5437,11 +5480,64 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._controller_was_active = True
             prefix = "Manual XYZ" if self._controller_manual_xyz_active else "Controller"
             self._controller_status.setText(
-                f"{prefix}: {state.name} [{speed_label}] | X{x:+.3f} Y{y:+.3f} Z{z:+.3f}"
+                f"{prefix}: {state.name} [{effective_speed_label}] | X{x:+.3f} Y{y:+.3f} Z{z:+.3f}"
             )
         elif self._controller_was_active:
             self._controller_cancel_jog()
             self._controller_was_active = False
+
+    def _controller_slow_state(self, state):
+        try:
+            return replace(state, speed_multiplier=1.0)
+        except Exception:
+            class SlowState:
+                pass
+
+            slow_state = SlowState()
+            slow_state.x = getattr(state, "x", 0.0)
+            slow_state.y = getattr(state, "y", 0.0)
+            slow_state.z = getattr(state, "z", 0.0)
+            slow_state.speed_multiplier = 1.0
+            return slow_state
+
+    def _controller_fast_xy_allowed(self, x, y):
+        if abs(float(x)) < 0.0005 and abs(float(y)) < 0.0005:
+            return True
+        if not hasattr(self, "_sender"):
+            return True
+        try:
+            status = self._sender.get_status() or {}
+            limits = self._machine_limits_for_jog()
+            position = self._machine_position_for_jog()
+            work_position = self._work_position_for_jog()
+            work_limits = self._milling_work_limits_for_jog(
+                self._work_limits_for_jog(limits, position, work_position),
+                work_position,
+                limits,
+                self._work_origin_fallback_active(status),
+            )
+        except Exception:
+            return True
+        if not work_position or not work_limits:
+            return True
+        edge = _CONTROLLER_FAST_EDGE_SLOWDOWN_MM
+        for axis, delta in (("x", float(x)), ("y", float(y))):
+            if abs(delta) < 0.0005:
+                continue
+            axis_limits = work_limits.get(axis)
+            if axis_limits is None:
+                continue
+            try:
+                current = float(work_position[axis])
+                low = min(float(axis_limits[0]), float(axis_limits[1]))
+                high = max(float(axis_limits[0]), float(axis_limits[1]))
+            except (TypeError, ValueError, KeyError, IndexError):
+                continue
+            if delta > 0.0 and high - current <= edge:
+                return False
+            if delta < 0.0 and current - low <= edge:
+                return False
+        return True
 
     def _controller_binding_strings(self):
         edits = getattr(self, "_controller_binding_edits", {})
