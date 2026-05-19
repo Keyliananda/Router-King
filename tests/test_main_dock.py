@@ -806,6 +806,28 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(area, {"x_min": -310.0, "x_max": -10.0, "y_min": -400.0, "y_max": -20.0})
 
+    def test_preview_display_transform_swaps_xy_without_mutating_machine_point(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        point = main_dock.PreviewPoint(2.0, 4.0, -1.0)
+
+        display = widget._preview_display_point(point)
+        projected = widget._preview_project_point(point, "top")
+
+        self.assertEqual((display.x, display.y, display.z), (4.0, 2.0, -1.0))
+        self.assertEqual(projected, (4.0, -2.0))
+
+    def test_preview_snap_candidates_keep_machine_coordinates_but_project_machine_view(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        path = main_dock.parse_gcode_preview("G90\nG1 X10 Y5")
+
+        candidates = widget._preview_snap_candidates(path, "top")
+
+        self.assertEqual(candidates[-1].point.x, 10.0)
+        self.assertEqual(candidates[-1].point.y, 5.0)
+        self.assertEqual(candidates[-1].projected, (5.0, -10.0))
+
     def test_fit_candidates_place_each_rectangle_corner_inside_work_area(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -825,12 +847,14 @@ class TestMainDock(unittest.TestCase):
 
         candidates = widget._template_fit_candidates_for_point(spec, 50.0, 50.0, area)
 
-        self.assertEqual([candidate["corner"] for candidate in candidates], [
+        self.assertEqual([candidate["corner"] for candidate in candidates[:4]], [
             "lower_left",
             "lower_right",
             "upper_left",
             "upper_right",
         ])
+        self.assertEqual([candidate["rotation_z"] for candidate in candidates[:4]], [0, 0, 0, 0])
+        self.assertEqual([candidate["rotation_z"] for candidate in candidates[4:]], [90, 90, 90, 90])
         self.assertEqual(candidates[0]["start_x"], 70.0)
         self.assertEqual(candidates[0]["start_y"], 65.0)
         self.assertEqual(candidates[3]["start_x"], 30.0)
@@ -900,6 +924,7 @@ class TestMainDock(unittest.TestCase):
         widget._template_fit_candidates = [
             {
                 "corner": "lower_left",
+                "rotation_z": 90,
                 "start_x": 70.0,
                 "start_y": 65.0,
                 "cut_start_x": 50.0,
@@ -912,11 +937,13 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(widget._template_controls["start_x"].value(), 70.0)
         self.assertEqual(widget._template_controls["start_y"].value(), 65.0)
+        self.assertEqual(widget._template_controls["rotation_z"].currentText(), "90")
+        self.assertEqual(widget._last_template_spec.rotation_z, 90)
         self.assertEqual(widget._last_template_spec.cut_start_x, 50.0)
         self.assertEqual(widget._last_template_spec.cut_start_y, 50.0)
         self.assertIn("; start: X70 Y65", widget._gcode_edit.toPlainText())
         self.assertIn("; cut start target: X50 Y50", widget._gcode_edit.toPlainText())
-        self.assertEqual(widget._fit_status.text, "Fit: 1/1 lower left")
+        self.assertEqual(widget._fit_status.text, "Fit: 1/1 LL 90deg")
 
     def test_fit_status_distinguishes_unpicked_and_failed_fit(self):
         main_dock = _load_main_dock_module()
@@ -937,6 +964,47 @@ class TestMainDock(unittest.TestCase):
         widget._template_fit_pick_active = True
         widget._update_fit_status()
         self.assertEqual(widget._fit_status.text, "Fit: picking")
+
+    def test_preview_home_point_uses_homing_direction_and_work_offset(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status={"WCO": "10.000,20.000,0.000"})
+        widget._gcode_manual_start_wco = None
+        widget._last_template_spec = None
+        profile = {
+            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0]},
+            "homing": {"directions": {"x": "positive", "y": "positive"}},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            point = widget._preview_home_point()
+
+        self.assertEqual(point.x, -10.0)
+        self.assertEqual(point.y, -20.0)
+
+    def test_preview_cut_start_point_prefers_template_cut_start(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._last_template_spec = main_dock.TemplateSpec(
+            width=20.0,
+            height=10.0,
+            depth=2.0,
+            tool_diameter=2.0,
+            step_down=1.0,
+            step_over=1.0,
+            feed_rate=400.0,
+            plunge_rate=100.0,
+            safe_z=5.0,
+            start_z=0.0,
+            cut_start_x=12.0,
+            cut_start_y=-3.0,
+        )
+        path = main_dock.parse_gcode_preview("G90\nG0 X1 Y2 Z5\nG1 Z-1\nG1 X3 Y2")
+
+        point = widget._preview_cut_start_point(path)
+
+        self.assertEqual(point.x, 12.0)
+        self.assertEqual(point.y, -3.0)
 
     def test_template_cut_start_candidates_ignore_safe_z_points(self):
         main_dock = _load_main_dock_module()
