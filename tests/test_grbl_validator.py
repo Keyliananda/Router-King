@@ -2,6 +2,7 @@ import unittest
 
 from RouterKing.grbl.validator import (
     calculate_g54_offset,
+    merge_machine_profile,
     parse_grbl_coordinate_parameters_lines,
     resolve_machine_limits,
     validate_gcode,
@@ -77,6 +78,29 @@ class TestGrblValidator(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertEqual(report["offset_source"], "status.WCO")
         self.assertEqual(report["work_offset"], {"x": -150.0, "y": -190.0, "z": -25.238})
+
+    def test_homing_dir_mask_bits_mean_negative_search_direction(self):
+        profile = merge_machine_profile(
+            {},
+            settings={"$22": "1", "$23": "3", "$27": "3", "$130": "300", "$131": "380", "$132": "50"},
+            status={},
+        )
+
+        self.assertEqual(profile["homing"]["directions"]["x"], "negative")
+        self.assertEqual(profile["homing"]["directions"]["y"], "negative")
+        self.assertEqual(profile["homing"]["directions"]["z"], "positive")
+
+    def test_resolve_machine_limits_prefers_current_settings_over_stale_profile_limits(self):
+        profile = {
+            "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]},
+            "work_envelope_mm": {"x": 300.0, "y": 380.0, "z": 50.0},
+        }
+        settings = {"$130": "400.000", "$131": "400.000", "$132": "60.000"}
+
+        limits, source = resolve_machine_limits(profile, settings)
+
+        self.assertEqual(limits, {"x": (-400.0, 0.0), "y": (-400.0, 0.0), "z": (-60.0, 0.0)})
+        self.assertEqual(source, "grbl_$$")
 
     def test_parse_coordinate_parameters_reports_effective_g54_wco(self):
         parsed = parse_grbl_coordinate_parameters_lines(

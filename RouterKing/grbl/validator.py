@@ -288,11 +288,18 @@ def resolve_machine_limits(
     for axis, setting_key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
         profile_value = _profile_travel_value(profile_map, axis, setting_key)
         settings_value = _to_float(settings_map.get(setting_key))
-        travel = abs(profile_value if profile_value is not None else settings_value if settings_value is not None else 0.0)
+        travel_source = "machine_profile.json"
+        if settings_value is not None and settings_value > 0.0:
+            travel = abs(settings_value)
+            travel_source = "grbl_$$"
+        elif profile_value is not None:
+            travel = abs(profile_value)
+        else:
+            travel = 0.0
         if travel <= 0.0:
             raise ValueError(f"missing machine travel for {axis.upper()} ({setting_key})")
         limits[axis] = (-travel, 0.0)
-        source[axis] = "machine_profile.json" if profile_value is not None else "grbl_$$"
+        source[axis] = travel_source
 
     source_text = source["x"] if len(set(source.values())) == 1 else "machine_profile.json + grbl_$$"
     return limits, source_text
@@ -1106,9 +1113,9 @@ def _plane_axes(plane: str) -> tuple[str, str, str, str, str]:
 
 def _decode_homing_directions(mask: int) -> dict:
     return {
-        "x": "positive" if (mask & 0b001) else "negative",
-        "y": "positive" if (mask & 0b010) else "negative",
-        "z": "positive" if (mask & 0b100) else "negative",
+        "x": "negative" if (mask & 0b001) else "positive",
+        "y": "negative" if (mask & 0b010) else "positive",
+        "z": "negative" if (mask & 0b100) else "positive",
     }
 
 

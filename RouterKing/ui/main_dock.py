@@ -35,6 +35,7 @@ try:
         load_machine_profile as grbl_load_machine_profile,
         parse_xyz_value as grbl_parse_xyz_value,
         resolve_machine_limits as grbl_resolve_machine_limits,
+        save_machine_profile as grbl_save_machine_profile,
         validate_gcode as grbl_validate_gcode,
     )
     from .gamepad import (
@@ -64,6 +65,7 @@ except ImportError:
         load_machine_profile as grbl_load_machine_profile,
         parse_xyz_value as grbl_parse_xyz_value,
         resolve_machine_limits as grbl_resolve_machine_limits,
+        save_machine_profile as grbl_save_machine_profile,
         validate_gcode as grbl_validate_gcode,
     )
     from ui.gamepad import (
@@ -122,6 +124,7 @@ _CONTROLLER_STEP_INTERVAL_S = 0.12
 _PREVIEW_MACHINE_SWAP_XY = True
 _PREVIEW_MACHINE_FLIP_X = False
 _PREVIEW_MACHINE_FLIP_Y = False
+_RECTANGLE_TEMPLATE_PREFS_PATH = "User parameter:BaseApp/Preferences/RouterKing/RectangleTemplate"
 _ALARM_CODES = {
     1: "Hard limit triggered. Machine position may be lost.",
     2: "Soft limit alarm. Target exceeds machine travel.",
@@ -653,6 +656,13 @@ def _find_main_window():
     return None
 
 
+def _to_float_local(value):
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
 def show_panel():
     global _dock
 
@@ -678,6 +688,7 @@ class GcodePreviewView(QtWidgets.QGraphicsView):
         self._snap_callback = None
         self._snap_marker = None
         self._projection_name = "iso"
+        self._rotation_z = 0
         self.setRenderHint(QtGui.QPainter.Antialiasing)
         self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
@@ -698,6 +709,13 @@ class GcodePreviewView(QtWidgets.QGraphicsView):
 
     def set_projection_name(self, projection):
         self._projection_name = str(projection or "iso").lower()
+
+    def set_rotation_z(self, rotation_z):
+        try:
+            rotation = int(float(rotation_z)) % 360
+        except (TypeError, ValueError):
+            rotation = 0
+        self._rotation_z = rotation if rotation in {0, 90, 180, 270} else 0
 
     def wheelEvent(self, event):
         try:
@@ -794,8 +812,15 @@ class GcodePreviewDialog(QtWidgets.QDialog):
         index = self._projection.findText(current_projection)
         if index >= 0:
             self._projection.setCurrentIndex(index)
+        toolbar.addWidget(QtWidgets.QLabel("Z view"))
+        self._rotation_z = QtWidgets.QComboBox()
+        self._rotation_z.addItems(["0", "90", "180", "270"])
+        rotation_index = self._rotation_z.findText(str(dock._preview_view_rotation_degrees()))
+        if rotation_index >= 0:
+            self._rotation_z.setCurrentIndex(rotation_index)
         self._refresh_btn = QtWidgets.QPushButton("Refresh")
         toolbar.addWidget(self._projection)
+        toolbar.addWidget(self._rotation_z)
         toolbar.addWidget(self._refresh_btn)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
@@ -805,12 +830,17 @@ class GcodePreviewDialog(QtWidgets.QDialog):
         layout.addWidget(self._view, 1)
 
         self._projection.currentTextChanged.connect(self.refresh)
+        self._rotation_z.currentTextChanged.connect(self.refresh)
         self._refresh_btn.clicked.connect(self.refresh)
         self.refresh()
 
     def refresh(self):
         projection = str(self._projection.currentText() or "Iso").lower()
-        self._dock._render_gcode_preview(self._scene, self._view, projection)
+        try:
+            rotation = int(str(self._rotation_z.currentText() or "0"))
+        except ValueError:
+            rotation = 0
+        self._dock._render_gcode_preview(self._scene, self._view, projection, rotation_z=rotation)
 
 
 class RouterKingDockWidget(QtWidgets.QWidget):
@@ -831,6 +861,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_manual_start_mpos = None
         self._gcode_manual_start_wco = None
         self._gcode_manual_start_at = 0.0
+        self._manual_xyz_preview_wpos = None
+        self._manual_xyz_preview_last_at = 0.0
         self._gcode_last_validation = None
         self._status_tick = 0
         self._fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
@@ -890,6 +922,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._cam_generate_btn = None
         self._import_dxf_btn = None
         self._gcode_preview_projection = None
+        self._gcode_preview_rotation_z = None
         self._preview_refresh_timer = None
         self._preview_dialog = None
         self._last_template_spec = None
@@ -915,6 +948,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_manual_xyz_active = False
         self._controller_test_dialog = None
         self._controller_binding_capture_dialog = None
+        self._machine_profile_controls = {}
+        self._machine_profile_path_label = None
+        self._machine_profile_status = None
 
         self._load_cam_generate_defaults()
         self._load_dxf_import_defaults()
@@ -962,13 +998,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         self._control_tab = QtWidgets.QWidget()
         self._gcode_tab = QtWidgets.QWidget()
+        self._machine_tab = QtWidgets.QWidget()
         self._ai_tab = QtWidgets.QWidget()
         self._tabs.addTab(self._control_tab, "Control")
         self._tabs.addTab(self._gcode_tab, "G-Code")
+        self._tabs.addTab(self._machine_tab, "Machine")
         self._tabs.addTab(self._ai_tab, "AI Tools")
 
         self._build_control_tab(self._control_tab)
         self._build_gcode_tab(self._gcode_tab)
+        self._build_machine_tab(self._machine_tab)
         self._build_ai_tab(self._ai_tab)
 
         self._poll_timer = QtCore.QTimer(self)
@@ -1321,6 +1360,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_preview_projection = QtWidgets.QComboBox()
         self._gcode_preview_projection.addItems(["Iso", "Top", "Side", "Front"])
         self._gcode_preview_projection.setToolTip("Choose the G-code preview projection.")
+        self._gcode_preview_rotation_z = QtWidgets.QComboBox()
+        self._gcode_preview_rotation_z.addItems(["0", "90", "180", "270"])
+        self._gcode_preview_rotation_z.setToolTip("Rotate the preview around the machine Z axis.")
         self._open_preview_btn = QtWidgets.QPushButton("Open Preview")
         self._snap_start_btn = QtWidgets.QPushButton("Set Cut Start Snap")
         self._preview_tool_area_check = QtWidgets.QCheckBox("Show Tool Area")
@@ -1330,6 +1372,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._next_fit_btn = QtWidgets.QPushButton("Next Fit")
         self._fit_status = QtWidgets.QLabel("Fit: pick corner")
         preview_row.addWidget(self._gcode_preview_projection)
+        preview_row.addWidget(QtWidgets.QLabel("Z view"))
+        preview_row.addWidget(self._gcode_preview_rotation_z)
         preview_row.addWidget(self._open_preview_btn)
         preview_row.addWidget(self._snap_start_btn)
         preview_row.addWidget(self._preview_tool_area_check)
@@ -1377,6 +1421,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_edit.textChanged.connect(self._update_job_controls)
         self._gcode_edit.textChanged.connect(self._schedule_preview_update)
         self._gcode_preview_projection.currentTextChanged.connect(self._update_preview)
+        self._gcode_preview_rotation_z.currentTextChanged.connect(self._update_preview)
         self._preview_tool_area_check.toggled.connect(self._update_preview)
         self._open_preview_btn.clicked.connect(self._on_open_gcode_preview)
         self._snap_start_btn.clicked.connect(self._on_set_template_start_from_snap)
@@ -1392,6 +1437,194 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._update_job_controls()
         self._update_machine_controls()
         self._refresh_cam_status()
+
+    def _build_machine_tab(self, parent):
+        layout = QtWidgets.QVBoxLayout(parent)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        profile_group = QtWidgets.QGroupBox("Machine Profile")
+        form = QtWidgets.QFormLayout(profile_group)
+
+        self._machine_profile_controls = {
+            "model": QtWidgets.QLineEdit(),
+            "x": QtWidgets.QDoubleSpinBox(),
+            "y": QtWidgets.QDoubleSpinBox(),
+            "z": QtWidgets.QDoubleSpinBox(),
+            "pull_off": QtWidgets.QDoubleSpinBox(),
+        }
+        self._machine_profile_controls["model"].setPlaceholderText("e.g. FoxAlien Masuter Pro")
+        for key in ("x", "y", "z"):
+            spin = self._machine_profile_controls[key]
+            spin.setDecimals(3)
+            spin.setRange(1.0, 5000.0)
+            spin.setSingleStep(1.0)
+            spin.setSuffix(" mm")
+        pull_off = self._machine_profile_controls["pull_off"]
+        pull_off.setDecimals(3)
+        pull_off.setRange(0.0, 50.0)
+        pull_off.setSingleStep(0.1)
+        pull_off.setSuffix(" mm")
+
+        form.addRow("Model", self._machine_profile_controls["model"])
+        form.addRow("X travel", self._machine_profile_controls["x"])
+        form.addRow("Y travel", self._machine_profile_controls["y"])
+        form.addRow("Z travel", self._machine_profile_controls["z"])
+        form.addRow("Homing pull-off", pull_off)
+
+        self._machine_profile_path_label = QtWidgets.QLabel("Profile: not loaded")
+        form.addRow("File", self._machine_profile_path_label)
+        self._machine_profile_status = QtWidgets.QLabel("")
+        form.addRow("Status", self._machine_profile_status)
+        layout.addWidget(profile_group)
+
+        actions = QtWidgets.QHBoxLayout()
+        self._machine_profile_reload_btn = QtWidgets.QPushButton("Reload Profile")
+        self._machine_profile_save_btn = QtWidgets.QPushButton("Save Profile")
+        self._machine_profile_import_btn = QtWidgets.QPushButton("Import JSON")
+        self._machine_profile_foxalien_btn = QtWidgets.QPushButton("FoxAlien Masuter Pro 400x400x60")
+        actions.addWidget(self._machine_profile_reload_btn)
+        actions.addWidget(self._machine_profile_save_btn)
+        actions.addWidget(self._machine_profile_import_btn)
+        actions.addWidget(self._machine_profile_foxalien_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        note = QtWidgets.QLabel("These values feed validation, HOME/work-area preview, and CAM safety checks.")
+        layout.addWidget(note)
+        layout.addStretch(1)
+
+        self._machine_profile_reload_btn.clicked.connect(self._load_machine_profile_controls)
+        self._machine_profile_save_btn.clicked.connect(self._save_machine_profile_controls)
+        self._machine_profile_import_btn.clicked.connect(self._import_machine_profile_json)
+        self._machine_profile_foxalien_btn.clicked.connect(self._apply_foxalien_machine_profile)
+        self._load_machine_profile_controls()
+
+    def _load_machine_profile_controls(self):
+        try:
+            profile, profile_path = grbl_load_machine_profile(None)
+        except Exception as exc:
+            self._set_machine_profile_status(f"Load failed: {exc}", error=True)
+            return
+        self._populate_machine_profile_controls(profile, profile_path)
+
+    def _populate_machine_profile_controls(self, profile, profile_path=None):
+        controls = getattr(self, "_machine_profile_controls", {}) or {}
+        if not controls:
+            return
+        settings = dict((profile or {}).get("settings") or {})
+        try:
+            limits, _source = grbl_resolve_machine_limits(profile, settings)
+        except Exception:
+            limits = {}
+        controls["model"].setText(str((profile or {}).get("model") or ""))
+        for axis, key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
+            value = None
+            if axis in limits:
+                value = abs(float(limits[axis][1]) - float(limits[axis][0]))
+            if value is None:
+                value = _to_float_local(settings.get(key))
+            if value is not None:
+                controls[axis].setValue(float(value))
+        pull_off = _to_float_local(settings.get("$27"))
+        if pull_off is None:
+            pull_off = _to_float_local(((profile or {}).get("homing") or {}).get("pull_off_mm"))
+        if pull_off is not None:
+            controls["pull_off"].setValue(float(pull_off))
+        if self._machine_profile_path_label is not None:
+            self._machine_profile_path_label.setText(str(profile_path or "default machine_profile.json"))
+        self._sync_limits_from_machine_profile_controls()
+        self._set_machine_profile_status("Loaded.")
+
+    def _machine_profile_from_controls(self, base_profile=None):
+        profile = dict(base_profile or {})
+        controls = getattr(self, "_machine_profile_controls", {}) or {}
+        model = controls["model"].text().strip() if controls else ""
+        x_travel = float(controls["x"].value())
+        y_travel = float(controls["y"].value())
+        z_travel = float(controls["z"].value())
+        pull_off = float(controls["pull_off"].value())
+        profile["model"] = model or "FoxAlien Masuter Pro"
+        profile["machine_limits"] = {
+            "x": [-abs(x_travel), 0.0],
+            "y": [-abs(y_travel), 0.0],
+            "z": [-abs(z_travel), 0.0],
+        }
+        profile["work_envelope_mm"] = {"x": abs(x_travel), "y": abs(y_travel), "z": abs(z_travel)}
+        settings = dict(profile.get("settings") or {})
+        settings["$130"] = f"{abs(x_travel):.3f}"
+        settings["$131"] = f"{abs(y_travel):.3f}"
+        settings["$132"] = f"{abs(z_travel):.3f}"
+        settings["$27"] = f"{max(pull_off, 0.0):.3f}"
+        profile["settings"] = settings
+        homing = dict(profile.get("homing") or {})
+        homing["pull_off_mm"] = max(pull_off, 0.0)
+        profile["homing"] = homing
+        return profile
+
+    def _save_machine_profile_controls(self):
+        try:
+            profile, profile_path = grbl_load_machine_profile(None)
+        except Exception:
+            profile, profile_path = {}, None
+        payload = self._machine_profile_from_controls(profile)
+        try:
+            saved_path = grbl_save_machine_profile(payload, profile_path or None)
+        except Exception as exc:
+            self._set_machine_profile_status(f"Save failed: {exc}", error=True)
+            return
+        self._populate_machine_profile_controls(payload, saved_path)
+        self._update_preview()
+        self._set_machine_profile_status("Saved.")
+
+    def _import_machine_profile_json(self):
+        path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import RouterKing machine profile",
+            "",
+            "JSON (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                profile = json.load(handle)
+        except Exception as exc:
+            self._set_machine_profile_status(f"Import failed: {exc}", error=True)
+            return
+        self._populate_machine_profile_controls(profile, path)
+        self._set_machine_profile_status("Imported. Save Profile to use it globally.")
+
+    def _apply_foxalien_machine_profile(self):
+        controls = getattr(self, "_machine_profile_controls", {}) or {}
+        if not controls:
+            return
+        controls["model"].setText("FoxAlien Masuter Pro")
+        controls["x"].setValue(400.0)
+        controls["y"].setValue(400.0)
+        controls["z"].setValue(60.0)
+        controls["pull_off"].setValue(3.0)
+        self._sync_limits_from_machine_profile_controls()
+        self._update_preview()
+        self._set_machine_profile_status("FoxAlien Masuter Pro preset applied. Save Profile to persist.")
+
+    def _sync_limits_from_machine_profile_controls(self):
+        controls = getattr(self, "_machine_profile_controls", {}) or {}
+        if not controls:
+            return
+        self._limits["X"] = float(controls["x"].value())
+        self._limits["Y"] = float(controls["y"].value())
+        self._limits["Z"] = float(controls["z"].value())
+        self._update_limit_labels()
+
+    def _set_machine_profile_status(self, message, *, error=False):
+        label = getattr(self, "_machine_profile_status", None)
+        if label is not None:
+            label.setText(str(message))
+            try:
+                label.setStyleSheet("color: #ff6b6b;" if error else "")
+            except Exception:
+                pass
 
     def _build_template_parameters_group(self):
         group = QtWidgets.QGroupBox("Rectangle Pocket Parameters")
@@ -1495,8 +1728,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
         button_row = QtWidgets.QHBoxLayout()
         self._template_apply_btn = QtWidgets.QPushButton("Apply Template")
+        self._template_save_settings_btn = QtWidgets.QPushButton("Save Settings")
         self._template_reset_btn = QtWidgets.QPushButton("Reset Tee-Tablett")
         button_row.addWidget(self._template_apply_btn)
+        button_row.addWidget(self._template_save_settings_btn)
         button_row.addWidget(self._template_reset_btn)
         button_row.addStretch(1)
         layout.addLayout(button_row)
@@ -1504,6 +1739,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         refresh_source_btn.clicked.connect(self._refresh_template_cad_sources)
         self._template_source_combo.currentIndexChanged.connect(self._update_template_source_summary)
         self._template_apply_btn.clicked.connect(self._on_insert_gcode_template)
+        self._template_save_settings_btn.clicked.connect(self._on_save_rectangle_template_settings)
         self._template_reset_btn.clicked.connect(self._on_reset_rectangle_template_controls)
         self._populate_rectangle_template_controls(default)
         self._refresh_template_cad_sources()
@@ -3378,6 +3614,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         status = self._sender.get_status()
         if status:
             self._update_controller_guard_position(status)
+            self._update_manual_xyz_preview_position(status)
             state = status.get("state", "?")
             pos = status.get("WPos") or status.get("MPos")
             if pos:
@@ -4491,6 +4728,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         status = self._sender.get_status() or {}
         self._update_controller_guard_position(status)
+        self._update_manual_xyz_preview_position(status, force=True)
         _controller_log(f"manual xyz prepared: no automatic move; mpos={status.get('MPos', 'unknown')}")
         if self._controller.is_connected():
             self._controller_enable.setChecked(True)
@@ -4502,12 +4740,30 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _on_exit_manual_xyz(self):
         self._controller_manual_xyz_active = False
+        self._manual_xyz_preview_wpos = None
         if self._controller_enable.isChecked():
             self._controller_enable.setChecked(False)
         else:
             self._controller_stop()
             self._update_machine_controls()
         self._append_console("Manual XYZ mode stopped.", force=True)
+        self._update_preview()
+
+    def _update_manual_xyz_preview_position(self, status, force=False):
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            return
+        live = self._extract_live_xyz(status or {})
+        if live is None:
+            return
+        next_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
+        previous = getattr(self, "_manual_xyz_preview_wpos", None)
+        if not force and previous is not None and self._xyz_close(previous, next_wpos, tolerance=0.001):
+            return
+        self._manual_xyz_preview_wpos = next_wpos
+        now = time.time()
+        if force or now - getattr(self, "_manual_xyz_preview_last_at", 0.0) >= 0.2:
+            self._manual_xyz_preview_last_at = now
+            self._schedule_preview_update()
 
     def _send_checked_command(self, command, timeout=5.0):
         try:
@@ -4767,6 +5023,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._append_console(f"Template failed: {exc}", force=True)
             return
         self._last_template_spec = spec
+        self._save_rectangle_template_defaults(spec)
         self._gcode_edit.setPlainText(program.gcode + "\n")
         self._append_console(
             "Inserted template: "
@@ -4844,7 +5101,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._select_template_source(spec)
 
     def _on_reset_rectangle_template_controls(self):
-        spec = self._default_rectangle_template_spec()
+        spec = self._factory_rectangle_template_spec()
         spec = replace(
             spec,
             cut_start_x=None,
@@ -4858,6 +5115,20 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._append_console("Rectangle template parameters reset to Tee-Tablett defaults.", force=True)
         self._clear_template_fit_selection()
         self._update_preview()
+
+    def _on_save_rectangle_template_settings(self):
+        spec = self._read_rectangle_template_controls()
+        if spec is None:
+            self._append_console("Save template settings failed: template controls unavailable.", force=True)
+            return
+        self._save_rectangle_template_defaults(spec)
+        self._last_template_spec = spec
+        self._append_console(
+            "Saved rectangle template settings: "
+            f"{spec.width:g} x {spec.height:g} x {spec.depth:g} mm, "
+            f"tool {spec.tool_diameter:g} mm.",
+            force=True,
+        )
 
     def _show_rectangle_template_dialog(self):
         default = self._default_rectangle_template_spec()
@@ -4944,8 +5215,104 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _default_rectangle_template_spec(self):
         if self._last_template_spec is not None:
             return replace(self._last_template_spec)
+        return self._load_rectangle_template_defaults(self._factory_rectangle_template_spec())
+
+    def _factory_rectangle_template_spec(self):
         safe_z = max(self._manual_start_safe_z(), 6.0)
         return rectangle_pocket_preset("tee_tablett", safe_z=safe_z)
+
+    def _load_rectangle_template_defaults(self, fallback):
+        if App is None:
+            return fallback
+        try:
+            params = App.ParamGet(_RECTANGLE_TEMPLATE_PREFS_PATH)
+            try:
+                raw = params.GetString("last_spec_json", "")
+            except TypeError:
+                raw = params.GetString("last_spec_json")
+        except Exception:
+            return fallback
+        if not raw:
+            return fallback
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return fallback
+        if not isinstance(data, dict):
+            return fallback
+        try:
+            values = {
+                "name": data.get("name") or fallback.name,
+                "width": float(data.get("width", fallback.width)),
+                "height": float(data.get("height", fallback.height)),
+                "depth": float(data.get("depth", fallback.depth)),
+                "tool_diameter": float(data.get("tool_diameter", fallback.tool_diameter)),
+                "step_down": float(data.get("step_down", fallback.step_down)),
+                "step_over": float(data.get("step_over", fallback.step_over)),
+                "feed_rate": float(data.get("feed_rate", fallback.feed_rate)),
+                "plunge_rate": float(data.get("plunge_rate", fallback.plunge_rate)),
+                "safe_z": float(data.get("safe_z", fallback.safe_z)),
+                "start_z": float(data.get("start_z", fallback.start_z)),
+                "origin": str(data.get("origin", fallback.origin)),
+                "start_x": float(data.get("start_x", fallback.start_x)),
+                "start_y": float(data.get("start_y", fallback.start_y)),
+                "swap_xy": bool(data.get("swap_xy", fallback.swap_xy)),
+                "rotation_z": int(data.get("rotation_z", fallback.rotation_z)),
+                "pass_axis": str(data.get("pass_axis", fallback.pass_axis)),
+                "path_direction": str(data.get("path_direction", fallback.path_direction)),
+                "final_contour": bool(data.get("final_contour", fallback.final_contour)),
+                "contour_direction": str(data.get("contour_direction", fallback.contour_direction)),
+                "source_document": data.get("source_document", fallback.source_document),
+                "source_object": data.get("source_object", fallback.source_object),
+                "source_feature": data.get("source_feature", fallback.source_feature),
+            }
+            for key in ("cut_start_x", "cut_start_y"):
+                value = data.get(key, getattr(fallback, key))
+                values[key] = None if value is None else float(value)
+            return replace(fallback, **values)
+        except Exception:
+            return fallback
+
+    def _save_rectangle_template_defaults(self, spec=None):
+        if App is None:
+            return False
+        if spec is None:
+            spec = self._read_rectangle_template_controls()
+        if spec is None:
+            return False
+        payload = {
+            "name": spec.name,
+            "width": float(spec.width),
+            "height": float(spec.height),
+            "depth": float(spec.depth),
+            "tool_diameter": float(spec.tool_diameter),
+            "step_down": float(spec.step_down),
+            "step_over": float(spec.step_over),
+            "feed_rate": float(spec.feed_rate),
+            "plunge_rate": float(spec.plunge_rate),
+            "safe_z": float(spec.safe_z),
+            "start_z": float(spec.start_z),
+            "origin": spec.origin,
+            "start_x": float(spec.start_x),
+            "start_y": float(spec.start_y),
+            "swap_xy": bool(spec.swap_xy),
+            "rotation_z": int(getattr(spec, "rotation_z", 0)),
+            "pass_axis": spec.pass_axis,
+            "path_direction": spec.path_direction,
+            "final_contour": bool(spec.final_contour),
+            "contour_direction": spec.contour_direction,
+            "cut_start_x": spec.cut_start_x,
+            "cut_start_y": spec.cut_start_y,
+            "source_document": spec.source_document,
+            "source_object": spec.source_object,
+            "source_feature": spec.source_feature,
+        }
+        try:
+            params = App.ParamGet(_RECTANGLE_TEMPLATE_PREFS_PATH)
+            params.SetString("last_spec_json", json.dumps(payload, sort_keys=True))
+        except Exception:
+            return False
+        return True
 
     def _refresh_template_cad_sources(self):
         combo = getattr(self, "_template_source_combo", None)
@@ -5125,6 +5492,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._gcode_manual_start_wpos = live["wpos"]
         self._gcode_manual_start_mpos = live["mpos"]
         self._gcode_manual_start_wco = live["wco"]
+        self._manual_xyz_preview_wpos = live["wpos"]
         self._gcode_manual_start_at = time.time()
         self._manual_start_status.setText(
             "Manual start: "
@@ -5151,19 +5519,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         spec = self._read_rectangle_template_controls()
         if spec is None:
             return
-        spec = replace(
-            spec,
-            start_z=float(start["z"]),
-            cut_start_x=float(start["x"]),
-            cut_start_y=float(start["y"]),
-        )
+        spec = self._template_spec_aligned_to_manual_start(spec, start)
         try:
             program = rectangle_pocket(spec)
         except ValueError as exc:
             self._append_console(f"Use manual start failed: {exc}", force=True)
             return
         self._last_template_spec = spec
+        self._save_rectangle_template_defaults(spec)
         self._gcode_edit.setPlainText(program.gcode + "\n")
+        self._populate_rectangle_template_controls(spec)
         self._append_console(
             "Manual start applied as cut start target: "
             f"X{start['x']:.3f} Y{start['y']:.3f} Z{start['z']:.3f}.",
@@ -5534,8 +5899,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             if choice == "-":
                 return -1.0
         bit = {"X": 0, "Y": 1, "Z": 2}.get(axis, 0)
-        homing_positive = bool(self._homing_dir_mask & (1 << bit))
-        return -1.0 if homing_positive else 1.0
+        homing_negative = bool(self._homing_dir_mask & (1 << bit))
+        return 1.0 if homing_negative else -1.0
 
     def _expected_explore_limit(self, axis):
         if not self._explore_known_limits:
@@ -5559,10 +5924,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _update_preview(self):
         projection = self._preview_projection_name()
+        rotation_z = self._preview_view_rotation_degrees()
         scene = getattr(self, "_preview_scene", None)
         view = getattr(self, "_preview_view", None)
         if scene is not None and view is not None:
-            self._render_gcode_preview(scene, view, projection)
+            self._render_gcode_preview(scene, view, projection, rotation_z=rotation_z)
         self._refresh_detached_preview()
 
     def _preview_projection_name(self):
@@ -5571,19 +5937,37 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return str(projection_widget.currentText() or "Iso").lower()
         return "iso"
 
-    def _render_gcode_preview(self, scene, view, projection):
+    def _preview_view_rotation_degrees(self):
+        rotation_widget = getattr(self, "_gcode_preview_rotation_z", None)
+        if rotation_widget is not None:
+            return self._normalize_preview_rotation(rotation_widget.currentText())
+        return 0
+
+    def _normalize_preview_rotation(self, rotation_z):
+        try:
+            rotation = int(float(rotation_z)) % 360
+        except (TypeError, ValueError):
+            return 0
+        return rotation if rotation in {0, 90, 180, 270} else 0
+
+    def _render_gcode_preview(self, scene, view, projection, rotation_z=None):
+        rotation_z = self._normalize_preview_rotation(
+            self._preview_view_rotation_degrees() if rotation_z is None else rotation_z
+        )
         text = self._gcode_edit.toPlainText()
-        path = parse_gcode_preview(text)
-        display_path = self._preview_display_path(path)
+        path = self._preview_path_from_current_state(text)
+        display_path = self._preview_display_path(path, rotation_z=rotation_z)
         scene.clear()
         if hasattr(view, "set_projection_name"):
             view.set_projection_name(projection)
+        if hasattr(view, "set_rotation_z"):
+            view.set_rotation_z(rotation_z)
         bounds = render_preview_scene(scene, display_path, projection=projection, clear=False)
-        self._render_preview_tool_area_overlay(scene, projection, path)
-        candidates = self._preview_snap_candidates(path, projection)
+        self._render_preview_tool_area_overlay(scene, projection, path, rotation_z=rotation_z)
+        candidates = self._preview_snap_candidates(path, projection, rotation_z=rotation_z)
         if hasattr(view, "set_snap_candidates"):
             if getattr(self, "_template_fit_pick_active", False):
-                view.set_snap_candidates(self._template_fit_pick_candidates(projection))
+                view.set_snap_candidates(self._template_fit_pick_candidates(projection, rotation_z=rotation_z))
             else:
                 view.set_snap_candidates(candidates)
         scene_bounds = scene.itemsBoundingRect()
@@ -5592,7 +5976,62 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if not scene_bounds.isNull():
             view.fitInView(scene_bounds, QtCore.Qt.KeepAspectRatio)
 
-    def _preview_display_point(self, point):
+    def _preview_path_from_current_state(self, text):
+        spec = self._manual_xyz_preview_template_spec()
+        if spec is not None:
+            try:
+                return parse_gcode_preview(rectangle_pocket(spec).gcode)
+            except ValueError:
+                pass
+        return parse_gcode_preview(text)
+
+    def _manual_xyz_preview_template_spec(self):
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            return None
+        start = getattr(self, "_manual_xyz_preview_wpos", None)
+        if not start:
+            return None
+        try:
+            spec = self._read_rectangle_template_controls()
+        except Exception:
+            return None
+        if spec is None:
+            return None
+        return self._template_spec_aligned_to_manual_start(spec, start)
+
+    def _template_spec_aligned_to_manual_start(self, spec, start):
+        anchor = self._template_cut_start_anchor(spec)
+        start_x = float(start["x"])
+        start_y = float(start["y"])
+        return replace(
+            spec,
+            start_x=float(spec.start_x) + start_x - anchor.x,
+            start_y=float(spec.start_y) + start_y - anchor.y,
+            start_z=float(start.get("z", spec.start_z)),
+            cut_start_x=start_x,
+            cut_start_y=start_y,
+        )
+
+    def _template_cut_start_anchor(self, spec):
+        try:
+            path = parse_gcode_preview(rectangle_pocket(replace(spec, cut_start_x=None, cut_start_y=None)).gcode)
+            cut_points = [
+                point
+                for segment in getattr(path, "segments", ()) or ()
+                if not segment.rapid
+                for point in (segment.start, segment.end)
+            ]
+            if cut_points:
+                return PreviewPoint(
+                    min(point.x for point in cut_points),
+                    min(point.y for point in cut_points),
+                    float(spec.start_z),
+                )
+        except ValueError:
+            pass
+        return PreviewPoint(float(spec.start_x), float(spec.start_y), float(spec.start_z))
+
+    def _preview_display_point(self, point, rotation_z=None):
         x_value = float(point.x)
         y_value = float(point.y)
         if _PREVIEW_MACHINE_SWAP_XY:
@@ -5601,16 +6040,23 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             x_value = -x_value
         if _PREVIEW_MACHINE_FLIP_Y:
             y_value = -y_value
+        rotation_z = self._normalize_preview_rotation(rotation_z)
+        if rotation_z == 90:
+            x_value, y_value = -y_value, x_value
+        elif rotation_z == 180:
+            x_value, y_value = -x_value, -y_value
+        elif rotation_z == 270:
+            x_value, y_value = y_value, -x_value
         return PreviewPoint(x_value, y_value, float(point.z))
 
-    def _preview_project_point(self, point, projection):
-        return project_point(self._preview_display_point(point), projection)
+    def _preview_project_point(self, point, projection, rotation_z=None):
+        return project_point(self._preview_display_point(point, rotation_z=rotation_z), projection)
 
-    def _preview_display_path(self, path):
+    def _preview_display_path(self, path, rotation_z=None):
         segments = tuple(
             PreviewSegment(
-                start=self._preview_display_point(segment.start),
-                end=self._preview_display_point(segment.end),
+                start=self._preview_display_point(segment.start, rotation_z=rotation_z),
+                end=self._preview_display_point(segment.end, rotation_z=rotation_z),
                 rapid=segment.rapid,
                 line_no=segment.line_no,
                 motion=segment.motion,
@@ -5629,16 +6075,16 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 max_x=max(xs),
                 max_y=max(ys),
                 max_z=max(zs),
-            )
+        )
         return PreviewPath(segments=segments, bounds=bounds)
 
-    def _preview_snap_candidates(self, path, projection):
+    def _preview_snap_candidates(self, path, projection, rotation_z=None):
         candidates = []
         for candidate in preview_snap_candidates(path, projection):
             candidates.append(
                 PreviewSnapCandidate(
                     point=candidate.point,
-                    projected=self._preview_project_point(candidate.point, projection),
+                    projected=self._preview_project_point(candidate.point, projection, rotation_z=rotation_z),
                     reasons=candidate.reasons,
                     segment_indices=candidate.segment_indices,
                     line_nos=candidate.line_nos,
@@ -5646,13 +6092,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             )
         return tuple(candidates)
 
-    def _render_preview_tool_area_overlay(self, scene, projection, path):
+    def _render_preview_tool_area_overlay(self, scene, projection, path, rotation_z=None):
         if not self._preview_tool_area_enabled():
             return
-        self._add_preview_machine_area(scene, projection)
-        self._add_preview_template_fit_candidates(scene, projection)
-        self._add_preview_manual_tool_dummy(scene, projection)
-        self._add_preview_reference_markers(scene, projection, path)
+        self._add_preview_machine_area(scene, projection, rotation_z=rotation_z)
+        self._add_preview_template_fit_candidates(scene, projection, rotation_z=rotation_z)
+        self._add_preview_manual_tool_dummy(scene, projection, rotation_z=rotation_z)
+        self._add_preview_reference_markers(scene, projection, path, rotation_z=rotation_z)
 
     def _preview_tool_area_enabled(self):
         checkbox = getattr(self, "_preview_tool_area_check", None)
@@ -5663,33 +6109,59 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         except Exception:
             return True
 
-    def _add_preview_machine_area(self, scene, projection):
+    def _add_preview_machine_area(self, scene, projection, rotation_z=None):
         area = self._preview_work_area()
         if area is None:
             return
         qt_gui = QtGui
-        pen = qt_gui.QPen(qt_gui.QColor(80, 180, 110, 160), 0)
-        z_value = self._preview_overlay_z()
-        corners = [
-            PreviewPoint(area["x_min"], area["y_min"], z_value),
-            PreviewPoint(area["x_max"], area["y_min"], z_value),
-            PreviewPoint(area["x_max"], area["y_max"], z_value),
-            PreviewPoint(area["x_min"], area["y_max"], z_value),
+        top_pen = qt_gui.QPen(qt_gui.QColor(80, 220, 130, 185), 0)
+        bottom_pen = qt_gui.QPen(qt_gui.QColor(80, 180, 110, 70), 0)
+        side_pen = qt_gui.QPen(qt_gui.QColor(80, 180, 110, 115), 0)
+        x_min, x_max = min(area["x_min"], area["x_max"]), max(area["x_min"], area["x_max"])
+        y_min, y_max = min(area["y_min"], area["y_max"]), max(area["y_min"], area["y_max"])
+        z_min, z_max = min(area["z_min"], area["z_max"]), max(area["z_min"], area["z_max"])
+        top = [
+            PreviewPoint(x_min, y_min, z_max),
+            PreviewPoint(x_max, y_min, z_max),
+            PreviewPoint(x_max, y_max, z_max),
+            PreviewPoint(x_min, y_max, z_max),
         ]
-        for start, end in zip(corners, corners[1:] + corners[:1]):
-            scene.addLine(*self._preview_project_point(start, projection), *self._preview_project_point(end, projection), pen)
+        bottom = [
+            PreviewPoint(x_min, y_min, z_min),
+            PreviewPoint(x_max, y_min, z_min),
+            PreviewPoint(x_max, y_max, z_min),
+            PreviewPoint(x_min, y_max, z_min),
+        ]
+        for start, end in zip(top, top[1:] + top[:1]):
+            scene.addLine(
+                *self._preview_project_point(start, projection, rotation_z=rotation_z),
+                *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                top_pen,
+            )
+        for start, end in zip(bottom, bottom[1:] + bottom[:1]):
+            scene.addLine(
+                *self._preview_project_point(start, projection, rotation_z=rotation_z),
+                *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                bottom_pen,
+            )
+        for start, end in zip(bottom, top):
+            scene.addLine(
+                *self._preview_project_point(start, projection, rotation_z=rotation_z),
+                *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                side_pen,
+            )
         corner_pen = qt_gui.QPen(qt_gui.QColor(80, 220, 130, 210), 0)
         corner_brush = qt_gui.QBrush(qt_gui.QColor(80, 220, 130, 55))
         radius = max(self._preview_marker_radius() * 0.45, 2.0)
-        for corner in corners:
-            x_val, y_val = self._preview_project_point(corner, projection)
+        for corner in top:
+            x_val, y_val = self._preview_project_point(corner, projection, rotation_z=rotation_z)
             item = scene.addEllipse(x_val - radius, y_val - radius, radius * 2.0, radius * 2.0, corner_pen, corner_brush)
             try:
                 item.setZValue(1000)
             except Exception:
                 pass
 
-    def _add_preview_template_fit_candidates(self, scene, projection):
+    def _add_preview_template_fit_candidates(self, scene, projection, rotation_z=None):
         candidates = getattr(self, "_template_fit_candidates", None) or []
         if not candidates:
             return
@@ -5710,14 +6182,24 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 PreviewPoint(bounds["x_min"], bounds["y_max"], z_value),
             ]
             for start, end in zip(corners, corners[1:] + corners[:1]):
-                scene.addLine(*self._preview_project_point(start, projection), *self._preview_project_point(end, projection), pen)
+                scene.addLine(
+                    *self._preview_project_point(start, projection, rotation_z=rotation_z),
+                    *self._preview_project_point(end, projection, rotation_z=rotation_z),
+                    pen,
+                )
 
-    def _add_preview_manual_tool_dummy(self, scene, projection):
-        start = getattr(self, "_gcode_manual_start_wpos", None)
+    def _add_preview_manual_tool_dummy(self, scene, projection, rotation_z=None):
+        start = (
+            getattr(self, "_manual_xyz_preview_wpos", None)
+            if getattr(self, "_controller_manual_xyz_active", False)
+            else None
+        )
+        if not start:
+            start = getattr(self, "_gcode_manual_start_wpos", None)
         if not start:
             return
         point = PreviewPoint(float(start["x"]), float(start["y"]), float(start.get("z", 0.0)))
-        x_val, y_val = self._preview_project_point(point, projection)
+        x_val, y_val = self._preview_project_point(point, projection, rotation_z=rotation_z)
         radius = self._preview_tool_radius()
         qt_gui = QtGui
         pen = qt_gui.QPen(qt_gui.QColor(255, 210, 0), 0)
@@ -5727,7 +6209,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         scene.addLine(x_val - cross, y_val, x_val + cross, y_val, pen)
         scene.addLine(x_val, y_val - cross, x_val, y_val + cross, pen)
 
-    def _add_preview_reference_markers(self, scene, projection, path):
+    def _add_preview_reference_markers(self, scene, projection, path, rotation_z=None):
         home_point = self._preview_home_point()
         if home_point is not None:
             self._add_preview_marker(
@@ -5737,6 +6219,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "HOME",
                 QtGui.QColor(180, 120, 255, 235),
                 square=True,
+                rotation_z=rotation_z,
             )
         cut_start = self._preview_cut_start_point(path)
         if cut_start is not None:
@@ -5747,10 +6230,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "CUT START",
                 QtGui.QColor(255, 70, 70, 240),
                 square=False,
+                rotation_z=rotation_z,
             )
 
-    def _add_preview_marker(self, scene, projection, point, label, color, *, square=False):
-        x_val, y_val = self._preview_project_point(point, projection)
+    def _add_preview_marker(self, scene, projection, point, label, color, *, square=False, rotation_z=None):
+        x_val, y_val = self._preview_project_point(point, projection, rotation_z=rotation_z)
         radius = self._preview_marker_radius()
         pen = QtGui.QPen(color, 0)
         brush = QtGui.QBrush(QtGui.QColor(color.red(), color.green(), color.blue(), 65))
@@ -5780,7 +6264,25 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _preview_marker_radius(self):
         return max(min(self._preview_tool_radius() * 0.45, 12.0), 3.0)
 
+    def _first_cut_point(self, path):
+        if path is None:
+            return None
+        for segment in getattr(path, "segments", ()) or ():
+            if not segment.rapid:
+                return segment.start
+        return None
+
     def _preview_cut_start_point(self, path):
+        if getattr(self, "_controller_manual_xyz_active", False):
+            start = getattr(self, "_manual_xyz_preview_wpos", None)
+            if start:
+                try:
+                    return PreviewPoint(float(start["x"]), float(start["y"]), self._preview_overlay_z())
+                except (TypeError, ValueError, KeyError):
+                    pass
+        cut_point = self._first_cut_point(path)
+        if cut_point is not None:
+            return cut_point
         spec = getattr(self, "_last_template_spec", None)
         if spec is not None and spec.cut_start_x is not None and spec.cut_start_y is not None:
             try:
@@ -5789,10 +6291,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 pass
         if path is None:
             return None
-        for segment in getattr(path, "segments", ()) or ():
-            if not segment.rapid:
-                return segment.start
-        return None
+        return self._first_cut_point(path)
 
     def _preview_home_point(self):
         profile = {}
@@ -5800,21 +6299,106 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             profile, _profile_path = grbl_load_machine_profile(None)
         except Exception:
             profile = {}
-        limits = profile.get("machine_limits") if isinstance(profile, dict) else None
-        if not isinstance(limits, dict):
+        limits = self._preview_machine_limits(profile)
+        if limits is None:
             return None
-        x_limits = limits.get("x")
-        y_limits = limits.get("y")
-        if not x_limits or not y_limits:
-            return None
-        directions = ((profile.get("homing") or {}).get("directions") or {}) if isinstance(profile, dict) else {}
+        directions = self._profile_homing_directions(profile)
+        pull_off = self._profile_homing_pull_off(profile)
         try:
-            home_x = float(x_limits[1] if directions.get("x") != "negative" else x_limits[0])
-            home_y = float(y_limits[1] if directions.get("y") != "negative" else y_limits[0])
+            home_x = self._home_axis_machine_position(limits["x"], directions.get("x"), pull_off)
+            home_y = self._home_axis_machine_position(limits["y"], directions.get("y"), pull_off)
+            home_z = self._home_axis_machine_position(limits.get("z", (-60.0, 0.0)), directions.get("z"), pull_off)
             wco = self._preview_work_offset(profile)
-            return PreviewPoint(home_x - wco["x"], home_y - wco["y"], self._preview_overlay_z())
+            if wco is None:
+                return None
+            return PreviewPoint(home_x - wco["x"], home_y - wco["y"], home_z - wco["z"])
         except (TypeError, ValueError, IndexError, KeyError):
             return None
+
+    def _preview_machine_limits(self, profile):
+        if not isinstance(profile, dict):
+            return None
+        try:
+            settings = dict(profile.get("settings") or {})
+            limits, _source = grbl_resolve_machine_limits(profile, settings)
+            return {
+                axis: (float(axis_limits[0]), float(axis_limits[1]))
+                for axis, axis_limits in limits.items()
+                if axis_limits and len(axis_limits) >= 2
+            }
+        except Exception:
+            limits = profile.get("machine_limits")
+            if not isinstance(limits, dict):
+                return None
+            try:
+                return {
+                    "x": (float(limits["x"][0]), float(limits["x"][1])),
+                    "y": (float(limits["y"][0]), float(limits["y"][1])),
+                    "z": (float(limits["z"][0]), float(limits["z"][1])) if limits.get("z") else (-50.0, 0.0),
+                }
+            except (TypeError, ValueError, KeyError, IndexError):
+                return None
+
+    def _home_axis_machine_position(self, axis_limits, direction, pull_off):
+        min_value = min(float(axis_limits[0]), float(axis_limits[1]))
+        max_value = max(float(axis_limits[0]), float(axis_limits[1]))
+        pull = max(float(pull_off), 0.0)
+        if direction == "negative":
+            return min(min_value + pull, max_value)
+        return max(max_value - pull, min_value)
+
+    def _profile_homing_directions(self, profile):
+        if not isinstance(profile, dict):
+            return {}
+        settings = profile.get("settings") or {}
+        mask_value = None
+        if isinstance(settings, dict):
+            mask_value = settings.get("$23")
+        if mask_value is None:
+            mask_value = ((profile.get("homing") or {}).get("dir_mask")) if isinstance(profile.get("homing"), dict) else None
+        if mask_value is not None:
+            try:
+                mask = int(float(mask_value))
+                return {
+                    "x": "negative" if (mask & 0b001) else "positive",
+                    "y": "negative" if (mask & 0b010) else "positive",
+                    "z": "negative" if (mask & 0b100) else "positive",
+                }
+            except (TypeError, ValueError):
+                pass
+        return ((profile.get("homing") or {}).get("directions") or {}) if isinstance(profile.get("homing"), dict) else {}
+
+    def _preview_home_machine_position(self, profile):
+        limits = self._preview_machine_limits(profile)
+        if limits is None:
+            return None
+        directions = self._profile_homing_directions(profile)
+        pull_off = self._profile_homing_pull_off(profile)
+        try:
+            return {
+                "x": self._home_axis_machine_position(limits["x"], directions.get("x"), pull_off),
+                "y": self._home_axis_machine_position(limits["y"], directions.get("y"), pull_off),
+                "z": self._home_axis_machine_position(limits.get("z", (-50.0, 0.0)), directions.get("z"), pull_off),
+            }
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+
+    def _profile_homing_pull_off(self, profile):
+        if not isinstance(profile, dict):
+            return 3.0
+        settings = profile.get("settings") or {}
+        if isinstance(settings, dict) and settings.get("$27") is not None:
+            try:
+                return float(settings.get("$27"))
+            except (TypeError, ValueError):
+                pass
+        homing = profile.get("homing") or {}
+        if isinstance(homing, dict) and homing.get("pull_off_mm") is not None:
+            try:
+                return float(homing.get("pull_off_mm"))
+            except (TypeError, ValueError):
+                pass
+        return 3.0
 
     def _preview_tool_radius(self):
         spec = self._read_rectangle_template_controls()
@@ -5826,7 +6410,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return 1.0
 
     def _preview_overlay_z(self):
-        start = getattr(self, "_gcode_manual_start_wpos", None)
+        start = (
+            getattr(self, "_manual_xyz_preview_wpos", None)
+            if getattr(self, "_controller_manual_xyz_active", False)
+            else None
+        )
+        if not start:
+            start = getattr(self, "_gcode_manual_start_wpos", None)
         if start:
             try:
                 return float(start.get("z", 0.0))
@@ -5843,20 +6433,20 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             profile, _profile_path = grbl_load_machine_profile(None)
         except Exception:
             profile = {}
-        limits = profile.get("machine_limits") or {}
-        if not isinstance(limits, dict):
-            return None
-        x_limits = limits.get("x")
-        y_limits = limits.get("y")
-        if not x_limits or not y_limits:
+        limits = self._preview_machine_limits(profile)
+        if limits is None:
             return None
         wco = self._preview_work_offset(profile)
+        if wco is None:
+            return None
         try:
             return {
-                "x_min": float(x_limits[0]) - wco["x"],
-                "x_max": float(x_limits[1]) - wco["x"],
-                "y_min": float(y_limits[0]) - wco["y"],
-                "y_max": float(y_limits[1]) - wco["y"],
+                "x_min": float(limits["x"][0]) - wco["x"],
+                "x_max": float(limits["x"][1]) - wco["x"],
+                "y_min": float(limits["y"][0]) - wco["y"],
+                "y_max": float(limits["y"][1]) - wco["y"],
+                "z_min": float(limits.get("z", (-60.0, 0.0))[0]) - wco["z"],
+                "z_max": float(limits.get("z", (-60.0, 0.0))[1]) - wco["z"],
             }
         except (TypeError, ValueError, IndexError):
             return None
@@ -5864,15 +6454,21 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _preview_work_offset(self, profile):
         sender = getattr(self, "_sender", None)
         status = getattr(sender, "get_status", lambda: None)() or {}
-        live = self._extract_live_xyz(status)
-        if live is not None and live.get("wco") is not None:
-            return live["wco"]
+        connected = bool(getattr(sender, "is_connected", lambda: False)())
         wco = grbl_parse_xyz_value(status.get("WCO"))
         if wco is not None:
             return {axis: float(wco[axis]) for axis in ("x", "y", "z")}
+        mpos = grbl_parse_xyz_value(status.get("MPos"))
+        wpos = grbl_parse_xyz_value(status.get("WPos"))
+        if mpos is not None and wpos is not None:
+            return {axis: float(mpos[axis]) - float(wpos[axis]) for axis in ("x", "y", "z")}
         stored = getattr(self, "_gcode_manual_start_wco", None)
         if stored:
             return stored
+        if not connected:
+            derived = self._preview_work_offset_from_job_start(profile)
+            if derived is not None:
+                return derived
         profile_offset = profile.get("work_offset") if isinstance(profile, dict) else None
         if isinstance(profile_offset, dict):
             return {
@@ -5881,6 +6477,46 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "z": float(profile_offset.get("z", 0.0)),
             }
         return {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    def _preview_work_offset_from_job_start(self, profile):
+        job_home = self._preview_job_home_point()
+        if job_home is None:
+            return None
+        machine_home = self._preview_home_machine_position(profile)
+        if machine_home is None:
+            return None
+        return {
+            "x": float(machine_home["x"]) - float(job_home.x),
+            "y": float(machine_home["y"]) - float(job_home.y),
+            "z": float(machine_home["z"]) - float(job_home.z),
+        }
+
+    def _preview_job_home_point(self):
+        start = (
+            getattr(self, "_manual_xyz_preview_wpos", None)
+            if getattr(self, "_controller_manual_xyz_active", False)
+            else None
+        )
+        if not start:
+            start = getattr(self, "_gcode_manual_start_wpos", None)
+        if start:
+            try:
+                return PreviewPoint(float(start["x"]), float(start["y"]), float(start.get("z", 0.0)))
+            except (TypeError, ValueError, KeyError):
+                pass
+        try:
+            cut_point = self._first_cut_point(self._preview_path_from_current_state(self._gcode_edit.toPlainText()))
+            if cut_point is not None:
+                return cut_point
+        except Exception:
+            pass
+        spec = getattr(self, "_last_template_spec", None)
+        if spec is not None and spec.cut_start_x is not None and spec.cut_start_y is not None:
+            try:
+                return PreviewPoint(float(spec.cut_start_x), float(spec.cut_start_y), float(spec.start_z))
+            except (TypeError, ValueError):
+                pass
+        return None
 
     def _on_pick_template_fit_corner(self):
         if getattr(self, "_template_fit_pick_active", False):
@@ -5906,11 +6542,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         self._update_job_controls()
 
-    def _template_fit_pick_candidates(self, projection):
+    def _template_fit_pick_candidates(self, projection, rotation_z=None):
         area = self._preview_work_area()
         if area is None:
             return ()
-        z_value = self._preview_overlay_z()
+        z_value = area.get("z_max", self._preview_overlay_z())
         points = (
             PreviewPoint(area["x_min"], area["y_min"], z_value),
             PreviewPoint(area["x_max"], area["y_min"], z_value),
@@ -5920,7 +6556,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return tuple(
             PreviewSnapCandidate(
                 point=point,
-                projected=self._preview_project_point(point, projection),
+                projected=self._preview_project_point(point, projection, rotation_z=rotation_z),
                 reasons=("work_area_corner",),
                 segment_indices=(),
                 line_nos=(),
@@ -6105,6 +6741,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         self._template_fit_index = index
         self._last_template_spec = spec
+        self._save_rectangle_template_defaults(spec)
         self._gcode_edit.setPlainText(program.gcode + "\n")
         self._populate_rectangle_template_controls(spec)
         self._update_fit_status()
@@ -6172,7 +6809,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return
         path = parse_gcode_preview(self._gcode_edit.toPlainText())
         projection = self._preview_projection_name()
-        candidates = self._template_cut_start_candidates(path, projection)
+        rotation_z = self._preview_view_rotation_degrees()
+        candidates = self._template_cut_start_candidates(path, projection, rotation_z=rotation_z)
         if not candidates:
             self._append_console("Set cut start snap blocked: no preview snap points.", force=True)
             return
@@ -6183,12 +6821,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             force=True,
         )
 
-    def _template_cut_start_candidates(self, path, projection):
+    def _template_cut_start_candidates(self, path, projection, rotation_z=None):
         spec = getattr(self, "_last_template_spec", None)
         start_z = float(spec.start_z) if spec is not None else 0.0
         return tuple(
             candidate
-            for candidate in preview_snap_candidates(path, projection)
+            for candidate in self._preview_snap_candidates(path, projection, rotation_z=rotation_z)
             if candidate.point.z <= start_z + 1e-6
         )
 
@@ -6200,7 +6838,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _enable_template_fit_snap(self):
         for view in self._active_preview_views():
             projection = getattr(view, "_projection_name", self._preview_projection_name())
-            candidates = self._template_fit_pick_candidates(projection)
+            rotation_z = getattr(view, "_rotation_z", self._preview_view_rotation_degrees())
+            candidates = self._template_fit_pick_candidates(projection, rotation_z=rotation_z)
             view.set_snap_mode(True, candidates, self._apply_template_fit_pick)
 
     def _disable_template_snap(self):
@@ -6228,6 +6867,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._append_console(f"Set cut start snap failed: {exc}", force=True)
             return
         self._last_template_spec = spec
+        self._save_rectangle_template_defaults(spec)
         self._disable_template_snap()
         self._gcode_edit.setPlainText(program.gcode + "\n")
         self._populate_rectangle_template_controls(spec)
