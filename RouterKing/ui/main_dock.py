@@ -4619,6 +4619,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         command = "$J=G91 " + " ".join(parts) + f" F{float(feed):.0f}"
         self._send_command(command, log=log)
         self._advance_controller_guard_position(x=x, y=y, z=z)
+        self._request_status_for_jog()
         return True
 
     def _can_jog(self):
@@ -4881,6 +4882,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return position
 
     def _work_position_for_jog(self):
+        status = self._sender.get_status() or {}
+        fallback_position = self._manual_fallback_work_position_from_status(status)
+        if fallback_position is not None:
+            self._controller_guard_wpos = dict(fallback_position)
+            return fallback_position
         guard_position = getattr(self, "_controller_guard_wpos", None)
         if guard_position:
             return dict(guard_position)
@@ -4889,7 +4895,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             if fallback:
                 self._controller_guard_wpos = dict(fallback)
                 return dict(fallback)
-        status = self._sender.get_status() or {}
         position = self._status_work_position(status)
         if position is None:
             return None
@@ -4901,7 +4906,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if position is None:
             return
         self._controller_guard_mpos = dict(position)
-        work_position = self._status_work_position(status or {})
+        work_position = self._manual_fallback_work_position_from_status(status or {}) or self._status_work_position(status or {})
         if work_position is not None:
             self._controller_guard_wpos = dict(work_position)
         self._controller_guard_mpos_at = time.time()
@@ -4925,6 +4930,37 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if mpos is None or wco is None:
             return None
         return {axis: float(mpos[axis]) - float(wco[axis]) for axis in ("x", "y", "z")}
+
+    def _manual_fallback_work_position_from_status(self, status):
+        if not getattr(self, "_manual_xyz_work_origin_fallback", False):
+            return None
+        origin = getattr(self, "_manual_xyz_prepare_mpos", None)
+        if not origin:
+            return None
+        mpos = grbl_parse_xyz_value((status or {}).get("MPos"))
+        if mpos is None:
+            return None
+        try:
+            profile, _profile_path = grbl_load_machine_profile(None)
+        except Exception:
+            profile = {}
+        directions = self._profile_homing_directions(profile)
+        work = {}
+        for axis in ("x", "y"):
+            try:
+                current = float(mpos[axis])
+                start = float(origin[axis])
+            except (TypeError, ValueError, KeyError):
+                return None
+            if directions.get(axis) == "positive":
+                work[axis] = start - current
+            else:
+                work[axis] = current - start
+        try:
+            work["z"] = float(mpos["z"]) - float(origin["z"])
+        except (TypeError, ValueError, KeyError):
+            work["z"] = 0.0
+        return work
 
     def _work_limits_for_jog(self, machine_limits, machine_position, work_position):
         if not machine_limits or not machine_position or not work_position:
@@ -5016,7 +5052,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
             self._controller_guard_mpos = updated
         work_position = getattr(self, "_controller_guard_wpos", None)
-        if work_position:
+        if work_position and not getattr(self, "_manual_xyz_work_origin_fallback", False):
             updated = dict(work_position)
             for axis, delta in (("x", x), ("y", y), ("z", z)):
                 updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
