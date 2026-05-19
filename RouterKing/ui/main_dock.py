@@ -4695,6 +4695,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                     adjusted[axis] = clamped_delta
                     limited_axes.append(axis.upper())
 
+        manual_origin_limits = self._manual_xy_origin_limits_for_jog()
+        if manual_origin_limits:
+            for axis in ("x", "y"):
+                delta = adjusted[axis]
+                if abs(delta) < 0.0005:
+                    continue
+                axis_limits = manual_origin_limits.get(axis)
+                current = position.get(axis)
+                if axis_limits is None or current is None:
+                    continue
+                clamped_delta, limited = self._clamp_jog_axis_delta(
+                    current,
+                    delta,
+                    axis_limits[0],
+                    axis_limits[1],
+                )
+                if limited:
+                    adjusted[axis] = clamped_delta
+                    limited_axes.append(axis.upper())
+
         reason = ""
         if limited_axes:
             reason = " ".join(sorted(set(limited_axes))) + " machine limit"
@@ -4939,6 +4959,29 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             if low < high <= 0.0 and current >= 0.0:
                 adjusted[axis] = (0.0, high - low)
         return adjusted
+
+    def _manual_xy_origin_limits_for_jog(self):
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            return None
+        origin = getattr(self, "_manual_xyz_prepare_mpos", None)
+        if not origin:
+            return None
+        try:
+            profile, _profile_path = grbl_load_machine_profile(None)
+        except Exception:
+            profile = {}
+        directions = self._profile_homing_directions(profile)
+        limits = {}
+        for axis in ("x", "y"):
+            try:
+                value = float(origin[axis])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if directions.get(axis) == "negative":
+                limits[axis] = (value, float("inf"))
+            elif directions.get(axis) == "positive":
+                limits[axis] = (float("-inf"), value)
+        return limits or None
 
     def _invalidate_controller_guard_position(self):
         self._controller_guard_mpos = None
