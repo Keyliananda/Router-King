@@ -4603,6 +4603,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                     prefix = "Manual XYZ" if getattr(self, "_controller_manual_xyz_active", False) else "Controller"
                     status.setText(f"{prefix}: limited - {limit_reason}")
             if abs(float(x)) < 0.0005 and abs(float(y)) < 0.0005 and abs(float(z)) < 0.0005:
+                self._invalidate_controller_guard_position()
+                self._request_status_for_jog()
                 return False
         parts = []
         if abs(float(x)) >= 0.0005:
@@ -4666,7 +4668,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 limited_axes.append(axis.upper())
 
         work_position = self._work_position_for_jog()
-        work_limits = self._milling_work_limits_for_jog(self._work_limits_for_jog(limits, position, work_position))
+        work_limits = self._milling_work_limits_for_jog(
+            self._work_limits_for_jog(limits, position, work_position),
+            work_position,
+        )
         if work_position and work_limits:
             for axis in ("x", "y"):
                 delta = adjusted[axis]
@@ -4720,26 +4725,27 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return self._current_machine_limits()
 
     def _current_machine_limits(self, profile=None, *, require_complete=True):
-        values = self._machine_limits_from_current_values()
         if profile is None:
             try:
                 profile, _profile_path = grbl_load_machine_profile(None)
             except Exception:
                 profile = {}
         profile_values = self._machine_limits_from_profile(profile)
+        values = self._machine_limits_from_current_values(profile_values)
         merged = dict(profile_values or {})
         merged.update(values)
         if require_complete and any(axis not in merged for axis in ("x", "y", "z")):
             return None
         return merged or None
 
-    def _machine_limits_from_current_values(self):
+    def _machine_limits_from_current_values(self, reference_values=None):
         values = {}
         for axis in ("X", "Y", "Z"):
             value = getattr(self, "_limits", {}).get(axis)
             limits = self._machine_limits_from_travel(value)
             if limits is not None:
-                values[axis.lower()] = limits
+                axis_key = axis.lower()
+                values[axis_key] = self._machine_limits_oriented_like(limits, (reference_values or {}).get(axis_key))
         return values
 
     def _machine_limits_from_profile(self, profile):
@@ -4910,7 +4916,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         except (TypeError, ValueError, KeyError, IndexError):
             return None
 
-    def _milling_work_limits_for_jog(self, work_limits):
+    def _milling_work_limits_for_jog(self, work_limits, work_position=None):
         if not work_limits:
             return None
         adjusted = dict(work_limits)
@@ -4925,6 +4931,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 continue
             if low < 0.0 < high:
                 adjusted[axis] = (0.0, high)
+                continue
+            try:
+                current = float((work_position or {}).get(axis))
+            except (TypeError, ValueError):
+                continue
+            if low < high <= 0.0 and current >= 0.0:
+                adjusted[axis] = (0.0, high - low)
         return adjusted
 
     def _invalidate_controller_guard_position(self):

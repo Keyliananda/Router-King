@@ -475,6 +475,19 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(limits, {"x": (0.0, 400.0), "y": (0.0, 400.0), "z": (-48.0, 12.0)})
 
+    def test_current_machine_limits_orients_live_travel_like_profile_limits(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._limits = {"X": 410.0, "Y": 220.0, "Z": 70.0}
+        profile = {
+            "machine_limits": {"x": [0.0, 500.0], "y": [10.0, 210.0], "z": [-80.0, 20.0]},
+            "settings": {"$130": "400.000", "$131": "400.000", "$132": "60.000"},
+        }
+
+        limits = widget._current_machine_limits(profile)
+
+        self.assertEqual(limits, {"x": (0.0, 410.0), "y": (0.0, 220.0), "z": (-56.0, 14.0)})
+
     def test_send_jog_blocks_below_positive_oriented_dynamic_limits(self):
         main_dock = _load_main_dock_module()
         sender = _FakeConnectedSender(
@@ -521,6 +534,31 @@ class TestMainDock(unittest.TestCase):
         self.assertFalse(negative)
         self.assertTrue(positive)
         self.assertEqual(sender.commands, ["$J=G91 X0.500 F600"])
+
+    def test_send_jog_blocks_negative_y_at_zero_when_work_limits_end_at_zero(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "0.000,0.000,-3.000",
+                "WPos": "0.000,0.000,-3.000",
+                "WCO": "0.000,0.000,0.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {}
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        profile = {"machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]}}
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            result = widget._send_jog(y=-0.5, feed=600, source="test")
+
+        self.assertFalse(result)
+        self.assertEqual(sender.commands, [])
+        widget._request_status.assert_called_once_with()
 
     def test_travel_test_uses_dynamic_machine_limit_interval(self):
         main_dock = _load_main_dock_module()
