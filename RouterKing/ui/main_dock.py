@@ -4589,6 +4589,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._send_jog(feed=feed, source="Jog", **kwargs)
 
     def _send_jog(self, x=0.0, y=0.0, z=0.0, feed=300.0, source="Jog", log=True):
+        requested = {"x": float(x), "y": float(y), "z": float(z)}
         allowed, reason = self._can_jog()
         if not allowed:
             if log:
@@ -4596,6 +4597,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return False
         x, y, z, limit_reason = self._limit_jog_delta(x, y, z)
         if limit_reason:
+            self._log_jog_decision(source, requested, (x, y, z), feed, limit_reason, None)
             if log:
                 self._append_console(f"{source} limited: {limit_reason}", force=True)
             else:
@@ -4617,10 +4619,39 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if not parts:
             return False
         command = "$J=G91 " + " ".join(parts) + f" F{float(feed):.0f}"
+        self._log_jog_decision(source, requested, (x, y, z), feed, "", command)
         self._send_command(command, log=log)
         self._advance_controller_guard_position(x=x, y=y, z=z)
         self._request_status_for_jog()
         return True
+
+    def _log_jog_decision(self, source, requested, adjusted, feed, reason, command):
+        status = {}
+        try:
+            status = self._sender.get_status() or {}
+        except Exception:
+            status = {}
+        try:
+            limits = self._machine_limits_for_jog()
+        except Exception:
+            limits = None
+        _controller_log(
+            "jog decision "
+            f"source={source} "
+            f"state={status.get('state', '?')} "
+            f"MPos={status.get('MPos', '')} "
+            f"WPos={status.get('WPos', '')} "
+            f"WCO={status.get('WCO', '')} "
+            f"raw=({requested['x']:.3f},{requested['y']:.3f},{requested['z']:.3f}) "
+            f"adj=({float(adjusted[0]):.3f},{float(adjusted[1]):.3f},{float(adjusted[2]):.3f}) "
+            f"feed={float(feed):.0f} "
+            f"guard_mpos={getattr(self, '_controller_guard_mpos', None)} "
+            f"guard_wpos={getattr(self, '_controller_guard_wpos', None)} "
+            f"manual_fallback={getattr(self, '_manual_xyz_work_origin_fallback', False)} "
+            f"limits={limits} "
+            f"reason={reason or 'send'} "
+            f"command={command or ''}"
+        )
 
     def _can_jog(self):
         if not self._sender.is_connected():
