@@ -641,6 +641,33 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(sender.commands, ["$J=G91 X-58.000 F600"])
         widget._request_status.assert_called_once_with()
 
+    def test_manual_xyz_treats_missing_work_status_as_fallback_even_if_flag_was_lost(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "0.000,0.000,0.000"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 400.0, "Y": 400.0, "Z": 60.0}
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_prepare_mpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+        widget._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+        widget._manual_xyz_work_origin_fallback = False
+        widget._controller_guard_wpos = None
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        profile = {
+            "machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]},
+            "settings": {"$23": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            negative_x = widget._send_jog(x=-0.5, feed=600, source="test")
+            positive_x = widget._send_jog(x=0.5, feed=600, source="test")
+
+        self.assertFalse(negative_x)
+        self.assertTrue(positive_x)
+        self.assertEqual(sender.commands, ["$J=G91 X0.500 F600"])
+
     def test_travel_test_uses_dynamic_machine_limit_interval(self):
         main_dock = _load_main_dock_module()
         sender = _FakeConnectedSender(status={"state": "Idle"})

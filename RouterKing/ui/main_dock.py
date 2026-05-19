@@ -4676,13 +4676,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._request_status_for_jog()
             return 0.0, 0.0, 0.0, "machine position unknown"
 
+        status = self._sender.get_status() or {}
+        manual_work_fallback = self._manual_work_fallback_active(status)
         adjusted = dict(requested)
         limited_axes = []
         for axis in ("x", "y", "z"):
             delta = requested[axis]
             if abs(delta) < 0.0005:
                 continue
-            if axis in ("x", "y") and getattr(self, "_manual_xyz_work_origin_fallback", False):
+            if axis in ("x", "y") and manual_work_fallback:
                 continue
             axis_limits = limits.get(axis)
             current = position.get(axis)
@@ -4707,6 +4709,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._work_limits_for_jog(limits, position, work_position),
             work_position,
             limits,
+            manual_work_fallback,
         )
         if work_position and work_limits:
             for axis in ("x", "y"):
@@ -4921,7 +4924,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         guard_position = getattr(self, "_controller_guard_wpos", None)
         if guard_position:
             return dict(guard_position)
-        if getattr(self, "_manual_xyz_work_origin_fallback", False):
+        if self._manual_work_fallback_active(status):
             fallback = getattr(self, "_manual_xyz_prepare_wpos", None)
             if fallback:
                 self._controller_guard_wpos = dict(fallback)
@@ -4962,8 +4965,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return None
         return {axis: float(mpos[axis]) - float(wco[axis]) for axis in ("x", "y", "z")}
 
+    def _manual_work_fallback_active(self, status=None):
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            return False
+        if getattr(self, "_manual_xyz_work_origin_fallback", False):
+            return True
+        return self._status_work_position(status or {}) is None
+
     def _manual_fallback_work_position_from_status(self, status):
-        if not getattr(self, "_manual_xyz_work_origin_fallback", False):
+        if not self._manual_work_fallback_active(status):
             return None
         origin = getattr(self, "_manual_xyz_prepare_mpos", None)
         if not origin:
@@ -5012,7 +5022,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         except (TypeError, ValueError, KeyError, IndexError):
             return None
 
-    def _milling_work_limits_for_jog(self, work_limits, work_position=None, machine_limits=None):
+    def _milling_work_limits_for_jog(
+        self,
+        work_limits,
+        work_position=None,
+        machine_limits=None,
+        manual_work_fallback=None,
+    ):
         if not work_limits:
             return None
         adjusted = dict(work_limits)
@@ -5034,7 +5050,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 continue
             if low < high <= 0.0 and current >= 0.0:
                 adjusted[axis] = (0.0, high - low)
-        if getattr(self, "_manual_xyz_work_origin_fallback", False):
+        if manual_work_fallback if manual_work_fallback is not None else self._manual_work_fallback_active():
             for axis in ("x", "y"):
                 axis_limits = (machine_limits or {}).get(axis)
                 if axis_limits is None:
@@ -5083,7 +5099,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
             self._controller_guard_mpos = updated
         work_position = getattr(self, "_controller_guard_wpos", None)
-        if work_position and not getattr(self, "_manual_xyz_work_origin_fallback", False):
+        if work_position and not self._manual_work_fallback_active():
             updated = dict(work_position)
             for axis, delta in (("x", x), ("y", y), ("z", z)):
                 updated[axis] = float(updated.get(axis, 0.0)) + float(delta)
