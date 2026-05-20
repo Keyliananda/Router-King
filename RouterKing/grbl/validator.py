@@ -1192,6 +1192,9 @@ def _profile_machine_limits(profile: Mapping[str, Any]) -> dict:
     limits = profile.get("machine_limits")
     if not isinstance(limits, Mapping):
         return values
+    homing = profile.get("homing")
+    directions = homing.get("directions") if isinstance(homing, Mapping) else {}
+    pull_off = _to_float(homing.get("pull_off_mm")) if isinstance(homing, Mapping) else None
     for axis in ("x", "y", "z"):
         item = limits.get(axis) or limits.get(axis.upper())
         if not isinstance(item, (list, tuple)) or len(item) < 2:
@@ -1203,8 +1206,39 @@ def _profile_machine_limits(profile: Mapping[str, Any]) -> dict:
             continue
         if low == high:
             continue
+        low, high = min(low, high), max(low, high)
+        corrected = _correct_shifted_positive_z_limits(
+            axis=axis,
+            low=low,
+            high=high,
+            travel=abs(high - low),
+            directions=directions,
+            pull_off=pull_off,
+        )
+        if corrected is not None:
+            values[axis] = corrected
+            continue
         values[axis] = [min(low, high), max(low, high)]
     return values
+
+
+def _correct_shifted_positive_z_limits(
+    *,
+    axis: str,
+    low: float,
+    high: float,
+    travel: float,
+    directions: Mapping[str, Any] | None,
+    pull_off: Optional[float],
+) -> Optional[list[float]]:
+    if axis != "z":
+        return None
+    if not isinstance(directions, Mapping) or directions.get("z") != "positive":
+        return None
+    pull_off_value = abs(float(pull_off or 0.0))
+    if abs(float(low) + pull_off_value) > 1.0:
+        return None
+    return [float(low) - float(travel), float(low)]
 
 
 def _profile_feed_value(profile: Mapping[str, Any], axis: str, setting_key: str) -> Optional[float]:

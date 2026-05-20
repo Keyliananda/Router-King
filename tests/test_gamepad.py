@@ -112,6 +112,74 @@ class TestGamepadHelpers(unittest.TestCase):
         self.assertFalse(snapshot.buttons[1].pressed)
         self.assertTrue(snapshot.buttons[2].pressed)
 
+    def test_snapshot_normalizes_controller_triggers_to_positive_range(self):
+        axes = {
+            4: -1.0,
+            5: 1.0,
+        }
+        fake_controller = SimpleNamespace(
+            get_axis=lambda axis: axes.get(axis, 0.0),
+            get_button=lambda button: False,
+        )
+        fake_pygame = SimpleNamespace(
+            event=SimpleNamespace(pump=lambda: None),
+            CONTROLLER_AXIS_TRIGGERLEFT=4,
+            CONTROLLER_AXIS_TRIGGERRIGHT=5,
+        )
+
+        pad = PygameGamepad(pygame_module=fake_pygame)
+        pad._controller = fake_controller
+        pad._name = "Pad"
+
+        snapshot = pad.snapshot()
+
+        self.assertEqual([axis.name for axis in snapshot.axes], ["L2", "R2"])
+        self.assertAlmostEqual(snapshot.axes[0].value, 0.0)
+        self.assertAlmostEqual(snapshot.axes[1].value, 1.0)
+
+    def test_snapshot_calibrates_nonstandard_trigger_rest_position(self):
+        axes = {
+            4: -0.216,
+            5: -0.216,
+        }
+        fake_controller = SimpleNamespace(
+            get_axis=lambda axis: axes.get(axis, 0.0),
+            get_button=lambda button: False,
+        )
+        fake_pygame = SimpleNamespace(
+            event=SimpleNamespace(pump=lambda: None),
+            CONTROLLER_AXIS_TRIGGERLEFT=4,
+            CONTROLLER_AXIS_TRIGGERRIGHT=5,
+        )
+
+        pad = PygameGamepad(pygame_module=fake_pygame)
+        pad._controller = fake_controller
+        pad._controller_trigger_rest = {4: -0.216, 5: -0.216}
+        pad._name = "Pad"
+
+        snapshot = pad.snapshot()
+
+        self.assertAlmostEqual(snapshot.axes[0].value, 0.0)
+        self.assertAlmostEqual(snapshot.axes[1].value, 0.0)
+
+        axes[4] = 1.0
+        snapshot = pad.snapshot()
+        self.assertAlmostEqual(snapshot.axes[0].value, 1.0)
+
+    def test_state_from_snapshot_maps_l2_to_z_down(self):
+        snapshot = GamepadSnapshot(
+            name="Pad",
+            axes=(
+                GamepadAxis("L2", 1.0),
+                GamepadAxis("R2", 0.0),
+            ),
+            buttons=(),
+        )
+
+        state = state_from_snapshot(snapshot)
+
+        self.assertEqual(state.z, -1.0)
+
     def test_state_from_snapshot_supports_multiple_bindings(self):
         snapshot = GamepadSnapshot(
             name="Pad",

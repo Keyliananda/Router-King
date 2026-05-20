@@ -120,12 +120,13 @@ class TestGrblValidator(unittest.TestCase):
                 "prefer_profile_limits": True,
                 "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
                 "work_envelope_mm": {"x": 400.0, "y": 400.0, "z": 60.0},
+                "homing": {"directions": {"x": "negative", "y": "negative", "z": "positive"}, "pull_off_mm": 3.0},
             },
             settings={"$130": "300", "$131": "380", "$132": "50"},
             status={},
         )
 
-        self.assertEqual(profile["machine_limits"], {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]})
+        self.assertEqual(profile["machine_limits"], {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]})
         self.assertEqual(profile["work_envelope_mm"], {"x": 400.0, "y": 400.0, "z": 60.0})
         self.assertEqual(profile["settings"]["$130"], "400.000")
         self.assertEqual(profile["settings"]["$131"], "400.000")
@@ -136,12 +137,13 @@ class TestGrblValidator(unittest.TestCase):
             "prefer_profile_limits": True,
             "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
             "work_envelope_mm": {"x": 400.0, "y": 400.0, "z": 60.0},
+            "homing": {"directions": {"x": "negative", "y": "negative", "z": "positive"}, "pull_off_mm": 3.0},
         }
         settings = {"$130": "300.000", "$131": "380.000", "$132": "50.000"}
 
         limits, source = resolve_machine_limits(profile, settings)
 
-        self.assertEqual(limits, {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]})
+        self.assertEqual(limits, {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]})
         self.assertEqual(source, "machine_profile.json")
 
     def test_resolve_machine_limits_prefers_current_settings_over_stale_profile_limits(self):

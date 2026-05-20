@@ -958,6 +958,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_guard_mpos_at = 0.0
         self._controller_guard_last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
         self._controller_manual_xyz_active = False
+        self._controller_waiting_for_neutral = False
         self._controller_test_dialog = None
         self._controller_binding_capture_dialog = None
         self._machine_profile_controls = {}
@@ -1555,10 +1556,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         pull_off = float(controls["pull_off"].value())
         profile["model"] = model or "FoxAlien Masuter Pro"
         existing_limits = self._machine_limits_from_profile_fields(profile)
+        homing = dict(profile.get("homing") or {})
         profile["machine_limits"] = {
             "x": self._machine_limits_for_profile_save(existing_limits.get("x"), x_travel),
             "y": self._machine_limits_for_profile_save(existing_limits.get("y"), y_travel),
-            "z": self._machine_limits_for_profile_save(existing_limits.get("z"), z_travel),
+            "z": self._machine_limits_for_profile_save(
+                existing_limits.get("z"),
+                z_travel,
+                axis="z",
+                homing=homing,
+                pull_off=pull_off,
+            ),
         }
         profile["work_envelope_mm"] = {"x": abs(x_travel), "y": abs(y_travel), "z": abs(z_travel)}
         settings = dict(profile.get("settings") or {})
@@ -1567,24 +1575,48 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         settings["$132"] = f"{abs(z_travel):.3f}"
         settings["$27"] = f"{max(pull_off, 0.0):.3f}"
         profile["settings"] = settings
-        homing = dict(profile.get("homing") or {})
         homing["pull_off_mm"] = max(pull_off, 0.0)
         profile["homing"] = homing
         return profile
 
     @staticmethod
-    def _machine_limits_for_profile_save(existing_axis_limits, travel):
+    def _machine_limits_for_profile_save(existing_axis_limits, travel, *, axis=None, homing=None, pull_off=None):
         travel = abs(float(travel))
         if existing_axis_limits is not None:
             try:
                 low = float(existing_axis_limits[0])
                 high = float(existing_axis_limits[1])
                 if abs(abs(high - low) - travel) <= 0.001:
+                    corrected = RouterKingDockWidget._correct_shifted_positive_z_limits(
+                        axis=axis,
+                        low=min(low, high),
+                        high=max(low, high),
+                        travel=travel,
+                        homing=homing,
+                        pull_off=pull_off,
+                    )
+                    if corrected is not None:
+                        return corrected
                     # Preserve measured GRBL MPos bounds such as -297..103.
                     return [min(low, high), max(low, high)]
             except (TypeError, ValueError, IndexError):
                 pass
         return [-travel, 0.0]
+
+    @staticmethod
+    def _correct_shifted_positive_z_limits(*, axis, low, high, travel, homing=None, pull_off=None):
+        if axis != "z":
+            return None
+        directions = (homing or {}).get("directions") if isinstance(homing, dict) else {}
+        if not isinstance(directions, dict) or directions.get("z") != "positive":
+            return None
+        try:
+            pull_off_value = abs(float(pull_off))
+        except (TypeError, ValueError):
+            pull_off_value = abs(_to_float_local((homing or {}).get("pull_off_mm")) or 0.0)
+        if abs(float(low) + pull_off_value) > 1.0:
+            return None
+        return [float(low) - float(travel), float(low)]
 
     def _save_machine_profile_controls(self):
         try:
@@ -2032,7 +2064,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 value = params.GetString(key, default_value)
             except TypeError:
                 value = params.GetString(key) or default_value
-            self._controller_defaults[key] = value
+            self._controller_defaults[key] = self._controller_binding_text_for_field(key, value)
 
     def _save_controller_defaults(self):
         if App is None:
@@ -2057,7 +2089,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         }
         for key, default_value in DEFAULT_CONTROLLER_BINDINGS.items():
             edit = binding_edits.get(key)
-            defaults[key] = str(edit.text()).strip() if edit is not None else default_value
+            raw_value = str(edit.text()).strip() if edit is not None else default_value
+            defaults[key] = self._controller_binding_text_for_field(key, raw_value)
         params.SetBool("enabled", defaults["enabled"])
         params.SetFloat("xy_step", defaults["xy_step"])
         params.SetFloat("z_step", defaults["z_step"])
@@ -3640,17 +3673,25 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._update_controller_guard_position(status)
             self._update_manual_xyz_preview_position(status)
             state = status.get("state", "?")
-            pos = status.get("WPos") or status.get("MPos")
-            if pos:
-                self._machine_status.setText(f"Machine: {state} | Pos: {pos}")
-            else:
-                self._machine_status.setText(f"Machine: {state}")
+            self._machine_status.setText(self._machine_status_text(status))
             self._update_alarm_status(state)
 
         self._update_job_controls()
         self._update_machine_controls()
         self._explore_tick()
         self._sender_was_connected = connected
+
+    def _machine_status_text(self, status):
+        status = status or {}
+        state = status.get("state", "?")
+        pos = status.get("WPos") or status.get("MPos")
+        text = f"Machine: {state}"
+        if pos:
+            text += f" | Pos: {pos}"
+        z_status = self._preview_z_up_status()
+        if z_status is not None:
+            text += f" | Z up: {z_status['remaining_mm']:.1f} mm"
+        return text
 
     def _append_console(self, text, force=False):
         if not force and self._console_verbose is not None and not self._console_verbose.isChecked():
@@ -4850,11 +4891,24 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _machine_limits_from_profile_fields(self, profile):
         values = {}
+        homing = profile.get("homing") if isinstance(profile, dict) else {}
+        directions = homing.get("directions") if isinstance(homing, dict) else {}
+        pull_off = _to_float_local(homing.get("pull_off_mm")) if isinstance(homing, dict) else None
         explicit = profile.get("machine_limits")
         if isinstance(explicit, dict):
             for axis in ("x", "y", "z"):
                 limits = self._machine_limits_from_axis_pair(explicit.get(axis) or explicit.get(axis.upper()))
                 if limits is not None:
+                    corrected = self._correct_shifted_positive_z_limits(
+                        axis=axis,
+                        low=limits[0],
+                        high=limits[1],
+                        travel=abs(limits[1] - limits[0]),
+                        homing={"directions": directions},
+                        pull_off=pull_off,
+                    )
+                    if corrected is not None:
+                        limits = tuple(corrected)
                     values[axis] = limits
         envelope = profile.get("work_envelope_mm")
         if isinstance(envelope, dict):
@@ -5216,6 +5270,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._update_manual_xyz_preview_position(status, force=True)
         _controller_log(f"manual xyz prepared: no automatic move; mpos={status.get('MPos', 'unknown')}")
         if self._controller.is_connected():
+            self._controller_waiting_for_neutral = True
             self._controller_enable.setChecked(True)
             self._controller_timer.start()
         else:
@@ -5236,6 +5291,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         else:
             self._controller_stop()
             self._update_machine_controls()
+        self._controller_waiting_for_neutral = False
         self._append_console("Manual XYZ mode stopped.", force=True)
         self._update_preview()
 
@@ -5438,18 +5494,33 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         edit = getattr(self, "_controller_binding_edits", {}).get(key)
         if edit is None:
             return
+        token = self._controller_binding_token_for_field(key, token)
         existing = [part.strip() for part in edit.text().split(",") if part.strip()]
         if token not in existing:
             existing.append(token)
         edit.setText(", ".join(existing))
         self._save_controller_defaults()
 
+    def _controller_binding_token_for_field(self, key, token):
+        token = str(token or "").strip()
+        if key == "z_axes":
+            plain = token[1:].strip() if token.startswith("-") else token
+            if plain in {"L2", "Left Trigger"}:
+                return f"-{plain}"
+        return token
+
+    def _controller_binding_text_for_field(self, key, text):
+        tokens = [part.strip() for part in str(text or "").split(",") if part.strip()]
+        return ", ".join(self._controller_binding_token_for_field(key, token) for token in tokens)
+
     def _on_controller_enabled_changed(self, _checked):
         self._save_controller_defaults()
         if self._controller_enable.isChecked() and self._controller.is_connected():
+            self._controller_waiting_for_neutral = True
             self._controller_timer.start()
         else:
             self._controller_manual_xyz_active = False
+            self._controller_waiting_for_neutral = False
             self._controller_stop()
         self._update_machine_controls()
 
@@ -5469,6 +5540,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         base_feed = float(self._controller_feed.value())
         feed = min(5000.0, base_feed * speed_multiplier)
         effective_speed_label = speed_label
+        if getattr(self, "_controller_waiting_for_neutral", False):
+            if self._controller_state_is_neutral(state):
+                self._controller_waiting_for_neutral = False
+                self._controller_status.setText(f"Controller: {state.name} ready")
+            else:
+                prefix = "Manual XYZ" if getattr(self, "_controller_manual_xyz_active", False) else "Controller"
+                self._controller_status.setText(f"{prefix}: waiting for neutral controller input")
+            return
         manual_xyz_active = getattr(self, "_controller_manual_xyz_active", False)
         smooth_xy = speed_label == "fast" or manual_xyz_active
         if smooth_xy:
@@ -5520,6 +5599,18 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         elif self._controller_was_active:
             self._controller_cancel_jog()
             self._controller_was_active = False
+
+    def _controller_state_is_neutral(self, state):
+        try:
+            x, y, z = make_jog_vector(
+                state,
+                deadzone=self._controller_deadzone.value(),
+                xy_step=self._controller_xy_step.value(),
+                z_step=self._controller_z_step.value(),
+            )
+        except Exception:
+            return False
+        return abs(float(x)) < 0.0005 and abs(float(y)) < 0.0005 and abs(float(z)) < 0.0005
 
     def _controller_slow_state(self, state):
         try:
@@ -5579,7 +5670,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         bindings = {}
         for key, default_value in DEFAULT_CONTROLLER_BINDINGS.items():
             edit = edits.get(key)
-            bindings[key] = str(edit.text()).strip() if edit is not None else str(default_value)
+            raw_value = str(edit.text()).strip() if edit is not None else str(default_value)
+            bindings[key] = self._controller_binding_text_for_field(key, raw_value)
         return bindings
 
     def _controller_stop(self):
@@ -6398,9 +6490,23 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         streaming = progress.get("streaming")
         paused = progress.get("paused")
         connected = self._sender.is_connected()
-        idle = self._machine_state() == "idle"
+        machine_state = self._machine_state()
+        idle = machine_state == "idle"
         has_gcode = bool(getattr(self, "_gcode_edit", None) is not None and self._gcode_edit.toPlainText().strip())
-        self._start_btn.setEnabled(connected and not streaming and idle and has_gcode)
+        start_block = self._start_button_block_reason(
+            connected=connected,
+            streaming=streaming,
+            idle=idle,
+            machine_state=machine_state,
+            has_gcode=has_gcode,
+        )
+        self._start_btn.setEnabled(start_block is None)
+        if hasattr(self._start_btn, "setToolTip"):
+            self._start_btn.setToolTip(
+                "Start: ready to stream G-code."
+                if start_block is None
+                else f"Start disabled: {start_block}."
+            )
         self._pause_btn.setEnabled(streaming)
         self._stop_btn.setEnabled(streaming)
         self._pause_btn.setText("Resume" if paused else "Pause")
@@ -6440,6 +6546,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         next_fit_btn = getattr(self, "_next_fit_btn", None)
         if next_fit_btn is not None:
             next_fit_btn.setEnabled(can_cycle_fit)
+
+    def _start_button_block_reason(self, *, connected, streaming, idle, machine_state, has_gcode):
+        if not connected:
+            return "not connected"
+        if streaming:
+            return "sender busy"
+        if not idle:
+            return f"machine not idle ({machine_state or 'unknown'})"
+        if not has_gcode:
+            return "G-code is empty"
+        return None
 
     def _update_machine_controls(self):
         connected = self._sender.is_connected()
@@ -6836,13 +6953,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 )
 
     def _add_preview_manual_tool_dummy(self, scene, projection, rotation_z=None, transform=None):
-        start = (
-            getattr(self, "_manual_xyz_preview_wpos", None)
-            if getattr(self, "_controller_manual_xyz_active", False)
-            else None
-        )
-        if not start:
-            start = getattr(self, "_gcode_manual_start_wpos", None)
+        start = self._preview_tool_work_position()
         if not start:
             return
         transform = transform or self._preview_transform(rotation_z)
@@ -6856,6 +6967,121 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         cross = max(radius * 1.4, 2.0)
         scene.addLine(x_val - cross, y_val, x_val + cross, y_val, pen)
         scene.addLine(x_val, y_val - cross, x_val, y_val + cross, pen)
+        self._add_preview_tool_z_indicator(scene, projection, point, radius, transform=transform)
+
+    def _add_preview_tool_z_indicator(self, scene, projection, point, radius, rotation_z=None, transform=None):
+        z_status = self._preview_z_up_status()
+        if z_status is None:
+            return
+        transform = transform or self._preview_transform(rotation_z)
+        qt_gui = QtGui
+        pen = qt_gui.QPen(qt_gui.QColor(255, 230, 80, 180), 0)
+        top_z = z_status.get("target_wpos_z")
+        if top_z is not None:
+            try:
+                top_point = PreviewPoint(float(point.x), float(point.y), float(top_z))
+                x0, y0 = transform.project(point, projection)
+                x1, y1 = transform.project(top_point, projection)
+                if abs(x1 - x0) > 0.001 or abs(y1 - y0) > 0.001:
+                    item = scene.addLine(x0, y0, x1, y1, pen)
+                    try:
+                        item.setZValue(1150)
+                    except Exception:
+                        pass
+            except (TypeError, ValueError):
+                pass
+        try:
+            text_item = scene.addText(f"Z up {z_status['remaining_mm']:.1f} mm")
+            text_item.setDefaultTextColor(qt_gui.QColor(255, 230, 80, 235))
+            x_val, y_val = transform.project(point, projection)
+            text_item.setPos(x_val + radius * 1.35, y_val + radius * 1.15)
+            text_item.setZValue(1250)
+        except Exception:
+            pass
+
+    def _preview_tool_work_position(self):
+        if getattr(self, "_controller_manual_xyz_active", False):
+            start = getattr(self, "_manual_xyz_preview_wpos", None)
+            if start:
+                return start
+            guard_position = getattr(self, "_controller_guard_wpos", None)
+            if guard_position:
+                return guard_position
+        sender = getattr(self, "_sender", None)
+        status = getattr(sender, "get_status", lambda: None)() or {}
+        position = self._status_work_position(status)
+        if position is not None:
+            return position
+        guard_position = getattr(self, "_controller_guard_wpos", None)
+        if guard_position:
+            return guard_position
+        start = getattr(self, "_gcode_manual_start_wpos", None)
+        if start:
+            return start
+        return None
+
+    def _preview_tool_machine_position(self):
+        if getattr(self, "_controller_manual_xyz_active", False):
+            guard_position = getattr(self, "_controller_guard_mpos", None)
+            if guard_position:
+                return guard_position
+        sender = getattr(self, "_sender", None)
+        status = getattr(sender, "get_status", lambda: None)() or {}
+        position = self._status_machine_position(status)
+        if position is not None:
+            return position
+        guard_position = getattr(self, "_controller_guard_mpos", None)
+        if guard_position:
+            return guard_position
+        start = getattr(self, "_gcode_manual_start_wpos", None)
+        wco = getattr(self, "_gcode_manual_start_wco", None)
+        if start and wco:
+            try:
+                return {axis: float(start[axis]) + float(wco[axis]) for axis in ("x", "y", "z")}
+            except (TypeError, ValueError, KeyError):
+                return None
+        return None
+
+    def _preview_z_up_status(self):
+        profile = {}
+        try:
+            profile, _profile_path = grbl_load_machine_profile(None)
+        except Exception:
+            profile = {}
+        limits = self._preview_machine_limits(profile)
+        if limits is None:
+            return None
+        machine_position = self._preview_tool_machine_position()
+        if machine_position is None:
+            return None
+        directions = self._profile_homing_directions(profile)
+        try:
+            z_limits = limits["z"]
+            z_low = min(float(z_limits[0]), float(z_limits[1]))
+            z_high = max(float(z_limits[0]), float(z_limits[1]))
+            current_z = float(machine_position["z"])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        direction = directions.get("z")
+        if direction == "negative":
+            target_mpos_z = z_low
+            remaining = current_z - target_mpos_z
+        else:
+            target_mpos_z = z_high
+            remaining = target_mpos_z - current_z
+        wco = self._preview_work_offset(profile)
+        target_wpos_z = None
+        if wco is not None:
+            try:
+                target_wpos_z = float(target_mpos_z) - float(wco["z"])
+            except (TypeError, ValueError, KeyError):
+                target_wpos_z = None
+        return {
+            "current_mpos_z": current_z,
+            "target_mpos_z": target_mpos_z,
+            "target_wpos_z": target_wpos_z,
+            "remaining_mm": max(0.0, float(remaining)),
+        }
 
     def _add_preview_reference_markers(self, scene, projection, path, rotation_z=None, transform=None):
         transform = transform or self._preview_transform(rotation_z)

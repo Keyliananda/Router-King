@@ -79,6 +79,7 @@ class PygameGamepad:
         self._joystick = None
         self._name = ""
         self._error = ""
+        self._controller_trigger_rest: dict[int, float] = {}
 
     @property
     def error(self) -> str:
@@ -91,7 +92,7 @@ class PygameGamepad:
         pygame = self._load_pygame()
         if pygame is None:
             return False
-        if self._connect_controller(index=index):
+        if self._connect_controller(pygame, index=index):
             return True
         try:
             joystick_module = pygame.joystick
@@ -122,6 +123,7 @@ class PygameGamepad:
         self._controller = None
         self._joystick = None
         self._name = ""
+        self._controller_trigger_rest = {}
         try:
             if controller is not None:
                 controller.quit()
@@ -183,7 +185,7 @@ class PygameGamepad:
             self.disconnect()
             return None
 
-    def _connect_controller(self, index: int = 0) -> bool:
+    def _connect_controller(self, pygame, index: int = 0) -> bool:
         try:
             controller_module = importlib.import_module("pygame._sdl2.controller")
             controller_module.init()
@@ -200,6 +202,7 @@ class PygameGamepad:
                     self._controller_module = controller_module
                     self._controller = controller
                     self._joystick = None
+                    self._controller_trigger_rest = self._read_controller_trigger_rest(pygame, controller)
                     name_attr = getattr(controller, "name", "")
                     controller_name = name_attr() if callable(name_attr) else name_attr
                     self._name = str(controller_name or f"Controller {candidate + 1}")
@@ -215,7 +218,7 @@ class PygameGamepad:
         controller = self._controller
         x = _controller_axis(controller, pygame.CONTROLLER_AXIS_RIGHTX)
         y = -_controller_axis(controller, pygame.CONTROLLER_AXIS_RIGHTY)
-        z = _controller_trigger(controller, pygame.CONTROLLER_AXIS_TRIGGERRIGHT) - _controller_trigger(
+        z = self._controller_trigger_value(controller, pygame.CONTROLLER_AXIS_TRIGGERRIGHT) - self._controller_trigger_value(
             controller,
             pygame.CONTROLLER_AXIS_TRIGGERLEFT,
         )
@@ -235,7 +238,7 @@ class PygameGamepad:
     def _snapshot_controller(self, pygame) -> GamepadSnapshot:
         controller = self._controller
         axes = tuple(
-            GamepadAxis(label, _controller_axis(controller, axis))
+            GamepadAxis(label, self._controller_snapshot_axis_value(controller, axis, label))
             for label, axis in _controller_axis_specs(pygame)
         )
         buttons = tuple(
@@ -243,6 +246,22 @@ class PygameGamepad:
             for label, button in _controller_button_specs(pygame)
         )
         return GamepadSnapshot(name=self._name, axes=axes, buttons=buttons)
+
+    def _read_controller_trigger_rest(self, pygame, controller) -> dict[int, float]:
+        rest: dict[int, float] = {}
+        for attr in ("CONTROLLER_AXIS_TRIGGERLEFT", "CONTROLLER_AXIS_TRIGGERRIGHT"):
+            if hasattr(pygame, attr):
+                axis = getattr(pygame, attr)
+                rest[int(axis)] = _controller_axis(controller, axis)
+        return rest
+
+    def _controller_trigger_value(self, controller: Any, axis: int) -> float:
+        return _controller_trigger(controller, axis, self._controller_trigger_rest.get(int(axis)))
+
+    def _controller_snapshot_axis_value(self, controller: Any, axis: int, label: str) -> float:
+        if label in {"L2", "R2"}:
+            return self._controller_trigger_value(controller, axis)
+        return _controller_axis(controller, axis)
 
     def _snapshot_joystick(self) -> GamepadSnapshot:
         joystick = self._joystick
@@ -392,12 +411,19 @@ def _controller_axis(controller: Any, axis: int) -> float:
         return 0.0
 
 
-def _controller_trigger(controller: Any, axis: int) -> float:
-    return _trigger(_controller_axis(controller, axis))
+def _controller_trigger(controller: Any, axis: int, rest: float | None = None) -> float:
+    return _trigger(_controller_axis(controller, axis), rest=rest)
 
 
-def _trigger(value: float) -> float:
+def _trigger(value: float, *, rest: float | None = None) -> float:
     value = max(-1.0, min(1.0, float(value)))
+    if rest is not None:
+        rest = max(-1.0, min(1.0, float(rest)))
+        if rest > 0.5:
+            denom = max(0.001, rest + 1.0)
+            return max(0.0, min(1.0, (rest - value) / denom))
+        denom = max(0.001, 1.0 - rest)
+        return max(0.0, min(1.0, (value - rest) / denom))
     if value < 0.0:
         return (value + 1.0) / 2.0
     return value

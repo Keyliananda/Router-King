@@ -10,12 +10,16 @@ class _DummyWidget:
     def __init__(self):
         self.text = None
         self.enabled = None
+        self.tooltip = None
 
     def setText(self, text):
         self.text = text
 
     def setEnabled(self, enabled):
         self.enabled = enabled
+
+    def setToolTip(self, text):
+        self.tooltip = text
 
 
 class _DummyLog:
@@ -743,6 +747,27 @@ class TestMainDock(unittest.TestCase):
         self.assertTrue(positive_x)
         self.assertEqual(sender.commands, ["$J=G91 X1.000 F600"])
 
+    def test_jog_z_down_allowed_near_positive_z_home_with_shifted_profile(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(status={"state": "Idle", "MPos": "-267.338,-330.675,-2.100"})
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._explore_active = False
+        widget._limits = {"X": 400.0, "Y": 400.0, "Z": 60.0}
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
+            "homing": {"directions": {"x": "negative", "y": "negative", "z": "positive"}, "pull_off_mm": 3.0},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            result = widget._send_jog(z=-1.0, feed=600, source="test")
+
+        self.assertTrue(result)
+        self.assertEqual(sender.commands, ["$J=G91 Z-1.000 F600"])
+
     def test_jog_wco_without_wpos_still_uses_work_origin_fallback(self):
         main_dock = _load_main_dock_module()
         sender = _FakeConnectedSender(
@@ -1105,6 +1130,73 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(widget._preview_overlay_z(), 3.0)
 
+    def test_preview_tool_work_position_uses_live_manual_xyz_z_position(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(
+            status={
+                "MPos": "-397.000,-397.000,-8.000",
+                "WPos": "0.000,0.000,-5.000",
+                "WCO": "-397.000,-397.000,-3.000",
+            }
+        )
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": 12.0, "y": 18.0, "z": -5.0}
+        widget._controller_guard_mpos = {"x": -385.0, "y": -379.0, "z": -8.0}
+        widget._controller_guard_wpos = {"x": 12.0, "y": 18.0, "z": -5.0}
+
+        self.assertEqual(widget._preview_tool_work_position(), {"x": 12.0, "y": 18.0, "z": -5.0})
+        self.assertEqual(widget._preview_tool_machine_position(), {"x": -385.0, "y": -379.0, "z": -8.0})
+
+    def test_preview_z_up_status_uses_shifted_positive_z_machine_limit(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(
+            status={
+                "MPos": "-397.000,-397.000,-20.000",
+                "WPos": "0.000,0.000,-17.000",
+                "WCO": "-397.000,-397.000,-3.000",
+            }
+        )
+        widget._controller_manual_xyz_active = False
+        widget._gcode_manual_start_wco = None
+        profile = {
+            "machine_limits": {"x": [-397.0, 3.0], "y": [-397.0, 3.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+            "prefer_profile_limits": True,
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            z_status = widget._preview_z_up_status()
+
+        self.assertEqual(z_status["current_mpos_z"], -20.0)
+        self.assertEqual(z_status["target_mpos_z"], -3.0)
+        self.assertEqual(z_status["target_wpos_z"], 0.0)
+        self.assertEqual(z_status["remaining_mm"], 17.0)
+
+    def test_machine_status_text_reports_remaining_z_up_travel(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        status = {
+            "state": "Idle",
+            "MPos": "-397.000,-397.000,-8.500",
+            "WPos": "0.000,0.000,-5.500",
+            "WCO": "-397.000,-397.000,-3.000",
+        }
+        widget._sender = _FakeConnectedSender(status=status)
+        widget._controller_manual_xyz_active = False
+        widget._gcode_manual_start_wco = None
+        profile = {
+            "machine_limits": {"x": [-397.0, 3.0], "y": [-397.0, 3.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+            "prefer_profile_limits": True,
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            text = widget._machine_status_text(status)
+
+        self.assertEqual(text, "Machine: Idle | Pos: 0.000,0.000,-5.500 | Z up: 5.5 mm")
+
     def test_set_manual_start_saves_live_position_without_motion(self):
         main_dock = _load_main_dock_module()
         sender = _FakeConnectedSender(
@@ -1232,6 +1324,17 @@ class TestMainDock(unittest.TestCase):
         widget._update_job_controls()
 
         self.assertTrue(widget._air_run_apply_btn.enabled)
+
+    def test_start_button_tooltip_reports_block_reason(self):
+        main_dock = _load_main_dock_module()
+        widget = self._make_widget(main_dock, sender=_FakeConnectedSender(status={"state": "Alarm"}))
+        widget._explore_active = False
+        widget._gcode_edit = _DummyPlainTextEdit("G90\nG1 X1 Y1")
+
+        widget._update_job_controls()
+
+        self.assertFalse(widget._start_btn.enabled)
+        self.assertEqual(widget._start_btn.tooltip, "Start disabled: machine not idle (alarm).")
 
     def test_insert_template_uses_dialog_spec_and_records_last_spec(self):
         main_dock = _load_main_dock_module()
@@ -1869,12 +1972,27 @@ class TestMainDock(unittest.TestCase):
         profile = widget._machine_profile_from_controls(
             {
                 "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
+                "homing": {"directions": {"x": "negative", "y": "negative", "z": "positive"}, "pull_off_mm": 3.0},
                 "settings": {"$130": "300.000", "$131": "380.000", "$132": "50.000"},
             }
         )
 
-        self.assertEqual(profile["machine_limits"], {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]})
+        self.assertEqual(profile["machine_limits"], {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]})
         self.assertEqual(profile["work_envelope_mm"], {"x": 400.0, "y": 400.0, "z": 60.0})
+
+    def test_current_machine_limits_corrects_stale_positive_z_profile_limits(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._limits = {}
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
+            "homing": {"directions": {"x": "negative", "y": "negative", "z": "positive"}, "pull_off_mm": 3.0},
+        }
+
+        limits = widget._current_machine_limits(profile)
+
+        self.assertEqual(limits["z"], (-63.0, -3.0))
 
     def test_preview_display_transform_keeps_machine_xy_without_mutating_point(self):
         main_dock = _load_main_dock_module()
@@ -2320,6 +2438,27 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(edit.text(), "Right X, DPad Right, DPad Left")
         self.assertEqual(widget._save_controller_defaults.call_count, 2)
 
+    def test_append_controller_binding_token_maps_l2_to_z_down(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        edit = _DummyLineEdit("R2")
+        widget._controller_binding_edits = {"z_axes": edit}
+        widget._save_controller_defaults = mock.Mock()
+
+        widget._append_controller_binding_token("z_axes", "L2")
+
+        self.assertEqual(edit.text(), "R2, -L2")
+        widget._save_controller_defaults.assert_called_once()
+
+    def test_controller_binding_strings_normalizes_stale_l2_z_axis(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_binding_edits = {"z_axes": _DummyLineEdit("R2, L2")}
+
+        bindings = widget._controller_binding_strings()
+
+        self.assertEqual(bindings["z_axes"], "R2, -L2")
+
     def test_controller_tick_fast_z_only_uses_step_interval_without_shoulders(self):
         main_dock = _load_main_dock_module()
         state = types.SimpleNamespace(
@@ -2475,6 +2614,62 @@ class TestMainDock(unittest.TestCase):
             {"y": 0.0, "z": 0.0, "feed": 600.0, "source": "Controller", "log": False},
         )
         self.assertIn("[slow]", widget._controller_status.text)
+
+    def test_controller_tick_waits_for_neutral_before_sending_after_prepare(self):
+        main_dock = _load_main_dock_module()
+        biased_state = types.SimpleNamespace(
+            name="Pad",
+            x=0.0,
+            y=0.0,
+            z=-0.4,
+            speed_label="fast",
+            speed_multiplier=3.0,
+        )
+        neutral_state = types.SimpleNamespace(
+            name="Pad",
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            speed_label="fast",
+            speed_multiplier=3.0,
+        )
+        active_state = types.SimpleNamespace(
+            name="Pad",
+            x=0.0,
+            y=0.0,
+            z=-1.0,
+            speed_label="fast",
+            speed_multiplier=3.0,
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_enable = _DummyCheckBox(True)
+        widget._controller = types.SimpleNamespace(
+            is_connected=lambda: True,
+            poll_mapped=mock.Mock(side_effect=[biased_state, neutral_state, active_state]),
+            error="",
+        )
+        widget._controller_feed = _DummySpin(600.0)
+        widget._controller_deadzone = _DummySpin(0.2)
+        widget._controller_z_step = _DummySpin(0.1)
+        widget._controller_xy_step = _DummySpin(0.5)
+        widget._controller_last_jog_at = 100.0
+        widget._controller_was_active = False
+        widget._controller_manual_xyz_active = True
+        widget._controller_waiting_for_neutral = True
+        widget._controller_status = _DummyWidget()
+        widget._controller_binding_strings = mock.Mock(return_value={})
+        widget._controller_fast_xy_allowed = mock.Mock(return_value=True)
+        widget._send_jog = mock.Mock(return_value=True)
+
+        with mock.patch.object(main_dock.time, "time", side_effect=[100.25, 100.50, 100.75]):
+            widget._controller_tick()
+            widget._controller_tick()
+            widget._controller_tick()
+
+        widget._send_jog.assert_called_once()
+        kwargs = widget._send_jog.call_args.kwargs
+        self.assertLess(kwargs["z"], 0.0)
+        self.assertFalse(widget._controller_waiting_for_neutral)
 
     def test_controller_tick_slows_fast_xy_near_work_edge(self):
         main_dock = _load_main_dock_module()

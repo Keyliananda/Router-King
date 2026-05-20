@@ -29,11 +29,11 @@
       23.0
     ],
     "z": [
-      -3.0,
-      57.0
+      -63.0,
+      -3.0
     ]
   },
-  "machine_limits_source": "Measured live GRBL MPos bounds after homing/jog verification. These are shifted controller coordinates, not normalized -travel..0 intervals.",
+  "machine_limits_source": "Measured live GRBL MPos bounds after homing/jog verification. X/Y are shifted controller coordinates; Z homes at about -3 mm and travels downward toward -63 mm.",
   "max_feeds_mm_min": {
     "x": 2000.0,
     "y": 2000.0,
