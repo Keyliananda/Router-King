@@ -5239,7 +5239,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             if mpos is not None:
                 self._manual_xyz_prepare_mpos = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
                 self._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
-                self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
+                self._manual_xyz_preview_origin_wpos = self._current_preview_cut_start_reference(
+                    self._manual_xyz_prepare_wpos
+                )
                 self._controller_guard_wpos = dict(self._manual_xyz_prepare_wpos)
                 self._manual_xyz_work_origin_fallback = True
             return
@@ -5249,14 +5251,20 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._manual_xyz_prepare_mpos = {axis: float(live["mpos"][axis]) for axis in ("x", "y", "z")}
         self._manual_xyz_prepare_wpos = {axis: float(explicit_wpos[axis]) for axis in ("x", "y", "z")}
         self._manual_xyz_work_origin_fallback = False
-        self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
+        self._manual_xyz_preview_origin_wpos = self._current_preview_cut_start_reference(
+            self._manual_xyz_prepare_wpos
+        )
 
     def _current_preview_cut_start_reference(self, fallback_wpos):
         try:
-            path = self._preview_path_from_current_state(self._gcode_edit.toPlainText())
+            path = parse_gcode_preview(self._gcode_edit.toPlainText())
             cut = self._first_cut_point(path)
             if cut is not None:
-                return {"x": float(cut.x), "y": float(cut.y), "z": float(cut.z)}
+                return {
+                    "x": float(cut.x),
+                    "y": float(cut.y),
+                    "z": float(fallback_wpos["z"]),
+                }
         except Exception:
             pass
         if getattr(self, "_gcode_manual_start_wpos", None):

@@ -863,7 +863,7 @@ class TestMainDock(unittest.TestCase):
         self.assertIsNone(getattr(widget, "_gcode_manual_start_wpos", None))
         widget._schedule_preview_update.assert_called_once_with()
 
-    def test_manual_xyz_preview_uses_delta_from_prepare_baseline(self):
+    def test_manual_xyz_preview_keeps_visible_cut_start_on_prepare(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._controller_manual_xyz_active = True
@@ -887,8 +887,8 @@ class TestMainDock(unittest.TestCase):
         widget._update_manual_xyz_preview_position(prepare_status, force=True)
         widget._update_manual_xyz_preview_position(moved_status, force=True)
 
-        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 10.0, "y": 10.0, "z": 1.0})
-        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 15.0, "y": 12.0, "z": 1.0})
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 80.0, "y": 100.0, "z": 1.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 85.0, "y": 102.0, "z": 1.0})
 
     def test_manual_xyz_preview_delta_is_one_to_one_machine_mm(self):
         main_dock = _load_main_dock_module()
@@ -937,6 +937,31 @@ class TestMainDock(unittest.TestCase):
         self.assertTrue(widget._manual_xyz_work_origin_fallback)
         self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 0.0, "y": 0.0, "z": 0.0})
         self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 10.0, "y": 5.0, "z": 0.0})
+
+    def test_manual_xyz_preview_keeps_visible_cut_start_when_status_has_only_mpos(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = None
+        widget._manual_xyz_preview_last_at = 0.0
+        widget._schedule_preview_update = mock.Mock()
+        widget._gcode_edit = _DummyPlainTextEdit("G90\nG0 X80 Y100 Z0\nG1 X100 Y100 F500")
+        prepare_status = {
+            "state": "Idle",
+            "MPos": "-297.000,-377.000,-3.000",
+        }
+        moved_status = {
+            "state": "Idle",
+            "MPos": "-292.000,-375.000,-3.000",
+        }
+
+        widget._prepare_manual_xyz_preview_baseline(prepare_status)
+        widget._update_manual_xyz_preview_position(prepare_status, force=True)
+        widget._update_manual_xyz_preview_position(moved_status, force=True)
+
+        self.assertTrue(widget._manual_xyz_work_origin_fallback)
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 80.0, "y": 100.0, "z": 0.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 85.0, "y": 102.0, "z": 0.0})
 
     def test_manual_xyz_preview_moves_template_path_to_live_cut_start(self):
         main_dock = _load_main_dock_module()
