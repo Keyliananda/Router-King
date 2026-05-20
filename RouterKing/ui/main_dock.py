@@ -126,7 +126,7 @@ _CONTROLLER_FAST_EDGE_SLOWDOWN_MM = 50.0
 _CONTROLLER_FAST_LOOKAHEAD_S = 0.28
 _CONTROLLER_FAST_INTERVAL_S = 0.22
 _CONTROLLER_STEP_INTERVAL_S = 0.12
-_PREVIEW_MACHINE_SWAP_XY = True
+_PREVIEW_MACHINE_SWAP_XY = False
 _PREVIEW_MACHINE_FLIP_X = False
 _PREVIEW_MACHINE_FLIP_Y = False
 _RECTANGLE_TEMPLATE_PREFS_PATH = "User parameter:BaseApp/Preferences/RouterKing/RectangleTemplate"
@@ -7065,6 +7065,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return None
 
     def _preview_work_offset(self, profile):
+        manual_offset = self._preview_manual_xyz_work_offset()
+        if manual_offset is not None:
+            return manual_offset
         sender = getattr(self, "_sender", None)
         status = getattr(sender, "get_status", lambda: None)() or {}
         connected = bool(getattr(sender, "is_connected", lambda: False)())
@@ -7090,6 +7093,21 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "z": float(profile_offset.get("z", 0.0)),
             }
         return {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    def _preview_manual_xyz_work_offset(self):
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            return None
+        base_mpos = getattr(self, "_manual_xyz_prepare_mpos", None)
+        origin_wpos = getattr(self, "_manual_xyz_preview_origin_wpos", None)
+        if not base_mpos or not origin_wpos:
+            return None
+        try:
+            return {
+                axis: float(base_mpos[axis]) - float(origin_wpos[axis])
+                for axis in ("x", "y", "z")
+            }
+        except (TypeError, ValueError, KeyError):
+            return None
 
     def _preview_work_offset_from_job_start(self, profile):
         job_home = self._preview_job_home_point()
