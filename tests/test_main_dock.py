@@ -915,6 +915,29 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 10.0, "y": 5.0, "z": 0.0})
 
+    def test_manual_xyz_preview_uses_local_origin_when_status_has_wco_without_wpos(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = None
+        widget._manual_xyz_preview_last_at = 0.0
+        widget._schedule_preview_update = mock.Mock()
+        prepare_status = {
+            "MPos": "-297.000,-377.000,-3.000",
+            "WCO": "0.000,0.000,1.000",
+        }
+        moved_status = {
+            "MPos": "-287.000,-372.000,-3.000",
+            "WCO": "0.000,0.000,1.000",
+        }
+
+        widget._prepare_manual_xyz_preview_baseline(prepare_status)
+        widget._update_manual_xyz_preview_position(moved_status, force=True)
+
+        self.assertTrue(widget._manual_xyz_work_origin_fallback)
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 0.0, "y": 0.0, "z": 0.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 10.0, "y": 5.0, "z": 0.0})
+
     def test_manual_xyz_preview_moves_template_path_to_live_cut_start(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -1590,6 +1613,35 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual((display_path.segments[0].end.x, display_path.segments[0].end.y), (100.0, 100.0))
         self.assertFalse(display_path.segments[1].rapid)
 
+    def test_manual_xyz_preview_display_path_does_not_add_home_lead_to_cut_start(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        path = main_dock.parse_gcode_preview("G90\nG0 X100 Y100 Z6\nG1 Z-1 F300\nG1 X110 Y100 F400")
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": 100.0, "y": 100.0, "z": 0.0}
+        widget._preview_home_point = mock.Mock(return_value=main_dock.PreviewPoint(10.0, 20.0, 0.0))
+
+        display_path = widget._preview_path_for_display(path)
+
+        self.assertEqual(len(display_path.segments), 2)
+        self.assertFalse(any(segment.motion == "HOME" for segment in display_path.segments))
+        self.assertFalse(display_path.segments[0].rapid)
+        self.assertEqual((display_path.segments[0].start.x, display_path.segments[0].start.y), (100.0, 100.0))
+
+    def test_manual_xyz_preview_display_path_trims_setup_rapid_without_home_point(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        path = main_dock.parse_gcode_preview("G90\nG0 X100 Y100 Z6\nG1 Z-1 F300\nG1 X110 Y100 F400")
+        widget._controller_manual_xyz_active = True
+        widget._preview_home_point = mock.Mock(return_value=None)
+
+        display_path = widget._preview_path_for_display(path)
+
+        self.assertEqual(len(display_path.segments), 2)
+        self.assertFalse(any(segment.motion == "HOME" for segment in display_path.segments))
+        self.assertFalse(display_path.segments[0].rapid)
+        self.assertEqual((display_path.segments[0].start.x, display_path.segments[0].start.y), (100.0, 100.0))
+
     def test_preview_display_path_does_not_add_home_lead_when_xy_start_matches_home(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -2138,6 +2190,89 @@ class TestMainDock(unittest.TestCase):
             widget._controller_tick()
 
         widget._send_jog.assert_not_called()
+
+    def test_controller_tick_keeps_fast_xy_while_manual_xyz_active(self):
+        main_dock = _load_main_dock_module()
+        state = types.SimpleNamespace(
+            name="Pad",
+            x=1.0,
+            y=0.0,
+            z=0.0,
+            speed_label="fast",
+            speed_multiplier=3.0,
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_enable = _DummyCheckBox(True)
+        widget._controller = types.SimpleNamespace(
+            is_connected=lambda: True,
+            poll_mapped=mock.Mock(return_value=state),
+            error="",
+        )
+        widget._controller_feed = _DummySpin(600.0)
+        widget._controller_deadzone = _DummySpin(0.2)
+        widget._controller_z_step = _DummySpin(0.1)
+        widget._controller_xy_step = _DummySpin(0.5)
+        widget._controller_last_jog_at = 100.0
+        widget._controller_was_active = False
+        widget._controller_manual_xyz_active = True
+        widget._controller_status = _DummyWidget()
+        widget._controller_binding_strings = mock.Mock(return_value={})
+        widget._controller_fast_xy_allowed = mock.Mock(return_value=True)
+        widget._send_jog = mock.Mock(return_value=True)
+
+        with mock.patch.object(main_dock.time, "time", return_value=100.23):
+            widget._controller_tick()
+
+        widget._send_jog.assert_called_once_with(
+            x=8.4,
+            y=0.0,
+            z=0.0,
+            feed=1800.0,
+            source="Controller",
+            log=False,
+        )
+        self.assertIn("[fast]", widget._controller_status.text)
+
+    def test_controller_tick_smooths_manual_xyz_slow_xy(self):
+        main_dock = _load_main_dock_module()
+        state = types.SimpleNamespace(
+            name="Pad",
+            x=1.0,
+            y=0.0,
+            z=0.0,
+            speed_label="slow",
+            speed_multiplier=1.0,
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_enable = _DummyCheckBox(True)
+        widget._controller = types.SimpleNamespace(
+            is_connected=lambda: True,
+            poll_mapped=mock.Mock(return_value=state),
+            error="",
+        )
+        widget._controller_feed = _DummySpin(600.0)
+        widget._controller_deadzone = _DummySpin(0.2)
+        widget._controller_z_step = _DummySpin(0.1)
+        widget._controller_xy_step = _DummySpin(0.5)
+        widget._controller_last_jog_at = 100.0
+        widget._controller_was_active = False
+        widget._controller_manual_xyz_active = True
+        widget._controller_status = _DummyWidget()
+        widget._controller_binding_strings = mock.Mock(return_value={})
+        widget._controller_fast_xy_allowed = mock.Mock(return_value=True)
+        widget._send_jog = mock.Mock(return_value=True)
+
+        with mock.patch.object(main_dock.time, "time", return_value=100.23):
+            widget._controller_tick()
+
+        widget._send_jog.assert_called_once()
+        kwargs = widget._send_jog.call_args.kwargs
+        self.assertAlmostEqual(kwargs["x"], 2.8)
+        self.assertEqual(
+            {key: kwargs[key] for key in ("y", "z", "feed", "source", "log")},
+            {"y": 0.0, "z": 0.0, "feed": 600.0, "source": "Controller", "log": False},
+        )
+        self.assertIn("[slow]", widget._controller_status.text)
 
     def test_controller_tick_slows_fast_xy_near_work_edge(self):
         main_dock = _load_main_dock_module()

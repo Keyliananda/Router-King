@@ -5232,9 +5232,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._update_preview()
 
     def _prepare_manual_xyz_preview_baseline(self, status):
-        live = self._extract_live_xyz(status or {})
-        if live is None:
-            mpos = grbl_parse_xyz_value((status or {}).get("MPos"))
+        status = status or {}
+        explicit_wpos = self._explicit_status_work_position(status)
+        if explicit_wpos is None:
+            mpos = self._status_machine_position(status)
             if mpos is not None:
                 self._manual_xyz_prepare_mpos = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
                 self._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
@@ -5242,10 +5243,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 self._controller_guard_wpos = dict(self._manual_xyz_prepare_wpos)
                 self._manual_xyz_work_origin_fallback = True
             return
+        live = self._extract_live_xyz(status)
+        if live is None:
+            return
         self._manual_xyz_prepare_mpos = {axis: float(live["mpos"][axis]) for axis in ("x", "y", "z")}
-        self._manual_xyz_prepare_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
+        self._manual_xyz_prepare_wpos = {axis: float(explicit_wpos[axis]) for axis in ("x", "y", "z")}
         self._manual_xyz_work_origin_fallback = False
-        self._manual_xyz_preview_origin_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
+        self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
 
     def _current_preview_cut_start_reference(self, fallback_wpos):
         try:
@@ -5263,24 +5267,34 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _update_manual_xyz_preview_position(self, status, force=False):
         if not getattr(self, "_controller_manual_xyz_active", False):
             return
-        live = self._extract_live_xyz(status or {})
-        if live is None:
-            return
+        status = status or {}
         origin = getattr(self, "_manual_xyz_preview_origin_wpos", None)
         base_mpos = getattr(self, "_manual_xyz_prepare_mpos", None)
         base_wpos = getattr(self, "_manual_xyz_prepare_wpos", None)
-        if origin and base_mpos:
+        if origin and base_mpos and self._manual_work_fallback_active(status):
+            live_mpos = self._status_machine_position(status)
+            if live_mpos is None:
+                return
             next_wpos = {
-                axis: float(origin[axis]) + float(live["mpos"][axis]) - float(base_mpos[axis])
-                for axis in ("x", "y", "z")
-            }
-        elif origin and base_wpos:
-            next_wpos = {
-                axis: float(origin[axis]) + float(live["wpos"][axis]) - float(base_wpos[axis])
+                axis: float(origin[axis]) + float(live_mpos[axis]) - float(base_mpos[axis])
                 for axis in ("x", "y", "z")
             }
         else:
-            next_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
+            live = self._extract_live_xyz(status)
+            if live is None:
+                return
+            if origin and base_mpos:
+                next_wpos = {
+                    axis: float(origin[axis]) + float(live["mpos"][axis]) - float(base_mpos[axis])
+                    for axis in ("x", "y", "z")
+                }
+            elif origin and base_wpos:
+                next_wpos = {
+                    axis: float(origin[axis]) + float(live["wpos"][axis]) - float(base_wpos[axis])
+                    for axis in ("x", "y", "z")
+                }
+            else:
+                next_wpos = {axis: float(live["wpos"][axis]) for axis in ("x", "y", "z")}
         previous = getattr(self, "_manual_xyz_preview_wpos", None)
         if not force and previous is not None and self._xyz_close(previous, next_wpos, tolerance=0.001):
             return
@@ -5439,7 +5453,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         base_feed = float(self._controller_feed.value())
         feed = min(5000.0, base_feed * speed_multiplier)
         effective_speed_label = speed_label
-        if speed_label == "fast":
+        manual_xyz_active = getattr(self, "_controller_manual_xyz_active", False)
+        smooth_xy = speed_label == "fast" or manual_xyz_active
+        if smooth_xy:
             x, y, z = make_fast_xy_jog_vector(
                 state,
                 deadzone=self._controller_deadzone.value(),
@@ -6593,9 +6609,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return parse_gcode_preview(text)
 
     def _preview_path_for_display(self, path):
-        home = self._preview_home_point()
-        if home is None:
-            return path
         segments = list(getattr(path, "segments", ()) or ())
         if not segments:
             return path
@@ -6604,6 +6617,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return path
         first_cut = segments[first_cut_index].start
         display_segments = list(segments[first_cut_index:])
+        if getattr(self, "_controller_manual_xyz_active", False):
+            return PreviewPath(segments=tuple(display_segments), bounds=self._bounds_for_segments(display_segments))
+        home = self._preview_home_point()
+        if home is None:
+            return path
         if not self._xy_points_close(home, first_cut, tolerance=0.001):
             display_segments.insert(
                 0,
