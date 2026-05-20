@@ -114,6 +114,36 @@ class TestGrblValidator(unittest.TestCase):
         self.assertEqual(profile["status"], {"state": "Idle", "WCO": "-297.000,-377.000,-3.000"})
         self.assertEqual(profile["work_offset"], {"x": -297.0, "y": -377.0, "z": -3.0})
 
+    def test_merge_machine_profile_preserves_authoritative_profile_limits_over_grbl_settings(self):
+        profile = merge_machine_profile(
+            {
+                "prefer_profile_limits": True,
+                "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
+                "work_envelope_mm": {"x": 400.0, "y": 400.0, "z": 60.0},
+            },
+            settings={"$130": "300", "$131": "380", "$132": "50"},
+            status={},
+        )
+
+        self.assertEqual(profile["machine_limits"], {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]})
+        self.assertEqual(profile["work_envelope_mm"], {"x": 400.0, "y": 400.0, "z": 60.0})
+        self.assertEqual(profile["settings"]["$130"], "400.000")
+        self.assertEqual(profile["settings"]["$131"], "400.000")
+        self.assertEqual(profile["settings"]["$132"], "60.000")
+
+    def test_resolve_machine_limits_preserves_authoritative_shifted_profile_limits(self):
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
+            "work_envelope_mm": {"x": 400.0, "y": 400.0, "z": 60.0},
+        }
+        settings = {"$130": "300.000", "$131": "380.000", "$132": "50.000"}
+
+        limits, source = resolve_machine_limits(profile, settings)
+
+        self.assertEqual(limits, {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]})
+        self.assertEqual(source, "machine_profile.json")
+
     def test_resolve_machine_limits_prefers_current_settings_over_stale_profile_limits(self):
         profile = {
             "machine_limits": {"x": [-300.0, 0.0], "y": [-380.0, 0.0], "z": [-50.0, 0.0]},

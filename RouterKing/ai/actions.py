@@ -2258,7 +2258,19 @@ def _load_machine_profile(profile_path=None):
 def _resolve_machine_limits(profile, settings):
     limits = {}
     source = {}
+    profile_limits = _profile_machine_limits(profile)
+    prefer_profile_limits = bool(
+        isinstance(profile, dict)
+        and (
+            profile.get("prefer_profile_limits")
+            or profile.get("machine_profile_authoritative")
+        )
+    )
     for axis, setting_key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
+        if prefer_profile_limits and axis in profile_limits:
+            limits[axis] = profile_limits[axis]
+            source[axis] = "machine_profile.json"
+            continue
         profile_value = _profile_travel_value(profile, axis, setting_key)
         settings_value = _to_float(settings.get(setting_key))
         value = profile_value if profile_value is not None else settings_value
@@ -2275,6 +2287,29 @@ def _resolve_machine_limits(profile, settings):
     if len({source["x"], source["y"], source["z"]}) > 1:
         source_text = "machine_profile.json + grbl_$$"
     return limits, source_text
+
+
+def _profile_machine_limits(profile):
+    values = {}
+    if not isinstance(profile, dict):
+        return values
+    limits = profile.get("machine_limits")
+    if not isinstance(limits, dict):
+        return values
+    for axis in ("x", "y", "z"):
+        axis_u = axis.upper()
+        axis_limits = limits.get(axis) or limits.get(axis_u)
+        if not isinstance(axis_limits, (list, tuple)) or len(axis_limits) < 2:
+            continue
+        try:
+            low = float(axis_limits[0])
+            high = float(axis_limits[1])
+        except (TypeError, ValueError):
+            continue
+        if low == high:
+            continue
+        values[axis] = (min(low, high), max(low, high))
+    return values
 
 
 def _profile_travel_value(profile, axis, setting_key):

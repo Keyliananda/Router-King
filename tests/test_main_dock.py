@@ -410,7 +410,8 @@ class TestMainDock(unittest.TestCase):
         widget._explore_active = False
         widget._limits = {"X": 300.0, "Y": 380.0, "Z": 50.0}
         widget._append_console = mock.Mock()
-        widget._send_jog(x=0.5, y=-0.25, z=0.0, feed=600, source="test")
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=({}, "")):
+            widget._send_jog(x=0.5, y=-0.25, z=0.0, feed=600, source="test")
 
         self.assertEqual(sender.commands, ["$J=G91 X0.500 Y-0.250 F600"])
 
@@ -430,7 +431,8 @@ class TestMainDock(unittest.TestCase):
         widget._limits = {"X": 300.0, "Y": 380.0, "Z": 50.0}
         widget._append_console = mock.Mock()
 
-        result = widget._send_jog(x=0.5, feed=600, source="test")
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=({}, "")):
+            result = widget._send_jog(x=0.5, feed=600, source="test")
 
         self.assertFalse(result)
         self.assertEqual(sender.commands, [])
@@ -452,9 +454,10 @@ class TestMainDock(unittest.TestCase):
         widget._controller_guard_mpos = {"x": -2.0, "y": -190.0, "z": -25.0}
         widget._append_console = mock.Mock()
 
-        blocked = widget._send_jog(x=0.5, feed=600, source="test")
-        widget._update_controller_guard_position(sender.get_status())
-        recovered = widget._send_jog(x=0.5, feed=600, source="test")
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=({}, "")):
+            blocked = widget._send_jog(x=0.5, feed=600, source="test")
+            widget._update_controller_guard_position(sender.get_status())
+            recovered = widget._send_jog(x=0.5, feed=600, source="test")
 
         self.assertFalse(blocked)
         self.assertTrue(recovered)
@@ -484,7 +487,7 @@ class TestMainDock(unittest.TestCase):
         self.assertFalse(second)
         self.assertEqual(sender.commands, ["$J=G91 X-0.500 F600"])
 
-    def test_current_machine_limits_uses_settings_travel_with_profile_orientation(self):
+    def test_current_machine_limits_ignore_settings_fallback_when_profile_fields_exist(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._limits = {"X": None, "Y": None, "Z": None}
@@ -495,7 +498,7 @@ class TestMainDock(unittest.TestCase):
 
         limits = widget._current_machine_limits(profile)
 
-        self.assertEqual(limits, {"x": (0.0, 400.0), "y": (0.0, 400.0), "z": (-48.0, 12.0)})
+        self.assertEqual(limits, {"x": (0.0, 500.0), "y": (10.0, 210.0), "z": (-80.0, 20.0)})
 
     def test_current_machine_limits_orients_live_travel_like_profile_limits(self):
         main_dock = _load_main_dock_module()
@@ -522,6 +525,19 @@ class TestMainDock(unittest.TestCase):
         }
 
         limits = widget._current_machine_limits(profile)
+
+        self.assertEqual(limits, {"x": (-400.0, 0.0), "y": (-400.0, 0.0), "z": (-60.0, 0.0)})
+
+    def test_machine_profile_limits_ignore_stale_grbl_settings_fallback(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        profile = {
+            "machine_limits": {"x": [-400.0, 0.0], "y": [-400.0, 0.0], "z": [-60.0, 0.0]},
+            "work_envelope_mm": {"x": 400.0, "y": 400.0, "z": 60.0},
+            "settings": {"$130": "300.000", "$131": "380.000", "$132": "50.000"},
+        }
+
+        limits = widget._machine_limits_from_profile(profile)
 
         self.assertEqual(limits, {"x": (-400.0, 0.0), "y": (-400.0, 0.0), "z": (-60.0, 0.0)})
 
@@ -962,6 +978,20 @@ class TestMainDock(unittest.TestCase):
         self.assertTrue(widget._manual_xyz_work_origin_fallback)
         self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 80.0, "y": 100.0, "z": 0.0})
         self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 85.0, "y": 102.0, "z": 0.0})
+
+    def test_manual_xyz_preview_advances_immediately_with_jog_delta(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": 80.0, "y": 100.0, "z": 0.0}
+        widget._controller_guard_mpos = {"x": -297.0, "y": -377.0, "z": -3.0}
+        widget._controller_guard_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+        widget._schedule_preview_update = mock.Mock()
+
+        widget._advance_controller_guard_position(x=2.5, y=-1.0, z=0.25)
+
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 82.5, "y": 99.0, "z": 0.25})
+        widget._schedule_preview_update.assert_called_once_with()
 
     def test_manual_xyz_preview_moves_template_path_to_live_cut_start(self):
         main_dock = _load_main_dock_module()
@@ -1824,6 +1854,27 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(profile["settings"]["$131"], "400.000")
         self.assertEqual(profile["settings"]["$132"], "60.000")
         self.assertEqual(profile["settings"]["$27"], "3.000")
+
+    def test_machine_profile_from_controls_preserves_measured_shifted_limits(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._machine_profile_controls = {
+            "model": _DummyLineEdit("FoxAlien Masuter Pro"),
+            "x": _DummySpin(400.0),
+            "y": _DummySpin(400.0),
+            "z": _DummySpin(60.0),
+            "pull_off": _DummySpin(3.0),
+        }
+
+        profile = widget._machine_profile_from_controls(
+            {
+                "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]},
+                "settings": {"$130": "300.000", "$131": "380.000", "$132": "50.000"},
+            }
+        )
+
+        self.assertEqual(profile["machine_limits"], {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-3.0, 57.0]})
+        self.assertEqual(profile["work_envelope_mm"], {"x": 400.0, "y": 400.0, "z": 60.0})
 
     def test_preview_display_transform_keeps_machine_xy_without_mutating_point(self):
         main_dock = _load_main_dock_module()

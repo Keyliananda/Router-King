@@ -214,17 +214,43 @@ def merge_machine_profile(
         else:
             merged.pop("status", None)
 
-    work_envelope = {
-        "x": abs(_first_number(settings_map.get("$130"), _nested_number(merged, "work_envelope_mm", "x"), 0.0)),
-        "y": abs(_first_number(settings_map.get("$131"), _nested_number(merged, "work_envelope_mm", "y"), 0.0)),
-        "z": abs(_first_number(settings_map.get("$132"), _nested_number(merged, "work_envelope_mm", "z"), 0.0)),
-    }
+    prefer_profile_limits = bool(
+        merged.get("prefer_profile_limits")
+        or merged.get("machine_profile_authoritative")
+    )
+    explicit_limits = _profile_machine_limits(merged)
+    explicit_limits_complete = all(axis in explicit_limits for axis in ("x", "y", "z"))
+    if prefer_profile_limits and explicit_limits_complete:
+        work_envelope = {
+            axis: abs(float(axis_limits[1]) - float(axis_limits[0]))
+            for axis, axis_limits in explicit_limits.items()
+        }
+    elif prefer_profile_limits:
+        work_envelope = {
+            "x": abs(_first_number(_nested_number(merged, "work_envelope_mm", "x"), settings_map.get("$130"), 0.0)),
+            "y": abs(_first_number(_nested_number(merged, "work_envelope_mm", "y"), settings_map.get("$131"), 0.0)),
+            "z": abs(_first_number(_nested_number(merged, "work_envelope_mm", "z"), settings_map.get("$132"), 0.0)),
+        }
+    else:
+        work_envelope = {
+            "x": abs(_first_number(settings_map.get("$130"), _nested_number(merged, "work_envelope_mm", "x"), 0.0)),
+            "y": abs(_first_number(settings_map.get("$131"), _nested_number(merged, "work_envelope_mm", "y"), 0.0)),
+            "z": abs(_first_number(settings_map.get("$132"), _nested_number(merged, "work_envelope_mm", "z"), 0.0)),
+        }
     merged["work_envelope_mm"] = work_envelope
-    merged["machine_limits"] = {
+    # Explicit profile limits are measured GRBL MPos bounds. They may be shifted
+    # (for example -297..103) and must not be normalized back to -travel..0.
+    merged["machine_limits"] = explicit_limits if explicit_limits_complete else {
         "x": [-work_envelope["x"], 0.0],
         "y": [-work_envelope["y"], 0.0],
         "z": [-work_envelope["z"], 0.0],
     }
+    if prefer_profile_limits:
+        normalized_settings = dict(merged.get("settings") or {})
+        normalized_settings["$130"] = f"{work_envelope['x']:.3f}"
+        normalized_settings["$131"] = f"{work_envelope['y']:.3f}"
+        normalized_settings["$132"] = f"{work_envelope['z']:.3f}"
+        merged["settings"] = normalized_settings
 
     max_feeds = {
         "x": _first_number(settings_map.get("$110"), _nested_number(merged, "max_feeds_mm_min", "x"), 0.0),
@@ -290,7 +316,16 @@ def resolve_machine_limits(
 
     limits: dict = {}
     source: dict = {}
+    prefer_profile_limits = bool(
+        profile_map.get("prefer_profile_limits")
+        or profile_map.get("machine_profile_authoritative")
+    )
+    explicit_limits = _profile_machine_limits(profile_map)
     for axis, setting_key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
+        if prefer_profile_limits and axis in explicit_limits:
+            limits[axis] = explicit_limits[axis]
+            source[axis] = "machine_profile.json"
+            continue
         profile_value = _profile_travel_value(profile_map, axis, setting_key)
         settings_value = _to_float(settings_map.get(setting_key))
         travel_source = "machine_profile.json"
@@ -1150,6 +1185,26 @@ def _profile_travel_value(profile: Mapping[str, Any], axis: str, setting_key: st
             if value is not None:
                 return abs(value)
     return None
+
+
+def _profile_machine_limits(profile: Mapping[str, Any]) -> dict:
+    values: dict = {}
+    limits = profile.get("machine_limits")
+    if not isinstance(limits, Mapping):
+        return values
+    for axis in ("x", "y", "z"):
+        item = limits.get(axis) or limits.get(axis.upper())
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            low = float(item[0])
+            high = float(item[1])
+        except (TypeError, ValueError):
+            continue
+        if low == high:
+            continue
+        values[axis] = [min(low, high), max(low, high)]
+    return values
 
 
 def _profile_feed_value(profile: Mapping[str, Any], axis: str, setting_key: str) -> Optional[float]:

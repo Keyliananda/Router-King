@@ -65,11 +65,25 @@ class TestMachineGcodeValidator(unittest.TestCase):
         )
         gcode = "G90 G21\nG0 Z11\nG1 X-10 Y-10 Z-1"
 
-        with patch("RouterKing.ai.actions._get_sender", return_value=sender):
-            message = _action_machine_stream_gcode(
-                {"type": "machine_stream_gcode", "gcode": gcode, "confirm": True},
-                {},
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(
+                {
+                    "settings": sender._settings,
+                    "work_offset": {"x": -297, "y": -377, "z": -3},
+                    "work_position": {"x": 0, "y": 0, "z": 0},
+                },
+                handle,
             )
+            profile_path = handle.name
+
+        try:
+            with patch("RouterKing.ai.actions._get_sender", return_value=sender):
+                message = _action_machine_stream_gcode(
+                    {"type": "machine_stream_gcode", "gcode": gcode, "machine_profile_path": profile_path, "confirm": True},
+                    {},
+                )
+        finally:
+            os.unlink(profile_path)
 
         self.assertIn("validation failed", message)
         self.assertIn("line 2", message)
@@ -86,11 +100,25 @@ class TestMachineGcodeValidator(unittest.TestCase):
         )
         gcode = "G90 G21\nG0 Z2\nG1 X-1 Y-1 Z-1 F300"
 
-        with patch("RouterKing.ai.actions._get_sender", return_value=sender):
-            message = _action_machine_stream_gcode(
-                {"type": "machine_stream_gcode", "gcode": gcode, "confirm": True},
-                {},
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(
+                {
+                    "settings": sender._settings,
+                    "work_offset": {"x": -297, "y": -377, "z": -3},
+                    "work_position": {"x": 0, "y": 0, "z": 0},
+                },
+                handle,
             )
+            profile_path = handle.name
+
+        try:
+            with patch("RouterKing.ai.actions._get_sender", return_value=sender):
+                message = _action_machine_stream_gcode(
+                    {"type": "machine_stream_gcode", "gcode": gcode, "machine_profile_path": profile_path, "confirm": True},
+                    {},
+                )
+        finally:
+            os.unlink(profile_path)
 
         self.assertIn("Streaming started", message)
         self.assertEqual(sender.started_lines, ["G90 G21", "G0 Z2", "G1 X-1 Y-1 Z-1 F300"])

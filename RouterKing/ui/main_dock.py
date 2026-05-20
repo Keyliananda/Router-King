@@ -1525,10 +1525,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if not controls:
             return
         settings = dict((profile or {}).get("settings") or {})
-        try:
-            limits, _source = grbl_resolve_machine_limits(profile, settings)
-        except Exception:
-            limits = {}
+        limits = self._machine_limits_from_profile_fields(profile or {})
         controls["model"].setText(str((profile or {}).get("model") or ""))
         for axis, key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
             value = None
@@ -1557,10 +1554,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         z_travel = float(controls["z"].value())
         pull_off = float(controls["pull_off"].value())
         profile["model"] = model or "FoxAlien Masuter Pro"
+        existing_limits = self._machine_limits_from_profile_fields(profile)
         profile["machine_limits"] = {
-            "x": [-abs(x_travel), 0.0],
-            "y": [-abs(y_travel), 0.0],
-            "z": [-abs(z_travel), 0.0],
+            "x": self._machine_limits_for_profile_save(existing_limits.get("x"), x_travel),
+            "y": self._machine_limits_for_profile_save(existing_limits.get("y"), y_travel),
+            "z": self._machine_limits_for_profile_save(existing_limits.get("z"), z_travel),
         }
         profile["work_envelope_mm"] = {"x": abs(x_travel), "y": abs(y_travel), "z": abs(z_travel)}
         settings = dict(profile.get("settings") or {})
@@ -1573,6 +1571,20 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         homing["pull_off_mm"] = max(pull_off, 0.0)
         profile["homing"] = homing
         return profile
+
+    @staticmethod
+    def _machine_limits_for_profile_save(existing_axis_limits, travel):
+        travel = abs(float(travel))
+        if existing_axis_limits is not None:
+            try:
+                low = float(existing_axis_limits[0])
+                high = float(existing_axis_limits[1])
+                if abs(abs(high - low) - travel) <= 0.001:
+                    # Preserve measured GRBL MPos bounds such as -297..103.
+                    return [min(low, high), max(low, high)]
+            except (TypeError, ValueError, IndexError):
+                pass
+        return [-travel, 0.0]
 
     def _save_machine_profile_controls(self):
         try:
@@ -4834,20 +4846,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _machine_limits_from_profile(self, profile):
         if not isinstance(profile, dict):
             return {}
-        field_values = self._machine_limits_from_profile_fields(profile)
-        try:
-            settings = dict((profile or {}).get("settings") or {})
-            limits, _source = grbl_resolve_machine_limits(profile, settings)
-            resolved = {
-                axis: self._machine_limits_oriented_like(axis_limits, field_values.get(axis))
-                for axis, axis_limits in limits.items()
-                if axis_limits and len(axis_limits) >= 2
-            }
-            for axis, axis_limits in field_values.items():
-                resolved.setdefault(axis, axis_limits)
-            return resolved
-        except Exception:
-            return field_values
+        return self._machine_limits_from_profile_fields(profile)
 
     def _machine_limits_from_profile_fields(self, profile):
         values = {}
@@ -4863,16 +4862,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 if axis in values:
                     continue
                 limits = self._machine_limits_from_travel(envelope.get(axis) or envelope.get(axis.upper()))
-                if limits is not None:
-                    values[axis] = limits
-        settings = profile.get("settings")
-        if isinstance(settings, dict):
-            for axis, setting_key in (("x", "$130"), ("y", "$131"), ("z", "$132")):
-                if axis in values:
-                    continue
-                limits = self._machine_limits_from_travel(
-                    settings.get(setting_key) or settings.get(setting_key.lstrip("$"))
-                )
                 if limits is not None:
                     values[axis] = limits
         return values
@@ -5171,6 +5160,25 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._controller_guard_wpos = updated
         self._controller_guard_last_delta = dict(deltas)
         self._controller_guard_mpos_at = time.time()
+        self._advance_manual_xyz_preview_position(deltas)
+
+    def _advance_manual_xyz_preview_position(self, deltas):
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            return
+        current = getattr(self, "_manual_xyz_preview_wpos", None)
+        if not current:
+            return
+        try:
+            updated = {
+                axis: float(current[axis]) + float((deltas or {}).get(axis, 0.0))
+                for axis in ("x", "y", "z")
+            }
+        except (TypeError, ValueError, KeyError):
+            return
+        if self._xyz_close(current, updated, tolerance=0.001):
+            return
+        self._manual_xyz_preview_wpos = updated
+        self._schedule_preview_update()
 
     def _request_status_for_jog(self):
         try:
