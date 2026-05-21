@@ -136,18 +136,21 @@ class _FakeDisconnectedSender:
 
 
 class _FakeConnectedSender:
-    def __init__(self, status=None, streaming=False):
+    def __init__(self, status=None, streaming=False, coordinate_lines=None):
         self.commands = []
         self.started_lines = None
         self.cancelled = False
         self._status = status if status is not None else {"state": "Idle"}
         self._streaming = streaming
+        self._coordinate_lines = list(coordinate_lines or [])
 
     def send_line(self, command):
         self.commands.append(command)
 
     def send_and_collect(self, command, timeout=5.0):
         self.commands.append(command)
+        if command == "$#":
+            return list(self._coordinate_lines)
         return ["ok"]
 
     def start_stream(self, lines):
@@ -329,6 +332,30 @@ class TestMainDock(unittest.TestCase):
         widget._append_console = mock.Mock()
         widget._refresh_ports = mock.Mock()
         return widget
+
+    def _rectangle_template_controls(self):
+        return {
+            "name": _DummyLineEdit("Manual Preview Pocket"),
+            "width": _DummySpin(40.0),
+            "height": _DummySpin(30.0),
+            "depth": _DummySpin(2.0),
+            "tool_diameter": _DummySpin(4.0),
+            "step_down": _DummySpin(1.0),
+            "step_over": _DummySpin(2.0),
+            "feed_rate": _DummySpin(500.0),
+            "plunge_rate": _DummySpin(100.0),
+            "safe_z": _DummySpin(6.0),
+            "start_z": _DummySpin(0.0),
+            "start_x": _DummySpin(0.0),
+            "start_y": _DummySpin(0.0),
+            "origin": _DummyCombo("center"),
+            "swap_xy": _DummyCheckBox(False),
+            "rotation_z": _DummyCombo("0"),
+            "pass_axis": _DummyCombo("x"),
+            "path_direction": _DummyCombo("forward"),
+            "final_contour": _DummyCheckBox(False),
+            "contour_direction": _DummyCombo("cw"),
+        }
 
     def test_apply_disconnected_state_resets_explore_state(self):
         main_dock = _load_main_dock_module()
@@ -904,7 +931,7 @@ class TestMainDock(unittest.TestCase):
         self.assertIsNone(getattr(widget, "_gcode_manual_start_wpos", None))
         widget._schedule_preview_update.assert_called_once_with()
 
-    def test_manual_xyz_preview_keeps_visible_cut_start_on_prepare(self):
+    def test_manual_xyz_preview_uses_real_live_origin_on_prepare(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._controller_manual_xyz_active = True
@@ -928,8 +955,9 @@ class TestMainDock(unittest.TestCase):
         widget._update_manual_xyz_preview_position(prepare_status, force=True)
         widget._update_manual_xyz_preview_position(moved_status, force=True)
 
-        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 80.0, "y": 100.0, "z": 1.0})
-        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 85.0, "y": 102.0, "z": 1.0})
+        self.assertFalse(widget._manual_xyz_work_origin_fallback)
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 10.0, "y": 10.0, "z": 1.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 15.0, "y": 12.0, "z": 1.0})
 
     def test_manual_xyz_preview_delta_is_one_to_one_machine_mm(self):
         main_dock = _load_main_dock_module()
@@ -956,7 +984,7 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 10.0, "y": 5.0, "z": 0.0})
 
-    def test_manual_xyz_preview_uses_local_origin_when_status_has_wco_without_wpos(self):
+    def test_manual_xyz_preview_derives_real_work_position_when_status_has_wco_without_wpos(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._controller_manual_xyz_active = True
@@ -975,11 +1003,11 @@ class TestMainDock(unittest.TestCase):
         widget._prepare_manual_xyz_preview_baseline(prepare_status)
         widget._update_manual_xyz_preview_position(moved_status, force=True)
 
-        self.assertTrue(widget._manual_xyz_work_origin_fallback)
-        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 0.0, "y": 0.0, "z": 0.0})
-        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 10.0, "y": 5.0, "z": 0.0})
+        self.assertFalse(widget._manual_xyz_work_origin_fallback)
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": -297.0, "y": -377.0, "z": -4.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": -287.0, "y": -372.0, "z": -4.0})
 
-    def test_manual_xyz_preview_keeps_visible_cut_start_when_status_has_only_mpos(self):
+    def test_manual_xyz_preview_uses_profile_work_offset_when_status_has_only_mpos(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._controller_manual_xyz_active = True
@@ -996,13 +1024,15 @@ class TestMainDock(unittest.TestCase):
             "MPos": "-292.000,-375.000,-3.000",
         }
 
-        widget._prepare_manual_xyz_preview_baseline(prepare_status)
-        widget._update_manual_xyz_preview_position(prepare_status, force=True)
-        widget._update_manual_xyz_preview_position(moved_status, force=True)
+        profile = {"work_offset": {"x": 0.0, "y": 0.0, "z": 1.0}}
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            widget._prepare_manual_xyz_preview_baseline(prepare_status)
+            widget._update_manual_xyz_preview_position(prepare_status, force=True)
+            widget._update_manual_xyz_preview_position(moved_status, force=True)
 
-        self.assertTrue(widget._manual_xyz_work_origin_fallback)
-        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": 80.0, "y": 100.0, "z": 0.0})
-        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": 85.0, "y": 102.0, "z": 0.0})
+        self.assertFalse(widget._manual_xyz_work_origin_fallback)
+        self.assertEqual(widget._manual_xyz_preview_origin_wpos, {"x": -297.0, "y": -377.0, "z": -4.0})
+        self.assertEqual(widget._manual_xyz_preview_wpos, {"x": -292.0, "y": -375.0, "z": -4.0})
 
     def test_manual_xyz_preview_advances_immediately_with_jog_delta(self):
         main_dock = _load_main_dock_module()
@@ -1294,6 +1324,250 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(sender.started_lines, ["G90", "G1 X1 Y2 Z1.5 F500"])
         validate.assert_called_once()
 
+    def test_air_run_generates_current_manual_template_before_streaming(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-397.000,-397.000,-3.000",
+                "WPos": "0.000,0.000,0.000",
+                "WCO": "-397.000,-397.000,-3.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": 10.0, "y": 20.0, "z": 0.0}
+        widget._last_template_spec = None
+        widget._template_controls = self._rectangle_template_controls()
+        widget._selected_template_source = mock.Mock(return_value={})
+        widget._append_console = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=({"settings": {}}, "/tmp/profile.json")):
+            with mock.patch.object(
+                main_dock,
+                "grbl_validate_gcode",
+                return_value={"valid": True, "line_count": 10, "bounding_box": {"x": [10, 50], "y": [20, 50], "z": [1.5, 1.5]}},
+            ):
+                widget._on_air_run()
+
+        self.assertIsNotNone(sender.started_lines)
+        self.assertIn("; RouterKing rectangle pocket template: Manual Preview Pocket", widget._gcode_edit.toPlainText())
+        self.assertTrue(any("X10" in line and "Y20" in line for line in sender.started_lines))
+        self.assertFalse(any(line.startswith("M3") for line in sender.started_lines))
+        self.assertTrue(all("Z-" not in line for line in sender.started_lines if "Z" in line))
+
+    def test_manual_template_safe_z_is_relative_to_live_prepare_z(self):
+        main_dock = _load_main_dock_module()
+        status = {
+            "state": "Idle",
+            "MPos": "-219.325,-286.288,-10.365",
+            "WPos": "-219.325,-286.288,-11.365",
+            "WCO": "0.000,0.000,1.000",
+        }
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status=status)
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": -213.325, "y": -270.288, "z": -11.365}
+        widget._manual_xyz_prepare_mpos = {"x": -219.325, "y": -286.288, "z": -10.365}
+        widget._manual_xyz_preview_origin_wpos = {"x": -213.325, "y": -270.288, "z": -11.365}
+        widget._last_template_spec = None
+        widget._template_controls = self._rectangle_template_controls()
+        widget._template_controls["safe_z"].setValue(6.0)
+        widget._selected_template_source = mock.Mock(return_value={})
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            gcode, error = widget._current_stream_gcode_text(update_editor=True)
+
+        self.assertIsNone(error)
+        self.assertIn("G0 Z-9.865", gcode)
+        self.assertNotIn("G0 Z6", gcode)
+        self.assertEqual(widget._last_template_spec.start_z, -11.365)
+        self.assertEqual(widget._last_template_spec.safe_z, -9.865)
+
+    def test_existing_rectangle_template_stream_reanchors_to_live_position_when_manual_start_not_set(self):
+        main_dock = _load_main_dock_module()
+        status = {
+            "state": "Idle",
+            "MPos": "-245.613,-307.788,-14.699",
+            "WCO": "0.000,0.000,1.000",
+        }
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status=status)
+        widget._gcode_edit = _DummyPlainTextEdit(
+            "; RouterKing rectangle pocket template: stale\n"
+            "; cut start target: X51.387 Y69.212\n"
+            "G21\nG90\nG17\nG0 Z-10.599\nG0 X51.387 Y69.212\nG1 Z-12.699 F300\n"
+        )
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._controller_manual_xyz_active = False
+        widget._manual_xyz_preview_wpos = None
+        widget._gcode_manual_start_wpos = None
+        widget._last_template_spec = None
+        widget._template_controls = self._rectangle_template_controls()
+        widget._selected_template_source = mock.Mock(return_value={})
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            gcode, error = widget._current_stream_gcode_text(update_editor=True)
+
+        self.assertIsNone(error)
+        self.assertIn("; cut start target: X-245.613 Y-307.788", gcode)
+        self.assertIn("G0 X-245.613 Y-307.788", gcode)
+        self.assertIn("G0 Z-14.199", gcode)
+        self.assertNotIn("X51.387 Y69.212", gcode)
+        self.assertNotIn("G0 Z-10.599", gcode)
+        self.assertEqual(widget._last_template_spec.start_z, -15.699)
+        self.assertEqual(widget._last_template_spec.safe_z, -14.199)
+
+    def test_existing_rectangle_template_stream_uses_profile_work_offset_when_status_has_only_mpos(self):
+        main_dock = _load_main_dock_module()
+        status = {
+            "state": "Idle",
+            "MPos": "-234.000,-299.237,-13.994",
+        }
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(status=status)
+        widget._gcode_edit = _DummyPlainTextEdit(
+            "; RouterKing rectangle pocket template: stale\n"
+            "; cut start target: X63 Y77.763\n"
+            "G21\nG90\nG17\nG0 Z-9.894\nG0 X63 Y77.763\nG1 Z-11.994 F300\n"
+        )
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._controller_manual_xyz_active = False
+        widget._manual_xyz_preview_wpos = None
+        widget._gcode_manual_start_wpos = None
+        widget._last_template_spec = None
+        widget._template_controls = self._rectangle_template_controls()
+        widget._selected_template_source = mock.Mock(return_value={})
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+            "work_offset": {"x": 0.0, "y": 0.0, "z": 1.0},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            gcode, error = widget._current_stream_gcode_text(update_editor=True)
+
+        self.assertIsNone(error)
+        self.assertIn("; cut start target: X-234 Y-299.237", gcode)
+        self.assertIn("G0 X-234 Y-299.237", gcode)
+        self.assertIn("G0 Z-13.494", gcode)
+        self.assertNotIn("X63 Y77.763", gcode)
+        self.assertNotIn("G0 Z-9.894", gcode)
+        self.assertEqual(widget._last_template_spec.start_z, -14.994)
+        self.assertEqual(widget._last_template_spec.safe_z, -13.494)
+
+    def test_air_run_uses_live_g54_when_status_reports_stale_zero_wco(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-241.850,-333.150,-11.496",
+                "WCO": "0.000,0.000,0.000",
+            },
+            coordinate_lines=[
+                "[G54:-150.000,-190.000,-25.238]",
+                "[G92:0.000,0.000,0.000]",
+                "[TLO:0.000]",
+            ],
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._gcode_edit = _DummyPlainTextEdit(
+            "; RouterKing rectangle pocket template: stale\n"
+            "; cut start target: X63 Y77.763\n"
+            "G21\nG90\nG17\nG0 Z-9.894\nG0 X63 Y77.763\nG1 Z-11.994 F300\n"
+        )
+        widget._dry_run_check = _DummyCheckBox(False)
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._controller_manual_xyz_active = False
+        widget._manual_xyz_preview_wpos = None
+        widget._gcode_manual_start_wpos = None
+        widget._last_template_spec = None
+        widget._template_controls = self._rectangle_template_controls()
+        widget._selected_template_source = mock.Mock(return_value={})
+        widget._append_console = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]},
+            "max_feeds_mm_min": {"x": 2000.0, "y": 2000.0, "z": 500.0},
+            "settings": {"$23": "3", "$27": "3", "$32": "0"},
+            "work_offset": {"x": 0.0, "y": 0.0, "z": 1.0},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            widget._on_air_run()
+
+        self.assertIn("$#", sender.commands)
+        self.assertIsNotNone(sender.started_lines)
+        self.assertTrue(any("X-91.85" in line and "Y-143.15" in line for line in sender.started_lines))
+        self.assertIn("; cut start target: X-91.85 Y-143.15", widget._gcode_edit.toPlainText())
+
+    def test_go_to_manual_start_uses_relative_safe_z_in_negative_work_coordinates(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-219.325,-286.288,-10.365",
+                "WPos": "-219.325,-286.288,-11.365",
+                "WCO": "0.000,0.000,1.000",
+            }
+        )
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._gcode_manual_start_wpos = {"x": -213.325, "y": -270.288, "z": -11.365}
+        widget._gcode_manual_start_wco = {"x": 0.0, "y": 0.0, "z": 1.0}
+        widget._append_console = mock.Mock()
+        widget._request_status = mock.Mock()
+        widget._explore_active = False
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            widget._on_go_to_manual_start_safely()
+
+        self.assertEqual(sender.commands[:2], ["G90 G21", "G0 Z-9.865"])
+
+    def test_air_run_button_enabled_for_manual_template_even_when_editor_is_empty(self):
+        main_dock = _load_main_dock_module()
+        widget = self._make_widget(main_dock, sender=_FakeConnectedSender(status={"state": "Idle"}))
+        widget._explore_active = False
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._air_run_btn = _DummyWidget()
+        widget._air_run_apply_btn = _DummyWidget()
+        widget._dry_run_check = _DummyCheckBox(False)
+        widget._template_controls = self._rectangle_template_controls()
+        widget._selected_template_source = mock.Mock(return_value={})
+        widget._last_template_spec = None
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+
+        widget._update_job_controls()
+
+        self.assertTrue(widget._air_run_btn.enabled)
+        self.assertTrue(widget._air_run_apply_btn.enabled)
+
     def test_show_apply_air_run_replaces_editor_without_machine_action(self):
         main_dock = _load_main_dock_module()
         sender = _FakeConnectedSender(status={"state": "Idle"})
@@ -1364,6 +1638,39 @@ class TestMainDock(unittest.TestCase):
         self.assertIn("; size: 20 x 10 x 2 mm", widget._gcode_edit.toPlainText())
         widget._update_preview.assert_called_once_with()
         widget._update_job_controls.assert_called_once_with()
+
+    def test_insert_template_aligns_to_active_manual_xyz_start_and_relative_z(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._template_controls = self._rectangle_template_controls()
+        widget._template_controls["safe_z"].setValue(6.0)
+        widget._selected_template_source = mock.Mock(return_value={})
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": -213.325, "y": -270.288, "z": -11.365}
+        widget._controller_manual_clearance = _DummySpin(1.5)
+        widget._last_template_spec = None
+        widget._append_console = mock.Mock()
+        widget._update_preview = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            widget._on_insert_gcode_template()
+
+        text = widget._gcode_edit.toPlainText()
+        self.assertIn("; cut start target: X-213.325 Y-270.288", text)
+        self.assertIn("G0 Z-9.865", text)
+        self.assertNotIn("G0 Z6", text)
+        self.assertIn("G0 X-213.325 Y-270.288", text)
+        self.assertEqual(widget._last_template_spec.cut_start_x, -213.325)
+        self.assertEqual(widget._last_template_spec.cut_start_y, -270.288)
+        self.assertEqual(widget._last_template_spec.start_z, -11.365)
+        self.assertEqual(widget._last_template_spec.safe_z, -9.865)
 
     def test_default_rectangle_template_uses_tee_tablett_preset(self):
         main_dock = _load_main_dock_module()
@@ -1564,6 +1871,26 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(spec.source_object, "Body")
         self.assertEqual(spec.source_feature, "Pocket002")
 
+    def test_manual_start_alignment_is_idempotent_for_previously_aligned_template(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        spec = main_dock.rectangle_pocket_preset("tee_tablett")
+        start = {"x": -228.563, "y": -290.612, "z": -12.328}
+
+        first = widget._template_spec_aligned_to_manual_start(spec, start)
+        second = widget._template_spec_aligned_to_manual_start(first, start)
+        first_path = main_dock.parse_gcode_preview(main_dock.rectangle_pocket(first).gcode)
+        second_path = main_dock.parse_gcode_preview(main_dock.rectangle_pocket(second).gcode)
+        first_cut = next(segment.start for segment in first_path.segments if not segment.rapid)
+        second_cut = next(segment.start for segment in second_path.segments if not segment.rapid)
+
+        self.assertEqual(first.start_x, second.start_x)
+        self.assertEqual(first.start_y, second.start_y)
+        self.assertAlmostEqual(first_cut.x, start["x"], places=3)
+        self.assertAlmostEqual(first_cut.y, start["y"], places=3)
+        self.assertAlmostEqual(second_cut.x, start["x"], places=3)
+        self.assertAlmostEqual(second_cut.y, start["y"], places=3)
+
     def test_use_manual_start_in_template_sets_cut_start_target_and_gcode(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -1694,7 +2021,7 @@ class TestMainDock(unittest.TestCase):
         self.assertEqual(area["z_max"] - area["z_min"], 60.0)
         self.assertEqual((home.x, home.y, home.z), (0.0, 0.0, 0.0))
 
-    def test_manual_xyz_home_stays_work_area_home_when_status_has_wco_without_wpos(self):
+    def test_manual_xyz_home_matches_real_work_area_home_when_status_has_wco_without_wpos(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
         widget._sender = _FakeConnectedSender(status={"MPos": "-264.900,-339.475,-3.000", "WCO": "0.000,0.000,1.000"})
@@ -1716,13 +2043,13 @@ class TestMainDock(unittest.TestCase):
             home = widget._preview_home_point()
             cut_start = widget._preview_cut_start_point(path)
 
-        self.assertAlmostEqual(home.x, -32.1)
-        self.assertAlmostEqual(home.y, -37.525)
-        self.assertEqual((cut_start.x, cut_start.y, cut_start.z), (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(home.x, -297.0)
+        self.assertAlmostEqual(home.y, -377.0)
+        self.assertEqual((cut_start.x, cut_start.y, cut_start.z), (-264.9, -339.475, -4.0))
         self.assertNotEqual(widget._preview_project_point(home, "top"), widget._preview_project_point(cut_start, "top"))
         self.assertNotEqual(widget._preview_project_point(home, "iso"), widget._preview_project_point(cut_start, "iso"))
 
-    def test_manual_xyz_work_area_uses_prepare_baseline_instead_of_stale_live_wco(self):
+    def test_manual_xyz_work_area_uses_real_work_offset_not_prepare_local_origin(self):
         main_dock = _load_main_dock_module()
         status = {"MPos": "-264.900,-339.475,-3.000", "WCO": "0.000,0.000,1.000"}
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
@@ -1744,12 +2071,12 @@ class TestMainDock(unittest.TestCase):
             area = widget._preview_work_area()
 
         expected = {
-            "x_min": -35.1,
-            "x_max": 264.9,
-            "y_min": -40.525,
-            "y_max": 339.475,
-            "z_min": -47.0,
-            "z_max": 3.0,
+            "x_min": -300.0,
+            "x_max": 0.0,
+            "y_min": -380.0,
+            "y_max": 0.0,
+            "z_min": -51.0,
+            "z_max": -1.0,
         }
         for key, value in expected.items():
             self.assertAlmostEqual(area[key], value)

@@ -1309,6 +1309,9 @@ def _action_machine_stream_file(action, params):
     profile_path = _get_param(action, params, "machine_profile_path")
     profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
     status = grbl_read_machine_status(sender)
+    idle_error = _require_idle_for_stream("machine_stream_file", status)
+    if idle_error:
+        return idle_error
     status = _enrich_status_with_live_wco(sender, status)
     settings = grbl_read_grbl_settings(sender)
     if settings or status:
@@ -1397,6 +1400,9 @@ def _action_machine_stream_gcode(action, params):
     try:
         profile, _ = grbl_load_machine_profile(str(profile_path) if profile_path else None)
         status = grbl_read_machine_status(sender)
+        idle_error = _require_idle_for_stream("machine_stream_gcode", status)
+        if idle_error:
+            return idle_error
         status = _enrich_status_with_live_wco(sender, status)
         settings = grbl_read_grbl_settings(sender)
         if settings or status:
@@ -1417,6 +1423,13 @@ def _action_machine_stream_gcode(action, params):
         return f"machine_stream_gcode: validation failed on line {line_no}: {reason}"
     sender.start_stream(lines)
     return f"Streaming started ({len(lines)} lines, est {report.get('estimated_time_seconds', 0)}s)."
+
+
+def _require_idle_for_stream(action_name, status):
+    state = str((status or {}).get("state") or "").strip()
+    if state.lower() == "idle":
+        return ""
+    return f"{action_name}: machine not idle ({state.lower() or 'unknown'})."
 
 
 def _action_machine_calculate_offset(action, params):
@@ -1611,8 +1624,6 @@ def _auto_refresh_machine_profile(sender, settings=None):
 def _enrich_status_with_live_wco(sender, status):
     status_map = dict(status or {})
     if sender is None or not bool(getattr(sender, "is_connected", lambda: False)()):
-        return status_map
-    if status_map.get("WCO"):
         return status_map
     coordinate_params = grbl_read_coordinate_parameters(sender)
     work_offset = coordinate_params.get("work_offset") if isinstance(coordinate_params, dict) else None

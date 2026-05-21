@@ -34,6 +34,7 @@ try:
     from ..grbl.validator import (
         load_machine_profile as grbl_load_machine_profile,
         parse_xyz_value as grbl_parse_xyz_value,
+        read_grbl_coordinate_parameters as grbl_read_coordinate_parameters,
         resolve_machine_limits as grbl_resolve_machine_limits,
         save_machine_profile as grbl_save_machine_profile,
         validate_gcode as grbl_validate_gcode,
@@ -66,6 +67,7 @@ except ImportError:
     from grbl.validator import (
         load_machine_profile as grbl_load_machine_profile,
         parse_xyz_value as grbl_parse_xyz_value,
+        read_grbl_coordinate_parameters as grbl_read_coordinate_parameters,
         resolve_machine_limits as grbl_resolve_machine_limits,
         save_machine_profile as grbl_save_machine_profile,
         validate_gcode as grbl_validate_gcode,
@@ -5298,26 +5300,25 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _prepare_manual_xyz_preview_baseline(self, status):
         status = status or {}
         explicit_wpos = self._explicit_status_work_position(status)
-        if explicit_wpos is None:
-            mpos = self._status_machine_position(status)
-            if mpos is not None:
-                self._manual_xyz_prepare_mpos = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
-                self._manual_xyz_prepare_wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
-                self._manual_xyz_preview_origin_wpos = self._current_preview_cut_start_reference(
-                    self._manual_xyz_prepare_wpos
-                )
-                self._controller_guard_wpos = dict(self._manual_xyz_prepare_wpos)
-                self._manual_xyz_work_origin_fallback = True
-            return
         live = self._extract_live_xyz(status)
-        if live is None:
+        if live is not None:
+            self._manual_xyz_prepare_mpos = {axis: float(live["mpos"][axis]) for axis in ("x", "y", "z")}
+            self._manual_xyz_prepare_wpos = {
+                axis: float((explicit_wpos or live["wpos"])[axis])
+                for axis in ("x", "y", "z")
+            }
+            self._manual_xyz_work_origin_fallback = False
+            self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
             return
-        self._manual_xyz_prepare_mpos = {axis: float(live["mpos"][axis]) for axis in ("x", "y", "z")}
-        self._manual_xyz_prepare_wpos = {axis: float(explicit_wpos[axis]) for axis in ("x", "y", "z")}
-        self._manual_xyz_work_origin_fallback = False
-        self._manual_xyz_preview_origin_wpos = self._current_preview_cut_start_reference(
-            self._manual_xyz_prepare_wpos
-        )
+
+        mpos = self._status_machine_position(status)
+        if mpos is None:
+            return
+        self._manual_xyz_prepare_mpos = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
+        self._manual_xyz_prepare_wpos = dict(self._manual_xyz_prepare_mpos)
+        self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
+        self._controller_guard_wpos = dict(self._manual_xyz_prepare_wpos)
+        self._manual_xyz_work_origin_fallback = True
 
     def _current_preview_cut_start_reference(self, fallback_wpos):
         try:
@@ -5735,6 +5736,13 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             spec = self._show_rectangle_template_dialog()
         if spec is None:
             return
+        start = (
+            getattr(self, "_manual_xyz_preview_wpos", None)
+            if getattr(self, "_controller_manual_xyz_active", False)
+            else None
+        )
+        if start:
+            spec = self._template_spec_aligned_to_manual_start(spec, start)
         try:
             program = rectangle_pocket(spec)
         except ValueError as exc:
@@ -6276,7 +6284,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 self._request_status()
             return
         start = self._gcode_manual_start_wpos
-        safe_z = self._manual_start_safe_z()
+        safe_z = self._manual_retract_z_for_start(start)
         commands = [
             "G90 G21",
             f"G0 Z{safe_z:.3f}",
@@ -6307,7 +6315,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return True, ""
 
     def _on_validate_gcode(self):
-        lines, _removed = prepare_stream_lines(self._gcode_edit.toPlainText(), dry_run=False)
+        gcode, error = self._current_stream_gcode_text(update_editor=True)
+        if error:
+            self._append_console(f"Validate failed: {error}", force=True)
+            return
+        lines, _removed = prepare_stream_lines(gcode, dry_run=False)
         report = self._validate_gcode_lines(lines, label="Validate")
         self._gcode_last_validation = report
         self._update_job_controls()
@@ -6317,7 +6329,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if not allowed:
             self._append_console(f"Air Run failed: {reason}", force=True)
             return
-        lines = prepare_air_run_lines(self._gcode_edit.toPlainText(), air_z=self._manual_start_safe_z())
+        gcode, error = self._current_stream_gcode_text(update_editor=True)
+        if error:
+            self._append_console(f"Air Run failed: {error}", force=True)
+            return
+        lines = prepare_air_run_lines(gcode, air_z=self._current_air_run_z())
         if not lines:
             self._append_console("Air Run failed: G-code is empty.")
             return
@@ -6327,7 +6343,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._start_stream_lines(lines, "Air Run")
 
     def _on_show_apply_air_run(self):
-        lines = prepare_air_run_lines(self._gcode_edit.toPlainText(), air_z=self._manual_start_safe_z())
+        gcode, error = self._current_stream_gcode_text(update_editor=False)
+        if error:
+            self._append_console(f"Show/Apply Air Run failed: {error}", force=True)
+            return
+        lines = prepare_air_run_lines(gcode, air_z=self._current_air_run_z())
         if not lines:
             self._append_console("Show/Apply Air Run failed: G-code is empty.", force=True)
             return
@@ -6351,6 +6371,104 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             return False, f"machine not idle ({state})"
         return True, ""
 
+    def _current_stream_gcode_text(self, *, update_editor=False):
+        spec = self._effective_stream_template_spec()
+        if spec is None:
+            self._last_effective_stream_spec = None
+            return self._gcode_edit.toPlainText(), None
+        try:
+            program = rectangle_pocket(spec)
+        except ValueError as exc:
+            self._last_effective_stream_spec = None
+            return "", str(exc)
+        self._last_template_spec = spec
+        self._last_effective_stream_spec = spec
+        self._save_rectangle_template_defaults(spec)
+        if update_editor:
+            self._gcode_edit.setPlainText(program.gcode + "\n")
+        return program.gcode, None
+
+    def _effective_stream_template_spec(self):
+        spec = self._manual_xyz_preview_template_spec()
+        if spec is not None:
+            return spec
+        text = self._gcode_edit.toPlainText() if getattr(self, "_gcode_edit", None) is not None else ""
+        if str(text).strip():
+            spec = self._rectangle_template_spec_for_existing_editor_text(text)
+            if spec is not None:
+                start = self._current_live_template_start()
+                if start:
+                    return self._template_spec_aligned_to_manual_start(spec, start)
+            return None
+        try:
+            spec = self._read_rectangle_template_controls()
+        except Exception:
+            spec = None
+        if spec is not None:
+            return spec
+        previous = getattr(self, "_last_template_spec", None)
+        if previous is not None:
+            return replace(previous)
+        return None
+
+    def _rectangle_template_spec_for_existing_editor_text(self, text):
+        if "; RouterKing rectangle pocket template" not in str(text or ""):
+            return None
+        try:
+            spec = self._read_rectangle_template_controls()
+        except Exception:
+            spec = None
+        if spec is not None:
+            return spec
+        previous = getattr(self, "_last_template_spec", None)
+        if previous is not None:
+            return replace(previous)
+        return None
+
+    def _current_live_template_start(self):
+        start = (
+            getattr(self, "_manual_xyz_preview_wpos", None)
+            if getattr(self, "_controller_manual_xyz_active", False)
+            else None
+        )
+        if start:
+            return start
+        start = getattr(self, "_gcode_manual_start_wpos", None)
+        if start:
+            return start
+        status = self._status_with_live_wco(self._sender.get_status() or {})
+        live = self._extract_live_xyz(status)
+        if live is not None:
+            return live["wpos"]
+        return None
+
+    def _has_effective_stream_gcode(self):
+        text = self._gcode_edit.toPlainText() if getattr(self, "_gcode_edit", None) is not None else ""
+        if str(text).strip():
+            return True
+        return self._effective_stream_template_spec() is not None
+
+    def _current_air_run_z(self):
+        spec = getattr(self, "_last_effective_stream_spec", None)
+        if spec is not None:
+            try:
+                return float(spec.safe_z)
+            except (TypeError, ValueError):
+                pass
+        start = (
+            getattr(self, "_manual_xyz_preview_wpos", None)
+            if getattr(self, "_controller_manual_xyz_active", False)
+            else None
+        )
+        if not start:
+            start = getattr(self, "_gcode_manual_start_wpos", None)
+        if start:
+            try:
+                return self._manual_retract_z_for_start(start)
+            except (TypeError, ValueError, KeyError):
+                pass
+        return self._manual_start_safe_z()
+
     def _validate_gcode_lines(self, lines, label="Validate"):
         if not lines:
             self._append_console(f"{label} failed: G-code is empty.")
@@ -6360,7 +6478,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             line_no, command, reason = blocked
             self._append_console(f"{label} failed at line {line_no}: {reason} ({command})", force=True)
             return {"valid": False, "errors": [{"line": line_no, "command": command, "reason": reason}]}
-        status = self._sender.get_status() or {}
+        status = self._status_with_live_wco(self._sender.get_status() or {})
         profile, _profile_path = grbl_load_machine_profile(None)
         report = grbl_validate_gcode(
             lines,
@@ -6381,8 +6499,37 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._append_console(
                 f"{label} failed at line {first.get('line', '?')}: {first.get('reason', 'unknown error')}",
                 force=True,
-            )
+        )
         return report
+
+    def _status_with_live_wco(self, status=None):
+        status_map = dict(status or {})
+        sender = getattr(self, "_sender", None)
+        if sender is None:
+            return status_map
+        try:
+            connected = bool(sender.is_connected())
+            streaming = bool(sender.is_streaming())
+        except Exception:
+            return status_map
+        if not connected or streaming:
+            return status_map
+        try:
+            coordinate_params = grbl_read_coordinate_parameters(sender)
+        except Exception:
+            return status_map
+        work_offset = coordinate_params.get("work_offset") if isinstance(coordinate_params, dict) else None
+        if isinstance(work_offset, dict):
+            try:
+                status_map["WCO"] = (
+                    f"{float(work_offset['x']):.3f},"
+                    f"{float(work_offset['y']):.3f},"
+                    f"{float(work_offset['z']):.3f}"
+                )
+                status_map["WCOSource"] = "$#.G54"
+            except (TypeError, ValueError, KeyError):
+                pass
+        return status_map
 
     def _start_stream_lines(self, lines, label):
         try:
@@ -6400,11 +6547,30 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             value = 5.0
         return max(value, 0.0)
 
+    def _manual_retract_z_for_start(self, start):
+        start_z = float(start["z"])
+        safe_z = start_z + self._manual_start_safe_z()
+        z_top = self._preview_work_z_top()
+        if z_top is not None and z_top > start_z:
+            safe_z = min(safe_z, z_top)
+        return safe_z
+
+    def _preview_work_z_top(self):
+        area = self._preview_work_area()
+        if area is None:
+            return None
+        try:
+            return max(float(area["z_min"]), float(area["z_max"]))
+        except (TypeError, ValueError, KeyError):
+            return None
+
     def _extract_live_xyz(self, status):
         status = status or {}
         mpos = grbl_parse_xyz_value(status.get("MPos"))
         wco = grbl_parse_xyz_value(status.get("WCO"))
         wpos = grbl_parse_xyz_value(status.get("WPos"))
+        if wco is None:
+            wco = self._profile_work_offset_fallback()
         if wpos is None and mpos is not None and wco is not None:
             wpos = {axis: float(mpos[axis]) - float(wco[axis]) for axis in ("x", "y", "z")}
         if mpos is None or wco is None or wpos is None:
@@ -6414,6 +6580,19 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             "wco": {axis: float(wco[axis]) for axis in ("x", "y", "z")},
             "wpos": {axis: float(wpos[axis]) for axis in ("x", "y", "z")},
         }
+
+    def _profile_work_offset_fallback(self):
+        try:
+            profile, _profile_path = grbl_load_machine_profile(None)
+        except Exception:
+            return None
+        if not isinstance(profile, dict):
+            return None
+        for key in ("work_offset", "wco", "g54", "g54_offset"):
+            parsed = grbl_parse_xyz_value(profile.get(key))
+            if parsed is not None:
+                return parsed
+        return None
 
     def _xyz_close(self, left, right, tolerance=0.01):
         if not left or not right:
@@ -6442,7 +6621,11 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._append_console(f"Start failed: {reason}.")
             return
         dry_run = self._dry_run_check.isChecked()
-        lines, removed = prepare_stream_lines(self._gcode_edit.toPlainText(), dry_run=dry_run)
+        gcode, error = self._current_stream_gcode_text(update_editor=True)
+        if error:
+            self._append_console(f"Start failed: {error}.", force=True)
+            return
+        lines, removed = prepare_stream_lines(gcode, dry_run=dry_run)
         if not lines:
             self._append_console("Start failed: G-code is empty.")
             return
@@ -6492,7 +6675,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         connected = self._sender.is_connected()
         machine_state = self._machine_state()
         idle = machine_state == "idle"
-        has_gcode = bool(getattr(self, "_gcode_edit", None) is not None and self._gcode_edit.toPlainText().strip())
+        has_gcode = self._has_effective_stream_gcode()
         start_block = self._start_button_block_reason(
             connected=connected,
             streaming=streaming,
@@ -6809,14 +6992,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return self._template_spec_aligned_to_manual_start(spec, start)
 
     def _template_spec_aligned_to_manual_start(self, spec, start):
-        anchor = self._template_cut_start_anchor(spec)
+        base_spec = replace(spec, start_x=0.0, start_y=0.0, cut_start_x=None, cut_start_y=None)
+        anchor = self._template_cut_start_anchor(base_spec)
         start_x = float(start["x"])
         start_y = float(start["y"])
+        start_z = float(start.get("z", spec.start_z))
         return replace(
             spec,
-            start_x=float(spec.start_x) + start_x - anchor.x,
-            start_y=float(spec.start_y) + start_y - anchor.y,
-            start_z=float(start.get("z", spec.start_z)),
+            start_x=start_x - anchor.x,
+            start_y=start_y - anchor.y,
+            start_z=start_z,
+            safe_z=self._manual_retract_z_for_start({"z": start_z}),
             cut_start_x=start_x,
             cut_start_y=start_y,
         )

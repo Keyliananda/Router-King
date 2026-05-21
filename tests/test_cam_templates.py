@@ -132,6 +132,19 @@ class TestPocketTemplates(unittest.TestCase):
         self.assertIn("G0 X18.5 Y18.5", program.lines[:16])
         self.assertEqual(program.lines[-2:], ["G0 X0 Y0", "M2"])
 
+    def test_rectangle_pocket_first_xy_rapid_targets_selected_cut_start(self):
+        spec = self._forty_mm_spec()
+        spec.cut_start_x = -18.5
+        spec.cut_start_y = -18.5
+
+        program = rectangle_pocket(spec)
+
+        first_depth = program.lines.index("; depth -2")
+        self.assertEqual(program.lines[first_depth + 1], "G0 X-18.5 Y-18.5")
+        self.assertEqual(program.lines[first_depth + 2], "G1 Z-2 F120")
+        second_depth = program.lines.index("; depth -4")
+        self.assertEqual(program.lines[second_depth + 1], "G0 X-18.5 Y-18.5")
+
     def test_rectangle_pocket_records_cad_source_in_header(self):
         spec = self._forty_mm_spec()
         spec.source_document = "tee-tablett"
