@@ -132,6 +132,7 @@ _PREVIEW_MACHINE_SWAP_XY = False
 _PREVIEW_MACHINE_FLIP_X = False
 _PREVIEW_MACHINE_FLIP_Y = False
 _RECTANGLE_TEMPLATE_PREFS_PATH = "User parameter:BaseApp/Preferences/RouterKing/RectangleTemplate"
+_MANUAL_START_PREFS_PATH = "User parameter:BaseApp/Preferences/RouterKing/ManualStart"
 _ALARM_CODES = {
     1: "Hard limit triggered. Machine position may be lost.",
     2: "Soft limit alarm. Target exceeds machine travel.",
@@ -1373,13 +1374,19 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._use_manual_start_template_btn = QtWidgets.QPushButton("Use Manual Start In Template")
         self._set_manual_start_btn.setVisible(False)
         self._use_manual_start_template_btn.setVisible(False)
+        self._save_manual_start_btn = QtWidgets.QPushButton("Save Start")
+        self._load_manual_start_btn = QtWidgets.QPushButton("Load Start")
         self._go_manual_start_btn = QtWidgets.QPushButton("Go To Start Safely")
         self._manual_start_status = QtWidgets.QLabel("Manual start: not set")
         self._use_current_tool_start_btn.setToolTip(
             "Read the live machine position, save it as cut start, regenerate the rectangle template, and refresh the preview."
         )
+        self._save_manual_start_btn.setToolTip("Persist the current Manual XYZ/tool position for later reuse. No machine move is sent.")
+        self._load_manual_start_btn.setToolTip("Load the saved start point and regenerate the template/G-code. No machine move is sent.")
         self._go_manual_start_btn.setToolTip("Retract safely, move to the saved cut start, then return to the saved start Z.")
         manual_start_row.addWidget(self._use_current_tool_start_btn)
+        manual_start_row.addWidget(self._save_manual_start_btn)
+        manual_start_row.addWidget(self._load_manual_start_btn)
         manual_start_row.addWidget(self._go_manual_start_btn)
         manual_start_row.addWidget(self._manual_start_status, 1)
         layout.addWidget(start_group)
@@ -1476,6 +1483,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._use_current_tool_start_btn.clicked.connect(self._on_use_current_tool_position_as_cut_start)
         self._set_manual_start_btn.clicked.connect(self._on_set_manual_start)
         self._use_manual_start_template_btn.clicked.connect(self._on_use_manual_start_in_template)
+        self._save_manual_start_btn.clicked.connect(self._on_save_manual_start)
+        self._load_manual_start_btn.clicked.connect(self._on_load_manual_start)
         self._go_manual_start_btn.clicked.connect(self._on_go_to_manual_start_safely)
         self._cam_check_btn.clicked.connect(self._on_cam_check)
         self._cam_activate_btn.clicked.connect(self._on_cam_activate)
@@ -1770,6 +1779,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             "path_direction": QtWidgets.QComboBox(),
             "final_contour": QtWidgets.QCheckBox("Add final contour pass at full depth"),
             "contour_direction": QtWidgets.QComboBox(),
+            "final_surface": QtWidgets.QCheckBox("Add final surface pass"),
+            "final_surface_step": self._template_spin(default.final_surface_step, 0.001, 1000.0),
         }
         controls["origin"].addItems(["center", "lower_left"])
         controls["origin"].setCurrentText(default.origin)
@@ -1780,11 +1791,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         controls["pass_axis"].addItems(["x", "y"])
         controls["pass_axis"].setCurrentText(default.pass_axis)
         controls["pass_axis"].setToolTip("Raster pass direction: X means long cutting moves along X, stepping in Y.")
-        controls["path_direction"].addItems(["forward", "reverse"])
+        controls["path_direction"].addItems(["forward", "reverse", "return_each_depth"])
         controls["path_direction"].setCurrentText(default.path_direction)
+        controls["path_direction"].setToolTip(
+            "forward/reverse choose the first raster order. return_each_depth cuts the same path back after each deeper step."
+        )
         controls["final_contour"].setChecked(bool(default.final_contour))
         controls["contour_direction"].addItems(["cw", "ccw"])
         controls["contour_direction"].setCurrentText(default.contour_direction)
+        controls["final_surface"].setChecked(bool(default.final_surface))
+        controls["final_surface_step"].setValue(float(default.final_surface_step))
+        controls["final_surface_step"].setToolTip("Small final Z step used for the last bottom surface pass.")
         self._template_controls = controls
 
         tabs = QtWidgets.QTabWidget()
@@ -1818,6 +1835,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         axes_form.addRow("Path order", controls["path_direction"])
         axes_form.addRow(controls["final_contour"])
         axes_form.addRow("Contour direction", controls["contour_direction"])
+        axes_form.addRow(controls["final_surface"])
+        axes_form.addRow("Final surface step (mm)", controls["final_surface_step"])
         tabs.addTab(axes_tab, "Axes & Path")
 
         cad_tab = QtWidgets.QWidget()
@@ -4696,6 +4715,14 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _send_jog(self, x=0.0, y=0.0, z=0.0, feed=300.0, source="Jog", log=True):
         requested = {"x": float(x), "y": float(y), "z": float(z)}
+        if str(source).strip().lower() == "controller" and not getattr(self, "_controller_manual_xyz_active", False):
+            if log:
+                self._append_console("Controller blocked: Prepare Manual XYZ is not active.", force=True)
+            else:
+                status = getattr(self, "_controller_status", None)
+                if status is not None:
+                    status.setText("Controller: locked - use Prepare Manual XYZ")
+            return False
         allowed, reason = self._can_jog()
         if not allowed:
             if log:
@@ -5306,15 +5333,29 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._append_console(f"Manual XYZ blocked: {reason}", force=True)
             _controller_log(f"manual xyz blocked: {reason}")
             return
+        status = self._sender.get_status() or {}
+        self._invalidate_controller_guard_position()
+        if not self._prepare_manual_xyz_preview_baseline(status):
+            self._clear_manual_xyz_state(clear_position=False)
+            if self._controller_enable.isChecked():
+                self._controller_enable.setChecked(False)
+            else:
+                self._controller_stop()
+            self._append_console(
+                "Manual XYZ blocked: reliable live position unavailable. "
+                "Last known tool position is preserved; refresh status, home/reconnect if needed, then prepare again.",
+                force=True,
+            )
+            _controller_log("manual xyz blocked: no reliable live position")
+            self._request_status()
+            self._update_machine_controls()
+            return
         self._controller_manual_xyz_active = True
         self._append_console(
             "Manual XYZ ready: no automatic move sent. "
             "Controller jog is guarded by homed machine limits.",
             force=True,
         )
-        status = self._sender.get_status() or {}
-        self._invalidate_controller_guard_position()
-        self._prepare_manual_xyz_preview_baseline(status)
         self._update_manual_xyz_preview_position(status, force=True)
         _controller_log(f"manual xyz prepared: no automatic move; mpos={status.get('MPos', 'unknown')}")
         if self._controller.is_connected():
@@ -5327,13 +5368,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._update_machine_controls()
 
     def _on_exit_manual_xyz(self):
-        self._controller_manual_xyz_active = False
-        self._manual_xyz_preview_wpos = None
-        self._manual_xyz_preview_origin_wpos = None
-        self._manual_xyz_prepare_mpos = None
-        self._manual_xyz_prepare_wpos = None
-        self._manual_xyz_work_origin_fallback = False
-        self._jog_work_origin_mpos = None
+        self._clear_manual_xyz_state(clear_position=False)
         if self._controller_enable.isChecked():
             self._controller_enable.setChecked(False)
         else:
@@ -5342,6 +5377,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_waiting_for_neutral = False
         self._append_console("Manual XYZ mode stopped.", force=True)
         self._update_preview()
+
+    def _clear_manual_xyz_state(self, clear_position=False):
+        self._controller_manual_xyz_active = False
+        self._controller_waiting_for_neutral = False
+        self._manual_xyz_work_origin_fallback = False
+        self._jog_work_origin_mpos = None
+        if clear_position:
+            self._manual_xyz_preview_wpos = None
+            self._manual_xyz_preview_origin_wpos = None
+            self._manual_xyz_prepare_mpos = None
+            self._manual_xyz_prepare_wpos = None
 
     def _prepare_manual_xyz_preview_baseline(self, status):
         status = status or {}
@@ -5355,16 +5401,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             }
             self._manual_xyz_work_origin_fallback = False
             self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
-            return
+            return True
 
-        mpos = self._status_machine_position(status)
-        if mpos is None:
-            return
-        self._manual_xyz_prepare_mpos = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
-        self._manual_xyz_prepare_wpos = dict(self._manual_xyz_prepare_mpos)
-        self._manual_xyz_preview_origin_wpos = dict(self._manual_xyz_prepare_wpos)
-        self._controller_guard_wpos = dict(self._manual_xyz_prepare_wpos)
-        self._manual_xyz_work_origin_fallback = True
+        return False
 
     def _current_preview_cut_start_reference(self, fallback_wpos):
         try:
@@ -5452,7 +5491,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             self._controller_stop()
             name = self._controller.name()
             self._controller.disconnect()
-            self._controller_manual_xyz_active = False
+            self._clear_manual_xyz_state()
             self._controller_status.setText("Controller: disconnected")
             self._controller_connect_btn.setText("Connect Controller")
             _controller_log(f"disconnected: {name or 'controller'}")
@@ -5473,7 +5512,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._controller_status.setText(f"Controller: {self._controller.name()}")
         self._controller_connect_btn.setText("Disconnect Controller")
         _controller_log(f"connected: {self._controller.name()}")
-        if self._controller_enable.isChecked():
+        if self._controller_enable.isChecked() and getattr(self, "_controller_manual_xyz_active", False):
             self._controller_timer.start()
         self._update_machine_controls()
 
@@ -5562,11 +5601,15 @@ class RouterKingDockWidget(QtWidgets.QWidget):
 
     def _on_controller_enabled_changed(self, _checked):
         self._save_controller_defaults()
-        if self._controller_enable.isChecked() and self._controller.is_connected():
+        if (
+            self._controller_enable.isChecked()
+            and self._controller.is_connected()
+            and getattr(self, "_controller_manual_xyz_active", False)
+        ):
             self._controller_waiting_for_neutral = True
             self._controller_timer.start()
         else:
-            self._controller_manual_xyz_active = False
+            self._clear_manual_xyz_state()
             self._controller_waiting_for_neutral = False
             self._controller_stop()
         self._update_machine_controls()
@@ -5575,9 +5618,24 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if not self._controller_enable.isChecked() or not self._controller.is_connected():
             self._controller_stop()
             return
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            if self._controller_was_active:
+                self._controller_cancel_jog()
+            self._controller_was_active = False
+            self._controller_waiting_for_neutral = False
+            self._controller_status.setText("Controller: locked - use Prepare Manual XYZ")
+            self._controller_stop()
+            update_controls = getattr(self, "_update_machine_controls", None)
+            if callable(update_controls):
+                try:
+                    update_controls()
+                except Exception:
+                    pass
+            return
         state = self._controller.poll_mapped(self._controller_binding_strings())
         if state is None:
             self._controller_stop()
+            self._clear_manual_xyz_state()
             self._controller_status.setText(f"Controller: {self._controller.error or 'disconnected'}")
             self._controller_connect_btn.setText("Connect Controller")
             self._update_machine_controls()
@@ -5815,6 +5873,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         previous = getattr(self, "_last_template_spec", None)
         cut_start_x = previous.cut_start_x if previous is not None else None
         cut_start_y = previous.cut_start_y if previous is not None else None
+        final_surface_control = controls.get("final_surface")
+        final_surface_step_control = controls.get("final_surface_step")
         return TemplateSpec(
             name=controls["name"].text().strip() or None,
             width=controls["width"].value(),
@@ -5836,6 +5896,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             path_direction=controls["path_direction"].currentText(),
             final_contour=controls["final_contour"].isChecked(),
             contour_direction=controls["contour_direction"].currentText(),
+            final_surface=final_surface_control.isChecked() if final_surface_control is not None else False,
+            final_surface_step=final_surface_step_control.value() if final_surface_step_control is not None else 0.2,
             cut_start_x=cut_start_x,
             cut_start_y=cut_start_y,
             source_document=source.get("document"),
@@ -5870,6 +5932,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         controls["path_direction"].setCurrentText(spec.path_direction)
         controls["final_contour"].setChecked(bool(spec.final_contour))
         controls["contour_direction"].setCurrentText(spec.contour_direction)
+        if "final_surface" in controls:
+            controls["final_surface"].setChecked(bool(getattr(spec, "final_surface", False)))
+        if "final_surface_step" in controls:
+            controls["final_surface_step"].setValue(float(getattr(spec, "final_surface_step", 0.2)))
         self._select_template_source(spec)
 
     def _on_reset_rectangle_template_controls(self):
@@ -6034,6 +6100,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 "path_direction": str(data.get("path_direction", fallback.path_direction)),
                 "final_contour": bool(data.get("final_contour", fallback.final_contour)),
                 "contour_direction": str(data.get("contour_direction", fallback.contour_direction)),
+                "final_surface": bool(data.get("final_surface", fallback.final_surface)),
+                "final_surface_step": float(data.get("final_surface_step", fallback.final_surface_step)),
                 "source_document": data.get("source_document", fallback.source_document),
                 "source_object": data.get("source_object", fallback.source_object),
                 "source_feature": data.get("source_feature", fallback.source_feature),
@@ -6073,6 +6141,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             "path_direction": spec.path_direction,
             "final_contour": bool(spec.final_contour),
             "contour_direction": spec.contour_direction,
+            "final_surface": bool(spec.final_surface),
+            "final_surface_step": float(spec.final_surface_step),
             "cut_start_x": spec.cut_start_x,
             "cut_start_y": spec.cut_start_y,
             "source_document": spec.source_document,
@@ -6277,6 +6347,129 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         )
         self._update_preview()
         self._update_job_controls()
+
+    def _current_manual_start_payload(self):
+        wpos = (
+            getattr(self, "_manual_xyz_preview_wpos", None)
+            if getattr(self, "_controller_manual_xyz_active", False)
+            else None
+        )
+        mpos = self._preview_tool_machine_position()
+        wco = None
+        sender = getattr(self, "_sender", None)
+        status = getattr(sender, "get_status", lambda: None)() or {}
+        live = self._extract_live_xyz(status) if sender is not None else None
+        if wpos is None:
+            if getattr(self, "_gcode_manual_start_wpos", None):
+                wpos = getattr(self, "_gcode_manual_start_wpos", None)
+                mpos = getattr(self, "_gcode_manual_start_mpos", None) or mpos
+                wco = getattr(self, "_gcode_manual_start_wco", None)
+            elif live is not None:
+                wpos = live["wpos"]
+                mpos = live["mpos"]
+                wco = live["wco"]
+        if wco is None:
+            if live is not None:
+                wco = live["wco"]
+            else:
+                try:
+                    profile, _profile_path = grbl_load_machine_profile(None)
+                except Exception:
+                    profile = {}
+                wco = self._preview_work_offset(profile)
+        if wpos is None:
+            return None
+        payload = {
+            "version": 1,
+            "saved_at": time.time(),
+            "wpos": {axis: float(wpos[axis]) for axis in ("x", "y", "z")},
+        }
+        if mpos:
+            payload["mpos"] = {axis: float(mpos[axis]) for axis in ("x", "y", "z")}
+        if wco:
+            payload["wco"] = {axis: float(wco[axis]) for axis in ("x", "y", "z")}
+        return payload
+
+    def _on_save_manual_start(self):
+        payload = self._current_manual_start_payload()
+        if payload is None:
+            self._append_console("Save start blocked: no Manual XYZ/tool position available.", force=True)
+            return
+        try:
+            params = App.ParamGet(_MANUAL_START_PREFS_PATH)
+            params.SetString("last_start_json", json.dumps(payload, sort_keys=True))
+        except Exception as exc:
+            self._append_console(f"Save start failed: {exc}", force=True)
+            return
+        self._apply_manual_start_payload(payload, update_template=False)
+        start = payload["wpos"]
+        self._append_console(
+            f"Saved start: X{start['x']:.3f} Y{start['y']:.3f} Z{start['z']:.3f}.",
+            force=True,
+        )
+
+    def _load_saved_manual_start_payload(self):
+        try:
+            params = App.ParamGet(_MANUAL_START_PREFS_PATH)
+            raw = params.GetString("last_start_json", "")
+        except Exception:
+            raw = ""
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            return {
+                "version": int(data.get("version", 1)),
+                "saved_at": float(data.get("saved_at", 0.0) or 0.0),
+                "wpos": {axis: float(data["wpos"][axis]) for axis in ("x", "y", "z")},
+                "mpos": (
+                    {axis: float(data["mpos"][axis]) for axis in ("x", "y", "z")}
+                    if isinstance(data.get("mpos"), dict)
+                    else None
+                ),
+                "wco": (
+                    {axis: float(data["wco"][axis]) for axis in ("x", "y", "z")}
+                    if isinstance(data.get("wco"), dict)
+                    else None
+                ),
+            }
+        except Exception:
+            return None
+
+    def _on_load_manual_start(self):
+        payload = self._load_saved_manual_start_payload()
+        if payload is None:
+            self._append_console("Load start failed: no saved start point found.", force=True)
+            return
+        self._apply_manual_start_payload(payload, update_template=True)
+        start = payload["wpos"]
+        self._append_console(
+            f"Loaded start: X{start['x']:.3f} Y{start['y']:.3f} Z{start['z']:.3f}. No machine move sent.",
+            force=True,
+        )
+
+    def _apply_manual_start_payload(self, payload, *, update_template):
+        start = payload["wpos"]
+        self._gcode_manual_start_wpos = {axis: float(start[axis]) for axis in ("x", "y", "z")}
+        mpos = payload.get("mpos")
+        wco = payload.get("wco")
+        self._gcode_manual_start_mpos = (
+            {axis: float(mpos[axis]) for axis in ("x", "y", "z")} if mpos else None
+        )
+        self._gcode_manual_start_wco = (
+            {axis: float(wco[axis]) for axis in ("x", "y", "z")} if wco else None
+        )
+        self._manual_xyz_preview_wpos = dict(self._gcode_manual_start_wpos)
+        self._gcode_manual_start_at = float(payload.get("saved_at") or time.time())
+        self._manual_start_status.setText(
+            "Manual start: "
+            f"X{start['x']:.3f} Y{start['y']:.3f} Z{start['z']:.3f}"
+        )
+        if update_template:
+            self._on_use_manual_start_in_template()
+        else:
+            self._update_preview()
+            self._update_job_controls()
 
     def _on_use_manual_start_in_template(self):
         start = getattr(self, "_gcode_manual_start_wpos", None)
@@ -6764,6 +6957,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         current_tool_start_btn = getattr(self, "_use_current_tool_start_btn", None)
         if current_tool_start_btn is not None:
             current_tool_start_btn.setEnabled(connected and not streaming and idle and not self._explore_active)
+        save_manual_start_btn = getattr(self, "_save_manual_start_btn", None)
+        if save_manual_start_btn is not None:
+            save_manual_start_btn.setEnabled(not streaming and self._current_manual_start_payload() is not None)
+        load_manual_start_btn = getattr(self, "_load_manual_start_btn", None)
+        if load_manual_start_btn is not None:
+            load_manual_start_btn.setEnabled(not streaming and self._load_saved_manual_start_payload() is not None)
         set_manual_start_btn = getattr(self, "_set_manual_start_btn", None)
         if set_manual_start_btn is not None:
             set_manual_start_btn.setEnabled(connected and not streaming and idle and not self._explore_active)
@@ -6823,6 +7022,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 and not self._explore_active
                 and getattr(self, "_controller", None) is not None
                 and self._controller.is_connected()
+                and getattr(self, "_controller_manual_xyz_active", False)
                 and not alarm_active
             )
         manual_prepare = getattr(self, "_controller_manual_prepare_btn", None)
@@ -6853,7 +7053,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _apply_disconnected_state(self, message=None, unexpected=False):
         self._poll_timer.stop()
         self._controller_stop()
-        self._controller_manual_xyz_active = False
+        self._clear_manual_xyz_state()
         self._status_tick = 0
         self._sender_was_connected = False
         self._reset_explore_state()
@@ -6862,7 +7062,6 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._alarm_status.setText("Alarm: none")
         self._last_alarm_info = None
         self._limits = {"X": None, "Y": None, "Z": None}
-        self._jog_work_origin_mpos = None
         self._limits_announced = False
         self._update_limit_labels()
         self._connect_btn.setText("Connect")
@@ -6990,6 +7189,8 @@ class RouterKingDockWidget(QtWidgets.QWidget):
     def _preview_manual_template_tracks_tool(self):
         if not getattr(self, "_controller_manual_xyz_active", False):
             return False
+        if self._template_fit_selection_active():
+            return False
         sender = getattr(self, "_sender", None)
         if sender is not None:
             try:
@@ -6998,6 +7199,12 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             except Exception:
                 return False
         return True
+
+    def _template_fit_selection_active(self):
+        return (
+            bool(getattr(self, "_template_fit_candidates", None))
+            and getattr(self, "_template_fit_index", None) is not None
+        )
 
     def _preview_path_for_display(self, path):
         segments = list(getattr(path, "segments", ()) or ())

@@ -40,7 +40,7 @@ class TestPocketTemplates(unittest.TestCase):
             "; size: 40 x 40 x 5 mm",
             "; tool: 3 mm",
             "; axes: normal (CAD X->machine X, CAD Y->machine Y)",
-            "; raster: pass_axis=x, path=forward, final_contour=off",
+            "; raster: pass_axis=x, path=forward, final_contour=off, final_surface=off",
             "; start: X0 Y0",
             "G21",
             "G90",
@@ -103,9 +103,31 @@ class TestPocketTemplates(unittest.TestCase):
 
         program = rectangle_pocket(spec)
 
-        self.assertIn("; raster: pass_axis=y, path=reverse, final_contour=off", program.lines)
+        self.assertIn("; raster: pass_axis=y, path=reverse, final_contour=off, final_surface=off", program.lines)
         self.assertIn("G0 X18.5 Y-18.5", program.lines[:14])
         self.assertIn("G1 X18.5 Y18.5 F500", program.lines)
+
+    def test_rectangle_pocket_can_return_same_path_after_each_depth(self):
+        spec = self._forty_mm_spec()
+        spec.depth = 4.0
+        spec.step_down = 2.0
+        spec.path_direction = "return_each_depth"
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; raster: pass_axis=x, path=return_each_depth, final_contour=off, final_surface=off", program.lines)
+        first_depth = program.lines.index("; depth -2")
+        second_depth = program.lines.index("; depth -4")
+        self.assertEqual(program.lines[first_depth + 1], "G0 X-18.5 Y-18.5")
+        self.assertEqual(program.lines[first_depth + 2], "G1 Z-2 F120")
+        self.assertEqual(program.lines[second_depth + 1], "G1 Z-4 F120")
+        self.assertNotEqual(program.lines[second_depth + 1][:2], "G0")
+        first_pass_moves = program.lines[first_depth + 3:second_depth]
+        final_retract = next(index for index in range(second_depth, len(program.lines)) if program.lines[index] == "G0 Z5")
+        second_pass_moves = program.lines[second_depth + 2:final_retract]
+        self.assertEqual(second_pass_moves[0], f"G1 X{18.5} Y{18.5} F500")
+        self.assertEqual(second_pass_moves[-1], "G1 X-18.5 Y-18.5 F500")
+        self.assertTrue(first_pass_moves)
 
     def test_rectangle_pocket_can_add_final_contour_pass(self):
         spec = self._forty_mm_spec()
@@ -114,11 +136,25 @@ class TestPocketTemplates(unittest.TestCase):
 
         program = rectangle_pocket(spec)
 
-        self.assertIn("; raster: pass_axis=x, path=forward, final_contour=ccw", program.lines)
+        self.assertIn("; raster: pass_axis=x, path=forward, final_contour=ccw, final_surface=off", program.lines)
         contour_index = program.lines.index("; final contour ccw")
         self.assertGreater(contour_index, program.lines.index("; depth -5"))
         self.assertIn("G1 X-18.5 Y-18.5 F500", program.lines[contour_index + 1:])
         self.assertIn("G1 X18.5 Y18.5 F500", program.lines[contour_index + 1:])
+
+    def test_rectangle_pocket_can_add_final_surface_pass(self):
+        spec = self._forty_mm_spec()
+        spec.depth = 4.0
+        spec.step_down = 1.0
+        spec.final_surface = True
+        spec.final_surface_step = 0.2
+
+        program = rectangle_pocket(spec)
+
+        self.assertIn("; raster: pass_axis=x, path=forward, final_contour=off, final_surface=0.2mm", program.lines)
+        self.assertIn("; depth -3.8", program.lines)
+        self.assertIn("; depth -4", program.lines)
+        self.assertLess(program.lines.index("; depth -3.8"), program.lines.index("; depth -4"))
 
     def test_rectangle_pocket_can_prefer_cut_start_without_moving_geometry(self):
         spec = self._forty_mm_spec()

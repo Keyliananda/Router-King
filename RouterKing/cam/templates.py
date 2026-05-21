@@ -30,6 +30,8 @@ class TemplateSpec:
     path_direction: str = "forward"
     final_contour: bool = False
     contour_direction: str = "cw"
+    final_surface: bool = False
+    final_surface_step: float = 0.2
     cut_start_x: Optional[float] = None
     cut_start_y: Optional[float] = None
     source_document: Optional[str] = None
@@ -108,12 +110,19 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
     _validate_spec(spec)
 
     local_paths = _orient_paths(_raster_paths(spec), spec)
-    if _normalize_path_direction(spec.path_direction) == "reverse":
+    path_direction = _normalize_path_direction(spec.path_direction)
+    if path_direction == "reverse":
         local_paths = list(reversed(local_paths))
     paths = _offset_paths(local_paths, spec.start_x, spec.start_y)
     if spec.cut_start_x is not None and spec.cut_start_y is not None:
         paths = _prefer_start_near(paths, spec.cut_start_x, spec.cut_start_y)
-    depths = _depth_levels(spec.start_z, spec.depth, spec.step_down)
+    depths = _depth_levels(
+        spec.start_z,
+        spec.depth,
+        spec.step_down,
+        final_surface=spec.final_surface,
+        final_surface_step=spec.final_surface_step,
+    )
     first_x, first_y = paths[0]
     contour_paths = _offset_paths(_orient_paths(_contour_path(spec), spec), spec.start_x, spec.start_y)
 
@@ -122,7 +131,7 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
         f"; size: {_fmt(spec.width)} x {_fmt(spec.height)} x {_fmt(spec.depth)} mm",
         f"; tool: {_fmt(spec.tool_diameter)} mm",
         f"; axes: {_axis_mapping_label(spec)}",
-        f"; raster: pass_axis={_normalize_pass_axis(spec.pass_axis)}, path={_normalize_path_direction(spec.path_direction)}, final_contour={_contour_label(spec)}",
+        f"; raster: pass_axis={_normalize_pass_axis(spec.pass_axis)}, path={path_direction}, final_contour={_contour_label(spec)}, final_surface={_surface_label(spec)}",
         f"; start: X{_fmt(spec.start_x)} Y{_fmt(spec.start_y)}",
         "G21",
         "G90",
@@ -135,14 +144,19 @@ def rectangle_pocket(spec: Optional[TemplateSpec] = None, **kwargs) -> GcodeProg
     if spec.cut_start_x is not None and spec.cut_start_y is not None:
         lines.insert(5, f"; cut start target: X{_fmt(spec.cut_start_x)} Y{_fmt(spec.cut_start_y)}")
 
-    for depth in depths:
+    return_each_depth = path_direction == "return_each_depth"
+    for depth_index, depth in enumerate(depths):
+        active_paths = list(reversed(paths)) if return_each_depth and depth_index % 2 else paths
+        layer_first_x, layer_first_y = active_paths[0]
         lines.append(f"; depth {_fmt(depth)}")
-        lines.append(f"G0 X{_fmt(first_x)} Y{_fmt(first_y)}")
+        if depth_index == 0 or not return_each_depth:
+            lines.append(f"G0 X{_fmt(layer_first_x)} Y{_fmt(layer_first_y)}")
         lines.append(f"G1 Z{_fmt(depth)} F{_fmt(spec.plunge_rate)}")
-        _append_raster_moves(lines, paths, spec.feed_rate)
+        _append_raster_moves(lines, active_paths, spec.feed_rate)
         if spec.final_contour and depth == depths[-1]:
             _append_contour_moves(lines, contour_paths, spec.feed_rate, spec.contour_direction)
-        lines.append(f"G0 Z{_fmt(spec.safe_z)}")
+        if not return_each_depth or depth == depths[-1]:
+            lines.append(f"G0 Z{_fmt(spec.safe_z)}")
 
     lines.append(f"G0 X{_fmt(spec.start_x)} Y{_fmt(spec.start_y)}")
     lines.append("M2")
@@ -227,7 +241,8 @@ def _validate_spec(spec: TemplateSpec) -> None:
     if _normalize_pass_axis(spec.pass_axis) not in {"x", "y"}:
         raise ValueError("pass_axis must be 'x' or 'y'.")
     if _normalize_path_direction(spec.path_direction) not in {"forward", "reverse"}:
-        raise ValueError("path_direction must be 'forward' or 'reverse'.")
+        if _normalize_path_direction(spec.path_direction) != "return_each_depth":
+            raise ValueError("path_direction must be 'forward', 'reverse', or 'return_each_depth'.")
     if _normalize_contour_direction(spec.contour_direction) not in {"cw", "ccw"}:
         raise ValueError("contour_direction must be 'cw' or 'ccw'.")
     if _normalize_rotation_z(spec.rotation_z) not in {0, 90, 180, 270}:
@@ -237,6 +252,15 @@ def _validate_spec(spec: TemplateSpec) -> None:
         value = getattr(spec, name)
         if not isinstance(value, (int, float)):
             raise ValueError(f"{name} must be numeric.")
+    if not isinstance(spec.final_surface, bool):
+        raise ValueError("final_surface must be boolean.")
+    if spec.final_surface:
+        if spec.final_surface_step <= 0:
+            raise ValueError("final_surface_step must be greater than zero.")
+        if spec.final_surface_step >= spec.depth:
+            raise ValueError("final_surface_step must be smaller than depth.")
+        if spec.final_surface_step > spec.step_down:
+            raise ValueError("final_surface_step must not exceed step_down.")
     if spec.cut_start_x is None and spec.cut_start_y is not None:
         raise ValueError("cut_start_x must be set when cut_start_y is set.")
     if spec.cut_start_y is None and spec.cut_start_x is not None:
@@ -251,8 +275,21 @@ def _validate_spec(spec: TemplateSpec) -> None:
             raise ValueError(f"{name} must be a string when set.")
 
 
-def _depth_levels(start_z: float, depth: float, step_down: float) -> list[float]:
+def _depth_levels(
+    start_z: float,
+    depth: float,
+    step_down: float,
+    *,
+    final_surface: bool = False,
+    final_surface_step: float = 0.2,
+) -> list[float]:
     target_z = start_z - depth
+    if final_surface:
+        rough_target = target_z + final_surface_step
+        rough_levels = _depth_levels(start_z, start_z - rough_target, step_down)
+        if rough_levels and rough_levels[-1] == target_z:
+            return rough_levels
+        return rough_levels + [target_z]
     levels = []
     current = start_z
     while current > target_z:
@@ -463,6 +500,12 @@ def _normalize_path_direction(path_direction: str) -> str:
         "reversed": "reverse",
         "backward": "reverse",
         "backwards": "reverse",
+        "return": "return_each_depth",
+        "return_each_depth": "return_each_depth",
+        "back_and_forth": "return_each_depth",
+        "back-and-forth": "return_each_depth",
+        "alternate": "return_each_depth",
+        "alternating": "return_each_depth",
     }
     return aliases.get(value, value)
 
@@ -503,6 +546,12 @@ def _contour_label(spec: TemplateSpec) -> str:
     if not spec.final_contour:
         return "off"
     return _normalize_contour_direction(spec.contour_direction)
+
+
+def _surface_label(spec: TemplateSpec) -> str:
+    if not spec.final_surface:
+        return "off"
+    return f"{_fmt(spec.final_surface_step)}mm"
 
 
 def _normalize_preset_name(name: str) -> str:
