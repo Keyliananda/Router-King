@@ -6711,8 +6711,10 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         if not self._sender.is_streaming():
             return
         try:
-            self._sender.abort_stream()
-            self._append_console("Job aborted with soft reset.")
+            if not self._sender.is_paused():
+                self._sender.pause_stream()
+            self._sender.stop_stream(reset_progress=True)
+            self._append_console("Job stopped with feed hold; queued G-code cleared.")
         except Exception as exc:
             self._append_console(f"Stop failed: {exc}")
         self._update_job_controls()
@@ -6976,13 +6978,26 @@ class RouterKingDockWidget(QtWidgets.QWidget):
             view.fitInView(scene_bounds, QtCore.Qt.KeepAspectRatio)
 
     def _preview_path_from_current_state(self, text):
-        spec = self._manual_xyz_preview_template_spec()
-        if spec is not None:
-            try:
-                return parse_gcode_preview(rectangle_pocket(spec).gcode)
-            except ValueError:
-                pass
+        if self._preview_manual_template_tracks_tool():
+            spec = self._manual_xyz_preview_template_spec()
+            if spec is not None:
+                try:
+                    return parse_gcode_preview(rectangle_pocket(spec).gcode)
+                except ValueError:
+                    pass
         return parse_gcode_preview(text)
+
+    def _preview_manual_template_tracks_tool(self):
+        if not getattr(self, "_controller_manual_xyz_active", False):
+            return False
+        sender = getattr(self, "_sender", None)
+        if sender is not None:
+            try:
+                if sender.is_streaming():
+                    return False
+            except Exception:
+                return False
+        return True
 
     def _preview_path_for_display(self, path):
         segments = list(getattr(path, "segments", ()) or ())
@@ -7395,7 +7410,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         return None
 
     def _preview_cut_start_point(self, path):
-        if getattr(self, "_controller_manual_xyz_active", False):
+        if self._preview_manual_template_tracks_tool():
             start = getattr(self, "_manual_xyz_preview_wpos", None)
             if start:
                 try:

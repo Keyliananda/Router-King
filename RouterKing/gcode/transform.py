@@ -19,16 +19,88 @@ def prepare_air_run_lines(gcode, air_z=5.0):
     simulated work-coordinate Z position never drops below ``air_z``.
     """
     transformer = _AirRunTransformer(float(air_z))
-    return [
+    lines = [
         line
         for line in (transformer.transform_line(raw) for raw in _iter_input_lines(gcode))
         if line
     ]
+    lines = _collapse_duplicate_air_run_moves(lines)
+    return _return_air_run_to_first_xy(lines)
 
 
 def prepare_air_run_gcode(gcode, air_z=5.0):
     """Return normalized air-run G-code as a newline-delimited string."""
     return "\n".join(prepare_air_run_lines(gcode, air_z=air_z))
+
+
+def _collapse_duplicate_air_run_moves(lines):
+    """Drop exact repeated motion commands created by multi-depth air runs."""
+    result = []
+    seen_motion = set()
+    for line in lines:
+        words = _parse_word_tokens(line)
+        has_motion_coordinate = any(word.letter in {"X", "Y", "Z"} for word in words)
+        if has_motion_coordinate:
+            signature = _normalize_space(line).upper()
+            if signature in seen_motion:
+                continue
+            seen_motion.add(signature)
+        result.append(line)
+    return result
+
+
+def _return_air_run_to_first_xy(lines):
+    if not lines:
+        return lines
+    first_xy = _first_xy_target(lines)
+    if first_xy is None:
+        return lines
+    return_line = _xy_return_line(first_xy)
+    insert_at = len(lines)
+    for index in range(len(lines) - 1, -1, -1):
+        if _is_program_end_line(lines[index]):
+            insert_at = index
+            break
+    if insert_at > 0 and _same_xy_target(lines[insert_at - 1], first_xy):
+        return lines
+    updated = list(lines)
+    updated.insert(insert_at, return_line)
+    return updated
+
+
+def _first_xy_target(lines):
+    for line in lines:
+        words = _parse_word_tokens(line)
+        values = {word.letter: word.value for word in words}
+        if "X" in values or "Y" in values:
+            return (values.get("X"), values.get("Y"))
+    return None
+
+
+def _xy_return_line(target):
+    parts = ["G0"]
+    x_value, y_value = target
+    if x_value is not None:
+        parts.append("X" + _format_number(x_value))
+    if y_value is not None:
+        parts.append("Y" + _format_number(y_value))
+    return " ".join(parts)
+
+
+def _same_xy_target(line, target):
+    words = _parse_word_tokens(line)
+    values = {word.letter: word.value for word in words}
+    x_value, y_value = target
+    if x_value is not None and ("X" not in values or not _near(values["X"], x_value)):
+        return False
+    if y_value is not None and ("Y" not in values or not _near(values["Y"], y_value)):
+        return False
+    return x_value is not None or y_value is not None
+
+
+def _is_program_end_line(line):
+    words = _parse_word_tokens(line)
+    return any(word.letter == "M" and round(word.value) in (2, 30) for word in words)
 
 
 class _AirRunTransformer:

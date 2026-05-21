@@ -140,6 +140,8 @@ class _FakeConnectedSender:
         self.commands = []
         self.started_lines = None
         self.cancelled = False
+        self.paused = False
+        self.stopped = False
         self._status = status if status is not None else {"state": "Idle"}
         self._streaming = streaming
         self._coordinate_lines = list(coordinate_lines or [])
@@ -159,6 +161,22 @@ class _FakeConnectedSender:
 
     def cancel_jog(self):
         self.cancelled = True
+
+    def pause_stream(self):
+        self.paused = True
+
+    def stop_stream(self, reset_progress=False):
+        self.stopped = True
+        self._streaming = False
+        if reset_progress:
+            self.started_lines = []
+
+    def abort_stream(self):
+        self.commands.append("SOFT_RESET")
+        self.stop_stream()
+
+    def is_paused(self):
+        return self.paused
 
     def is_connected(self):
         return True
@@ -1051,6 +1069,7 @@ class TestMainDock(unittest.TestCase):
     def test_manual_xyz_preview_moves_template_path_to_live_cut_start(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(streaming=False)
         widget._controller_manual_xyz_active = True
         widget._manual_xyz_preview_wpos = {"x": 10.0, "y": 20.0, "z": 0.0}
         widget._last_template_spec = None
@@ -1083,6 +1102,22 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(first_cut.x, 10.0)
         self.assertEqual(first_cut.y, 20.0)
+
+    def test_manual_xyz_streaming_preview_keeps_fixed_editor_path(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(streaming=True)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": 100.0, "y": 200.0, "z": 0.0}
+        widget._last_template_spec = None
+        widget._template_controls = self._rectangle_template_controls()
+        widget._selected_template_source = mock.Mock(return_value={})
+
+        path = widget._preview_path_from_current_state("G90\nG0 X1 Y2 Z5\nG1 Z-1\nG1 X3 Y2")
+        first_cut = next(segment.start for segment in path.segments if not segment.rapid)
+
+        self.assertEqual(first_cut.x, 1.0)
+        self.assertEqual(first_cut.y, 2.0)
 
     def test_manual_xyz_preview_maps_physical_xy_through_rotated_swapped_template(self):
         main_dock = _load_main_dock_module()
@@ -1323,6 +1358,21 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(sender.started_lines, ["G90", "G1 X1 Y2 Z1.5 F500"])
         validate.assert_called_once()
+
+    def test_stop_job_uses_feed_hold_without_soft_reset(self):
+        main_dock = _load_main_dock_module()
+        sender = _FakeConnectedSender(streaming=True)
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = sender
+        widget._append_console = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+
+        widget._on_stop_job()
+
+        self.assertTrue(sender.paused)
+        self.assertTrue(sender.stopped)
+        self.assertFalse(sender.is_streaming())
+        self.assertNotIn("SOFT_RESET", sender.commands)
 
     def test_air_run_generates_current_manual_template_before_streaming(self):
         main_dock = _load_main_dock_module()
@@ -2652,6 +2702,7 @@ class TestMainDock(unittest.TestCase):
     def test_preview_cut_start_point_prefers_live_manual_xyz_position(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(streaming=False)
         widget._controller_manual_xyz_active = True
         widget._manual_xyz_preview_wpos = {"x": 7.0, "y": 8.0, "z": 9.0}
         widget._gcode_manual_start_wpos = None
@@ -2675,6 +2726,21 @@ class TestMainDock(unittest.TestCase):
 
         self.assertEqual(point.x, 7.0)
         self.assertEqual(point.y, 8.0)
+
+    def test_preview_cut_start_point_uses_fixed_gcode_while_streaming(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(streaming=True)
+        widget._controller_manual_xyz_active = True
+        widget._manual_xyz_preview_wpos = {"x": 7.0, "y": 8.0, "z": 9.0}
+        widget._gcode_manual_start_wpos = None
+        widget._last_template_spec = None
+        path = main_dock.parse_gcode_preview("G90\nG0 X1 Y2 Z5\nG1 Z-1\nG1 X3 Y2")
+
+        point = widget._preview_cut_start_point(path)
+
+        self.assertEqual(point.x, 1.0)
+        self.assertEqual(point.y, 2.0)
 
     def test_template_cut_start_candidates_ignore_safe_z_points(self):
         main_dock = _load_main_dock_module()

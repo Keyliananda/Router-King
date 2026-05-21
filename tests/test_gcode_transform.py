@@ -74,6 +74,31 @@ class TestGcodeTransform(unittest.TestCase):
             "G90\nG1 X1 Z0.5",
         )
 
+    def test_air_run_collapses_repeated_depth_passes_and_returns_to_start(self):
+        lines = prepare_air_run_lines(
+            "\n".join(
+                [
+                    "G90",
+                    "G0 Z6",
+                    "G0 X0 Y0",
+                    "G1 Z-1 F100",
+                    "G1 X10 Y0 F500",
+                    "G0 Z6",
+                    "G0 X0 Y0",
+                    "G1 Z-2 F100",
+                    "G1 X10 Y0 F500",
+                    "G0 Z6",
+                    "G0 X5 Y5",
+                    "M2",
+                ]
+            ),
+            air_z=3.0,
+        )
+
+        self.assertEqual(lines[:-2].count("G0 X0 Y0"), 1)
+        self.assertEqual(lines.count("G1 X10 Y0 F500"), 1)
+        self.assertEqual(lines[-2:], ["G0 X0 Y0", "M2"])
+
 
 if __name__ == "__main__":
     unittest.main()
