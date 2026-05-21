@@ -1307,100 +1307,145 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._explore_z_btn.clicked.connect(self._on_explore_z_axis)
         self._z_speed_test_btn.clicked.connect(self._on_z_speed_test)
 
+    def _gcode_row_group(self, title):
+        group = QtWidgets.QGroupBox(title)
+        row = QtWidgets.QHBoxLayout(group)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(6)
+        return group, row
+
+    def _set_standard_icon(self, button, standard_pixmap):
+        try:
+            style = button.style() or QtWidgets.QApplication.style()
+            button.setIcon(style.standardIcon(standard_pixmap))
+        except Exception:
+            pass
+
+    def _style_primary_button(self, button):
+        try:
+            button.setDefault(True)
+        except Exception:
+            pass
+        try:
+            button.setStyleSheet("font-weight: 600;")
+        except Exception:
+            pass
+
     def _build_gcode_tab(self, parent):
         layout = QtWidgets.QVBoxLayout(parent)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        file_row = QtWidgets.QHBoxLayout()
-        self._load_btn = QtWidgets.QPushButton("Load")
+        source_group, source_row = self._gcode_row_group("Source")
+        self._load_btn = QtWidgets.QPushButton("Load G-code")
         self._save_btn = QtWidgets.QPushButton("Save")
         self._import_dxf_btn = QtWidgets.QPushButton("Import DXF")
-        self._template_btn = QtWidgets.QPushButton("Template")
-        self._preview_btn = QtWidgets.QPushButton("Preview")
+        self._template_btn = QtWidgets.QPushButton("Apply Template")
+        self._template_btn.setVisible(False)
+        self._preview_btn = QtWidgets.QPushButton("Refresh")
         self._cam_generate_btn = QtWidgets.QPushButton("FreeCAD CAM")
-        self._cam_generate_btn.setToolTip("Open the FreeCAD CAM generator. Rectangle templates use Apply Template below.")
-        file_row.addWidget(self._load_btn)
-        file_row.addWidget(self._save_btn)
-        file_row.addWidget(self._import_dxf_btn)
-        file_row.addWidget(self._template_btn)
-        file_row.addWidget(self._preview_btn)
-        file_row.addWidget(self._cam_generate_btn)
-        file_row.addStretch(1)
-        layout.addLayout(file_row)
-
-        job_row = QtWidgets.QHBoxLayout()
-        self._start_btn = QtWidgets.QPushButton("Start")
-        self._validate_btn = QtWidgets.QPushButton("Validate")
-        self._air_run_apply_btn = QtWidgets.QPushButton("Show/Apply Air Run")
-        self._air_run_btn = QtWidgets.QPushButton("Air Run")
-        self._pause_btn = QtWidgets.QPushButton("Pause")
-        self._stop_btn = QtWidgets.QPushButton("Stop")
-        job_row.addWidget(self._validate_btn)
-        job_row.addWidget(self._air_run_apply_btn)
-        job_row.addWidget(self._air_run_btn)
-        job_row.addWidget(self._start_btn)
-        job_row.addWidget(self._pause_btn)
-        job_row.addWidget(self._stop_btn)
-        self._dry_run_check = QtWidgets.QCheckBox("Dry Run")
-        self._dry_run_check.setToolTip("Skip spindle/laser commands (M3/M4/M5) while streaming.")
-        job_row.addWidget(self._dry_run_check)
-        job_row.addStretch(1)
-        layout.addLayout(job_row)
-
-        manual_start_row = QtWidgets.QHBoxLayout()
-        self._set_manual_start_btn = QtWidgets.QPushButton("Set Manual Start")
-        self._use_manual_start_template_btn = QtWidgets.QPushButton("Use Manual Start In Template")
-        self._go_manual_start_btn = QtWidgets.QPushButton("Go To Manual Start Safely")
-        self._manual_start_status = QtWidgets.QLabel("Manual start: not set")
-        manual_start_row.addWidget(self._set_manual_start_btn)
-        manual_start_row.addWidget(self._use_manual_start_template_btn)
-        manual_start_row.addWidget(self._go_manual_start_btn)
-        manual_start_row.addWidget(self._manual_start_status, 1)
-        layout.addLayout(manual_start_row)
-
-        cam_row = QtWidgets.QHBoxLayout()
         self._cam_status = QtWidgets.QLabel("CAM Workbench: unknown")
         self._cam_check_btn = QtWidgets.QPushButton("Check CAM")
         self._cam_activate_btn = QtWidgets.QPushButton("Activate CAM")
         self._cam_activate_btn.setEnabled(False)
-        cam_row.addWidget(self._cam_status, 1)
-        cam_row.addWidget(self._cam_check_btn)
-        cam_row.addWidget(self._cam_activate_btn)
-        cam_row.addStretch(1)
-        layout.addLayout(cam_row)
+        self._load_btn.setToolTip("Load existing G-code into the editor.")
+        self._save_btn.setToolTip("Save the current G-code editor contents.")
+        self._import_dxf_btn.setToolTip("Import a DXF file and generate basic G-code.")
+        self._cam_generate_btn.setToolTip("Open the FreeCAD CAM generator. Rectangle templates use Apply Template below.")
+        self._set_standard_icon(self._load_btn, QtWidgets.QStyle.SP_DialogOpenButton)
+        self._set_standard_icon(self._save_btn, QtWidgets.QStyle.SP_DialogSaveButton)
+        self._set_standard_icon(self._preview_btn, QtWidgets.QStyle.SP_BrowserReload)
+        source_row.addWidget(self._load_btn)
+        source_row.addWidget(self._save_btn)
+        source_row.addWidget(self._import_dxf_btn)
+        source_row.addWidget(self._cam_generate_btn)
+        source_row.addSpacing(10)
+        source_row.addWidget(self._cam_status, 1)
+        source_row.addWidget(self._cam_check_btn)
+        source_row.addWidget(self._cam_activate_btn)
+        layout.addWidget(source_group)
 
-        preview_row = QtWidgets.QHBoxLayout()
-        preview_row.addWidget(QtWidgets.QLabel("Preview"))
+        start_group, manual_start_row = self._gcode_row_group("Start Point")
+        self._use_current_tool_start_btn = QtWidgets.QPushButton("Use Tool Position as Cut Start")
+        self._set_standard_icon(self._use_current_tool_start_btn, QtWidgets.QStyle.SP_DialogApplyButton)
+        self._style_primary_button(self._use_current_tool_start_btn)
+        self._set_manual_start_btn = QtWidgets.QPushButton("Set Manual Start")
+        self._use_manual_start_template_btn = QtWidgets.QPushButton("Use Manual Start In Template")
+        self._set_manual_start_btn.setVisible(False)
+        self._use_manual_start_template_btn.setVisible(False)
+        self._go_manual_start_btn = QtWidgets.QPushButton("Go To Start Safely")
+        self._manual_start_status = QtWidgets.QLabel("Manual start: not set")
+        self._use_current_tool_start_btn.setToolTip(
+            "Read the live machine position, save it as cut start, regenerate the rectangle template, and refresh the preview."
+        )
+        self._go_manual_start_btn.setToolTip("Retract safely, move to the saved cut start, then return to the saved start Z.")
+        manual_start_row.addWidget(self._use_current_tool_start_btn)
+        manual_start_row.addWidget(self._go_manual_start_btn)
+        manual_start_row.addWidget(self._manual_start_status, 1)
+        layout.addWidget(start_group)
+
+        preview_group, preview_row = self._gcode_row_group("Preview")
+        preview_row.addWidget(QtWidgets.QLabel("View"))
         self._gcode_preview_projection = QtWidgets.QComboBox()
         self._gcode_preview_projection.addItems(["Iso", "Top", "Side", "Front"])
         self._gcode_preview_projection.setToolTip("Choose the G-code preview projection.")
         self._gcode_preview_rotation_z = QtWidgets.QComboBox()
         self._gcode_preview_rotation_z.addItems(["0", "90", "180", "270"])
         self._gcode_preview_rotation_z.setToolTip("Rotate the preview around the machine Z axis.")
-        self._open_preview_btn = QtWidgets.QPushButton("Open Preview")
-        self._snap_start_btn = QtWidgets.QPushButton("Set Cut Start Snap")
+        self._open_preview_btn = QtWidgets.QPushButton("Large View")
+        self._snap_start_btn = QtWidgets.QPushButton("Pick Start")
         self._preview_tool_area_check = QtWidgets.QCheckBox("Show Tool Area")
         self._preview_tool_area_check.setChecked(True)
-        self._pick_fit_corner_btn = QtWidgets.QPushButton("Pick Fit Corner")
+        self._pick_fit_corner_btn = QtWidgets.QPushButton("Fit Corner")
         self._prev_fit_btn = QtWidgets.QPushButton("Prev Fit")
         self._next_fit_btn = QtWidgets.QPushButton("Next Fit")
         self._fit_status = QtWidgets.QLabel("Fit: pick corner")
+        self._set_standard_icon(self._open_preview_btn, QtWidgets.QStyle.SP_FileDialogContentsView)
         preview_row.addWidget(self._gcode_preview_projection)
-        preview_row.addWidget(QtWidgets.QLabel("Z view"))
+        preview_row.addWidget(QtWidgets.QLabel("Z"))
         preview_row.addWidget(self._gcode_preview_rotation_z)
+        preview_row.addWidget(self._preview_btn)
         preview_row.addWidget(self._open_preview_btn)
         preview_row.addWidget(self._snap_start_btn)
         preview_row.addWidget(self._preview_tool_area_check)
+        preview_row.addSpacing(10)
         preview_row.addWidget(self._pick_fit_corner_btn)
         preview_row.addWidget(self._prev_fit_btn)
         preview_row.addWidget(self._next_fit_btn)
-        preview_row.addWidget(self._fit_status)
-        preview_row.addStretch(1)
-        layout.addLayout(preview_row)
+        preview_row.addWidget(self._fit_status, 1)
+        layout.addWidget(preview_group)
 
         self._template_group = self._build_template_parameters_group()
         layout.addWidget(self._template_group)
+
+        run_group, job_row = self._gcode_row_group("Run")
+        self._start_btn = QtWidgets.QPushButton("Validate + Start Cut")
+        self._validate_btn = QtWidgets.QPushButton("Validate")
+        self._air_run_apply_btn = QtWidgets.QPushButton("Preview Air Run")
+        self._air_run_btn = QtWidgets.QPushButton("Validate + Air Run")
+        self._pause_btn = QtWidgets.QPushButton("Pause")
+        self._stop_btn = QtWidgets.QPushButton("Stop")
+        self._dry_run_check = QtWidgets.QCheckBox("Dry Run")
+        self._dry_run_check.setToolTip("Skip spindle/laser commands (M3/M4/M5) while streaming.")
+        self._validate_btn.setToolTip("Validate the final generated G-code against the loaded machine profile and live GRBL offsets.")
+        self._air_run_apply_btn.setToolTip("Replace the editor contents with an air-run version. This does not move the machine.")
+        self._air_run_btn.setToolTip("Validate and stream an air-run version above the workpiece.")
+        self._start_btn.setToolTip("Validate and stream the final cutting G-code.")
+        self._set_standard_icon(self._validate_btn, QtWidgets.QStyle.SP_DialogApplyButton)
+        self._set_standard_icon(self._air_run_btn, QtWidgets.QStyle.SP_MediaPlay)
+        self._set_standard_icon(self._start_btn, QtWidgets.QStyle.SP_MediaPlay)
+        self._set_standard_icon(self._pause_btn, QtWidgets.QStyle.SP_MediaPause)
+        self._set_standard_icon(self._stop_btn, QtWidgets.QStyle.SP_MediaStop)
+        self._style_primary_button(self._air_run_btn)
+        job_row.addWidget(self._validate_btn)
+        job_row.addWidget(self._air_run_apply_btn)
+        job_row.addWidget(self._air_run_btn)
+        job_row.addWidget(self._start_btn)
+        job_row.addWidget(self._pause_btn)
+        job_row.addWidget(self._stop_btn)
+        job_row.addWidget(self._dry_run_check)
+        job_row.addStretch(1)
+        layout.addWidget(run_group)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self._gcode_edit = QtWidgets.QPlainTextEdit()
@@ -1428,6 +1473,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._start_btn.clicked.connect(self._on_start_job)
         self._pause_btn.clicked.connect(self._on_pause_resume_job)
         self._stop_btn.clicked.connect(self._on_stop_job)
+        self._use_current_tool_start_btn.clicked.connect(self._on_use_current_tool_position_as_cut_start)
         self._set_manual_start_btn.clicked.connect(self._on_set_manual_start)
         self._use_manual_start_template_btn.clicked.connect(self._on_use_manual_start_in_template)
         self._go_manual_start_btn.clicked.connect(self._on_go_to_manual_start_safely)
@@ -1685,7 +1731,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
                 pass
 
     def _build_template_parameters_group(self):
-        group = QtWidgets.QGroupBox("Rectangle Pocket Parameters")
+        group = QtWidgets.QGroupBox("Template: Rectangle Pocket")
         layout = QtWidgets.QVBoxLayout(group)
         layout.setSpacing(4)
 
@@ -1785,7 +1831,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         layout.addWidget(tabs)
 
         button_row = QtWidgets.QHBoxLayout()
-        self._template_apply_btn = QtWidgets.QPushButton("Apply Template")
+        self._template_apply_btn = QtWidgets.QPushButton("Update G-code")
         self._template_save_settings_btn = QtWidgets.QPushButton("Save Settings")
         self._template_reset_btn = QtWidgets.QPushButton("Reset Tee-Tablett")
         button_row.addWidget(self._template_apply_btn)
@@ -6263,6 +6309,17 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         self._update_preview()
         self._update_job_controls()
 
+    def _on_use_current_tool_position_as_cut_start(self):
+        allowed, reason = self._can_set_manual_start()
+        if not allowed:
+            self._append_console(f"Use current tool position blocked: {reason}", force=True)
+            if reason == "missing live position":
+                self._request_status()
+            return
+        self._on_set_manual_start()
+        if getattr(self, "_gcode_manual_start_wpos", None):
+            self._on_use_manual_start_in_template()
+
     def _can_set_manual_start(self):
         if not self._sender.is_connected():
             return False, "not connected"
@@ -6702,6 +6759,9 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         air_run_btn = getattr(self, "_air_run_btn", None)
         if air_run_btn is not None:
             air_run_btn.setEnabled(connected and not streaming and idle and has_gcode)
+        current_tool_start_btn = getattr(self, "_use_current_tool_start_btn", None)
+        if current_tool_start_btn is not None:
+            current_tool_start_btn.setEnabled(connected and not streaming and idle and not self._explore_active)
         set_manual_start_btn = getattr(self, "_set_manual_start_btn", None)
         if set_manual_start_btn is not None:
             set_manual_start_btn.setEnabled(connected and not streaming and idle and not self._explore_active)
@@ -6720,7 +6780,7 @@ class RouterKingDockWidget(QtWidgets.QWidget):
         pick_fit_btn = getattr(self, "_pick_fit_corner_btn", None)
         if pick_fit_btn is not None:
             pick_fit_btn.setEnabled(not streaming)
-            pick_fit_btn.setText("Cancel Fit Pick" if getattr(self, "_template_fit_pick_active", False) else "Pick Fit Corner")
+            pick_fit_btn.setText("Cancel Fit Pick" if getattr(self, "_template_fit_pick_active", False) else "Fit Corner")
         fit_candidates = getattr(self, "_template_fit_candidates", None) or []
         can_cycle_fit = len(fit_candidates) > 1 and not streaming
         prev_fit_btn = getattr(self, "_prev_fit_btn", None)

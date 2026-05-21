@@ -1939,6 +1939,45 @@ class TestMainDock(unittest.TestCase):
         widget._update_preview.assert_called_once_with()
         widget._update_job_controls.assert_called_once_with()
 
+    def test_use_current_tool_position_as_cut_start_saves_and_applies_template(self):
+        main_dock = _load_main_dock_module()
+        widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
+        widget._sender = _FakeConnectedSender(
+            status={
+                "state": "Idle",
+                "MPos": "-248.988,-324.538,-11.044",
+                "WCO": "0.000,0.000,1.000",
+            }
+        )
+        widget._explore_active = False
+        widget._gcode_manual_start_wpos = None
+        widget._last_template_spec = None
+        widget._template_controls = self._rectangle_template_controls()
+        widget._selected_template_source = mock.Mock(return_value={})
+        widget._gcode_edit = _DummyPlainTextEdit("")
+        widget._manual_start_status = _DummyWidget()
+        widget._append_console = mock.Mock()
+        widget._update_preview = mock.Mock()
+        widget._update_job_controls = mock.Mock()
+        widget._request_status = mock.Mock()
+        profile = {
+            "prefer_profile_limits": True,
+            "machine_limits": {"x": [-297.0, 103.0], "y": [-377.0, 23.0], "z": [-63.0, -3.0]},
+            "settings": {"$23": "3", "$27": "3"},
+            "work_offset": {"x": 0.0, "y": 0.0, "z": 1.0},
+        }
+
+        with mock.patch.object(main_dock, "grbl_load_machine_profile", return_value=(profile, "/tmp/profile.json")):
+            widget._on_use_current_tool_position_as_cut_start()
+
+        self.assertEqual(widget._gcode_manual_start_wpos, {"x": -248.988, "y": -324.538, "z": -12.044})
+        self.assertIn("; cut start target: X-248.988 Y-324.538", widget._gcode_edit.toPlainText())
+        self.assertIn("G0 X-248.988 Y-324.538", widget._gcode_edit.toPlainText())
+        self.assertEqual(widget._last_template_spec.cut_start_x, -248.988)
+        self.assertEqual(widget._last_template_spec.cut_start_y, -324.538)
+        self.assertGreaterEqual(widget._update_preview.call_count, 2)
+        self.assertGreaterEqual(widget._update_job_controls.call_count, 2)
+
     def test_preview_work_area_converts_machine_limits_to_work_coordinates(self):
         main_dock = _load_main_dock_module()
         widget = main_dock.RouterKingDockWidget.__new__(main_dock.RouterKingDockWidget)
